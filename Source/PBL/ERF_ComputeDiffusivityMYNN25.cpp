@@ -75,9 +75,10 @@ ComputeDiffusivityMYNN25 (const MultiFab& xvel,
             const auto invCellSize = geom.InvCellSizeArray();
             ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
             {
-                // q^2 / 2 is the TKE
-                qvel(i,j,k) = std::sqrt(2.0 * cell_data(i,j,k,RhoKE_comp) / cell_data(i,j,k,Rho_comp));
-                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(qvel(i,j,k) > 0.0, "KE must have a positive value");
+                // q^2 / 2 is the TKE; clamp to small positive floor (WRF uses qke_min)
+                amrex::Real tke_val = cell_data(i,j,k,RhoKE_comp) / cell_data(i,j,k,Rho_comp);
+                tke_val = amrex::max(tke_val, amrex::Real(1.0e-10));
+                qvel(i,j,k) = std::sqrt(2.0 * tke_val);
 
                 Real fac = (sbx.contains(i,j,k)) ? 1.0 : 0.0;
                 const Real Zval = Compute_Zrel_AtCellCenter(i,j,k,z_nd_arr);
@@ -88,9 +89,10 @@ ComputeDiffusivityMYNN25 (const MultiFab& xvel,
         } else {
             ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
             {
-                // q^2 / 2 is the TKE
-                qvel(i,j,k) = std::sqrt(2.0 * cell_data(i,j,k,RhoKE_comp) / cell_data(i,j,k,Rho_comp));
-                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(qvel(i,j,k) > 0.0, "KE must have a positive value");
+                // q^2 / 2 is the TKE; clamp to small positive floor (WRF uses qke_min)
+                amrex::Real tke_val = cell_data(i,j,k,RhoKE_comp) / cell_data(i,j,k,Rho_comp);
+                tke_val = amrex::max(tke_val, amrex::Real(1.0e-10));
+                qvel(i,j,k) = std::sqrt(2.0 * tke_val);
 
                 // Not multiplying by dz: it's constant and would fall out when we divide qint0/qint1 anyway
 
