@@ -3256,6 +3256,29 @@ AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
               // ADD TEMPERATURE AND WATER VAPOR TENDENCIES FROM MICROPHYSICS
               morr_arr(i,j,k,MORRInd::t3d) = morr_arr(i,j,k,MORRInd::t3d) + morr_arr(i,j,k,MORRInd::t3dten)*dt;
               morr_arr(i,j,k,MORRInd::qv3d) = morr_arr(i,j,k,MORRInd::qv3d) + morr_arr(i,j,k,MORRInd::qv3dten)*dt;
+
+              // PHYSICAL BOUNDS CHECK ON QV AND TEMPERATURE
+              // Ensure non-negative water vapor mixing ratio
+              morr_arr(i,j,k,MORRInd::qv3d) = std::max(0.0, morr_arr(i,j,k,MORRInd::qv3d));
+
+              // Temperature floor: prevent temperature from dropping below
+              // the microphysics validity range (t_low = 273.16 - 85 = 188.16 K).
+              // If temperature is clamped, adjust qv to conserve energy:
+              // sublimation absorbs latent heat (xxls), so if we prevent further
+              // cooling we must also limit the qv gained from sublimation.
+              {
+                const Real t_floor = 173.16; // K, conservative floor below validity range
+                if (morr_arr(i,j,k,MORRInd::t3d) < t_floor) {
+                  // Estimate how much qv was gained from the excess cooling
+                  // delta_T_excess = t_floor - t3d (positive), corresponds to
+                  // delta_qv_excess = delta_T_excess * cpm / xxls
+                  Real delta_T = t_floor - morr_arr(i,j,k,MORRInd::t3d);
+                  Real delta_qv = delta_T * morr_arr(i,j,k,MORRInd::cpm) / morr_arr(i,j,k,MORRInd::xxls);
+                  morr_arr(i,j,k,MORRInd::t3d) = t_floor;
+                  morr_arr(i,j,k,MORRInd::qv3d) = std::max(0.0, morr_arr(i,j,k,MORRInd::qv3d) - delta_qv);
+                }
+              }
+
               // SATURATION VAPOR PRESSURE AND MIXING RATIO
               // hm, add fix for low pressure, 5/12/10
               // Assuming POLYSVP is defined elsewhere
@@ -3566,7 +3589,14 @@ AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 
             // Temperature and potential temperature conversion
             theta_arr(i,j,k) = morr_arr(i,j,k,MORRInd::t3d) / pii_arr(i,j,k); // Convert temp back to potential temp
-            qv_arr(i,j,k) = morr_arr(i,j,k,MORRInd::qv3d);
+            qv_arr(i,j,k) = std::max(0.0, morr_arr(i,j,k,MORRInd::qv3d));
+
+            // Floor all hydrometeor mixing ratios at write-back
+            qcl_arr(i,j,k) = std::max(0.0, qcl_arr(i,j,k));
+            qci_arr(i,j,k) = std::max(0.0, qci_arr(i,j,k));
+            qpr_arr(i,j,k) = std::max(0.0, qpr_arr(i,j,k));
+            qps_arr(i,j,k) = std::max(0.0, qps_arr(i,j,k));
+            qpg_arr(i,j,k) = std::max(0.0, qpg_arr(i,j,k));
 
             //Deleted wrf-check, effc, and precr type data as not used by ERF
             /*

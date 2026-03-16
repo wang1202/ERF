@@ -35,7 +35,8 @@ amrex::Real erf_esati (amrex::Real t) {
     amrex::Real const a8 = 0.252751365e-14;
 
     amrex::Real dtt = t-273.16;
-    AMREX_ALWAYS_ASSERT(dtt>-90);
+    // Clamp to valid range instead of aborting (WRF-compatible behavior)
+    dtt = amrex::max(dtt, amrex::Real(-90.0));
 
     amrex::Real esati;
     if (dtt > 0.0) {
@@ -108,7 +109,8 @@ amrex::Real erf_dtesati (amrex::Real t) {
     amrex::Real const a8 = 0.497275778e-16;
 
     amrex::Real dtt = t-273.16;
-    AMREX_ALWAYS_ASSERT(dtt>-85);
+    // Clamp to valid range instead of aborting
+    dtt = amrex::max(dtt, amrex::Real(-85.0));
     amrex::Real dtesati;
     if (dtt > 0.0) {
         dtesati = 0.0;
