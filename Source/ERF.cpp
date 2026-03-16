@@ -3171,7 +3171,8 @@ ERF::check_for_low_temp(amrex::MultiFab& S)
     // *****************************************************************************
     //
     // This value is defined in erf_dtesati in Source/Utils/ERF_MicrophysicsUtils.H
-    Real t_low = 273.16 - 85.;
+    Real t_low = 273.16 - 120.; // 153K — only abort on truly catastrophic values
+    Real t_warn = 273.16 - 85.; // 188K — warn on values outside microphysics range
     //
     for (MFIter mfi(S); mfi.isValid(); ++mfi)
     {
@@ -3193,6 +3194,10 @@ ERF::check_for_low_temp(amrex::MultiFab& S)
                 printf("Based on temp / rhotheta / rho / qv %e %e %e %e \n", temp,rhotheta,rho,qv);
 #endif
                 Abort();
+            } else if (temp < t_warn) {
+#ifndef AMREX_USE_GPU
+                printf("WARNING: Temperature below microphysics range in cell: %d %d %d T=%e\n", i,j,k,temp);
+#endif
             }
         });
     }
