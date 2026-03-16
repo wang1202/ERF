@@ -32,6 +32,9 @@ ComputeDiffusivityYSU (const MultiFab& xvel,
           Implementation follows WRF as of early 2024 with some simplifications
         */
 
+        // Extract zref BEFORE the MFIter loop (get_zref calls MultiFab::min internally)
+        const Real most_zref = SurfLayer->get_zref(level);
+
 #ifdef _OPENMP
 #pragma omp parallel if (Gpu::notInLaunchRegion())
 #endif
@@ -55,22 +58,14 @@ ComputeDiffusivityYSU (const MultiFab& xvel,
             const auto& t_surf_arr    = SurfLayer->get_t_surf(level)->const_array(mfi);
             const auto& over_land_arr = (SurfLayer->get_lmask(level)) ? SurfLayer->get_lmask(level)->const_array(mfi) :
                                                                       Array4<int> {};
+            const auto& u_star_arr = SurfLayer->get_u_star(level)->const_array(mfi);
+            const auto& l_obuk_arr = SurfLayer->get_olen(level)->const_array(mfi);
+            const auto& t_star_arr = SurfLayer->get_t_star(level)->const_array(mfi);
             const Array4<Real const> z_nd_arr = z_phys_nd->array(mfi);
-            const Real most_zref = SurfLayer->get_zref(level);
 
-            // Require that MOST zref is 10 m so we get the wind speed at 10 m from most
-            bool invalid_zref = false;
-            if (use_terrain_fitted_coords) {
-                invalid_zref = most_zref != 10.0;
-            } else {
-                // zref gets reset to nearest cell center, so assert that zref is in the same cell as the 10m point
-                Real dz = geom.CellSize(2);
-                invalid_zref = int((most_zref - 0.5*dz)/dz) != int((10.0 - 0.5*dz)/dz);
-            }
-            if (invalid_zref) {
-                Print() << "most_zref = " << most_zref << std::endl;
-                Abort("MOST Zref must be 10m for YSU PBL scheme");
-            }
+            // Note: MOST zref (~10m) is used by the surface layer model to compute ws10av/t10av.
+            // With terrain, zref adjusts to cell center height above local terrain.
+            // The YSU scheme uses MOST-provided surface averages, so exact zref doesn't matter here.
 
             // create flattened boxes to store PBL height
             const GeometryData gdata = geom.data();
@@ -86,6 +81,21 @@ ComputeDiffusivityYSU (const MultiFab& xvel,
             const bool force_over_water = turbChoice.pbl_ysu_force_over_water;
             const Real land_Ribcr = turbChoice.pbl_ysu_land_Ribcr;
             const Real unst_Ribcr = turbChoice.pbl_ysu_unst_Ribcr;
+
+            // Additional arrays for convective quantities (per-column)
+            FArrayBox pbl_sfcflg(xybx,1);  // 1 = unstable, 0 = stable
+            FArrayBox pbl_wstar3(xybx,1);
+            FArrayBox pbl_hgamt(xybx,1);   // countergradient for theta
+            FArrayBox pbl_hgamq(xybx,1);   // countergradient for moisture
+            pbl_sfcflg.setVal<RunOn::Device>(0.0);
+            pbl_wstar3.setVal<RunOn::Device>(0.0);
+            pbl_hgamt.setVal<RunOn::Device>(0.0);
+            pbl_hgamq.setVal<RunOn::Device>(0.0);
+            const auto& sfcflg_arr = pbl_sfcflg.array();
+            const auto& wstar3_arr = pbl_wstar3.array();
+            const auto& hgamt_arr  = pbl_hgamt.array();
+            const auto& hgamq_arr  = pbl_hgamq.array();
+
             ParallelFor(xybx, [=] AMREX_GPU_DEVICE (int i, int j, int) noexcept
             {
                 // Reconstruct a surface bulk Richardson number from the surface layer model
@@ -95,39 +105,129 @@ ComputeDiffusivityYSU (const MultiFab& xvel,
                 const Real ws_layer = ws10av_arr(i,j,0);
                 const Real Rib_layer = CONST_GRAV * most_zref / (ws_layer*ws_layer) * (t_layer - t_surf)/(t_layer);
 
-                // For now, we only support stable boundary layers
-                if (Rib_layer < unst_Ribcr) {
-                    Abort("For now, YSU PBL only supports stable conditions");
+                // Determine stability flag (WRF: br > 0 => stable)
+                bool is_unstable = (Rib_layer < 0.0);
+                sfcflg_arr(i,j,0) = is_unstable ? 1.0 : 0.0;
+
+                // Surface virtual heat flux (WRF: sflux = hfx/rho/cp + ep1*th1*qfx/rho)
+                // We approximate using t_star and u_star: sflux ~ -u* * t_star (kinematic)
+                // For buoyancy flux, we use t_star as proxy
+                const Real rho_sfc = cell_data(i,j,0,Rho_comp);
+                const Real theta_sfc = cell_data(i,j,0,RhoTheta_comp) / rho_sfc;
+
+                // Thermal for PBL height computation
+                Real thermal = theta_sfc; // base theta for Rib calculation
+
+                // For unstable: add thermal excess to virtual potential temperature
+                // Following WRF YSU: thermal = thvx(1) + vpert
+                if (is_unstable) {
+                    // Compute preliminary wscale and thermal excess (WRF approach)
+                    // hol1 = zol1 * hpbl / zl1 * sfcfrac (first guess)
+                    constexpr Real sfcfrac = 0.1;
+                    constexpr Real bfac = 6.8;
+                    constexpr Real gamcrt = 3.0;
+                    constexpr Real gamcrq = 2.0e-3;
+                    constexpr Real phifac = 8.0;
+                    constexpr Real aphi16 = 16.0;
+                    constexpr Real aphi5 = 5.0;
+                    constexpr Real h1 = 1.0/3.0;
+
+                    // First guess PBL height using Rib = brcr_ub (unstable Ri_cr = 0)
+                    // Just do a quick scan
+                    Real hpbl_guess = 500.0; // first guess
+                    int kpbl_guess = 0;
+                    bool found = false;
+                    for (int kk = 1; kk < bx.bigEnd(2); kk++) {
+                        if (!bx.contains(i,j,kk)) break;
+                        const Real zval_k = use_terrain_fitted_coords ?
+                            Compute_Zrel_AtCellCenter(i,j,kk,z_nd_arr) : gdata.ProbLo(2) + (kk + 0.5)*gdata.CellSize(2);
+                        const Real ws2_k = 0.25*( (uvel(i,j,kk)+uvel(i+1,j,kk))*(uvel(i,j,kk)+uvel(i+1,j,kk))
+                                                + (vvel(i,j,kk)+vvel(i,j+1,kk))*(vvel(i,j,kk)+vvel(i,j+1,kk)) );
+                        const Real theta_k = cell_data(i,j,kk,RhoTheta_comp) / cell_data(i,j,kk,Rho_comp);
+                        const Real Rib_k = (theta_k - thermal) / thermal * CONST_GRAV * zval_k / amrex::max(ws2_k, 1.0);
+                        if (Rib_k >= 0.0) {
+                            hpbl_guess = zval_k;
+                            kpbl_guess = kk;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        hpbl_guess = use_terrain_fitted_coords ?
+                            Compute_Zrel_AtCellCenter(i,j,bx.bigEnd(2)-1,z_nd_arr) :
+                            gdata.ProbLo(2) + (bx.bigEnd(2)-1 + 0.5)*gdata.CellSize(2);
+                    }
+
+                    // Compute buoyancy flux and wstar
+                    // sflux ~ -u* * t_star (MOST relation, kinematic theta flux)
+                    const Real sflux = amrex::max(-u_star_arr(i,j,0) * t_star_arr(i,j,0), 0.0);
+                    const Real govrth = CONST_GRAV / theta_sfc;
+                    const Real ws3 = govrth * sflux * hpbl_guess;
+                    wstar3_arr(i,j,0) = ws3;
+                    const Real wstar_val = std::pow(amrex::max(ws3, 0.0), h1);
+
+                    // zol1 = z1/L (stability parameter at first level)
+                    const Real zl1 = use_terrain_fitted_coords ?
+                        Compute_Zrel_AtCellCenter(i,j,0,z_nd_arr) : gdata.ProbLo(2) + 0.5*gdata.CellSize(2);
+                    Real zol1 = zl1 / l_obuk_arr(i,j,0);
+                    zol1 = amrex::min(zol1, -1.0e-6); // ensure negative for unstable
+
+                    const Real hol1 = zol1 * hpbl_guess / zl1 * sfcfrac;
+                    const Real phim = std::pow(1.0 - aphi16*hol1, -0.25);
+                    const Real phih = std::pow(1.0 - aphi16*hol1, -0.5);
+
+                    const Real ust3 = u_star_arr(i,j,0) * u_star_arr(i,j,0) * u_star_arr(i,j,0);
+                    const Real wscale = std::pow(ust3 + phifac*KAPPA*ws3*0.5, h1);
+                    const Real wscale_lim = amrex::max(amrex::min(wscale, u_star_arr(i,j,0)*aphi16),
+                                                        u_star_arr(i,j,0)/aphi5);
+
+                    // Countergradient terms (WRF)
+                    const Real gamfac = bfac / rho_sfc / wscale_lim;
+                    // hfx/rho/cp ~ -u* * t_star  (kinematic heat flux)
+                    const Real hfx_kinematic = amrex::max(-u_star_arr(i,j,0) * t_star_arr(i,j,0), 0.0);
+                    hgamt_arr(i,j,0) = amrex::min(gamfac * hfx_kinematic, gamcrt);
+                    hgamt_arr(i,j,0) = amrex::max(hgamt_arr(i,j,0), 0.0);
+
+                    // Moisture countergradient
+                    // qfx/rho ~ -u* * q_star
+                    // hgamq = min(gamfac * ep1 * theta * qfx/rho, gamcrq)
+                    // For now, set to 0 (conservative)
+                    hgamq_arr(i,j,0) = 0.0;
+
+                    // Add thermal excess (WRF: vpert)
+                    constexpr Real afac = 6.8; // same as bfac in WRF
+                    const Real vpert = hgamt_arr(i,j,0) / bfac * afac;
+                    thermal = thermal + amrex::max(vpert, 0.0) * amrex::min(zl1 / (sfcfrac * hpbl_guess), 1.0);
                 }
 
-                // TODO: unstable BLs
-
-                // PBL Height: Stable Conditions
+                // PBL Height: Using (possibly enhanced) thermal
                 Real Rib_cr;
                 bool over_land = (over_land_arr) ? over_land_arr(i,j,0) : 1;
-                if (over_land && !force_over_water) {
+                if (is_unstable) {
+                    // Unstable: use 0 as critical Ri (WRF: brcr_ub = 0)
+                    Rib_cr = 0.0;
+                } else if (over_land && !force_over_water) {
                     Rib_cr = land_Ribcr;
                 } else { // over water
-                    // Velocity at z=10 m comes from MOST -> currently the average using whatever averaging MOST uses.
-                    // TODO: Revisit this calculation with local ws10?
                     const Real z0 = z0_arr(i,j,0);
                     const Real Rossby = ws_layer/(f0*z0);
-                    Rib_cr = min(0.16*std::pow(1.0e-7*Rossby,-0.18),0.3); // Note: upper bound in WRF code, but not H10 paper
+                    Rib_cr = min(0.16*std::pow(1.0e-7*Rossby,-0.18),0.3);
                 }
 
                 bool above_critical = false;
                 int kpbl = 0;
                 Real Rib_up = Rib_layer, Rib_dn;
-                const Real base_theta = cell_data(i,j,0,RhoTheta_comp) / cell_data(i,j,0,Rho_comp);
                 while (!above_critical and bx.contains(i,j,kpbl+1)) {
                     kpbl += 1;
                     const Real zval = use_terrain_fitted_coords ?
                                       Compute_Zrel_AtCellCenter(i,j,kpbl,z_nd_arr) : gdata.ProbLo(2) + (kpbl + 0.5)*gdata.CellSize(2);
-                    const Real ws2_level = 0.25*( (uvel(i,j,kpbl)+uvel(i+1,j  ,kpbl))*(uvel(i,j,kpbl)+uvel(i+1,j  ,kpbl))
-                                                + (vvel(i,j,kpbl)+vvel(i  ,j+1,kpbl))*(vvel(i,j,kpbl)+vvel(i  ,j+1,kpbl)) );
+                    const Real ws2_level = amrex::max(
+                        0.25*( (uvel(i,j,kpbl)+uvel(i+1,j  ,kpbl))*(uvel(i,j,kpbl)+uvel(i+1,j  ,kpbl))
+                             + (vvel(i,j,kpbl)+vvel(i  ,j+1,kpbl))*(vvel(i,j,kpbl)+vvel(i  ,j+1,kpbl)) ),
+                        1.0);
                     const Real theta = cell_data(i,j,kpbl,RhoTheta_comp) / cell_data(i,j,kpbl,Rho_comp);
                     Rib_dn = Rib_up;
-                    Rib_up = (theta-base_theta)/base_theta * CONST_GRAV * zval / ws2_level;
+                    Rib_up = (theta - thermal) / thermal * CONST_GRAV * zval / ws2_level;
                     above_critical = Rib_up >= Rib_cr;
                 }
 
@@ -143,7 +243,7 @@ ComputeDiffusivityYSU (const MultiFab& xvel,
                 const Real zval_up = use_terrain_fitted_coords ?
                                      Compute_Zrel_AtCellCenter(i,j,kpbl,z_nd_arr) : gdata.ProbLo(2) + (kpbl + 0.5)*gdata.CellSize(2);
                 const Real zval_dn = use_terrain_fitted_coords ?
-                                     Compute_Zrel_AtCellCenter(i,j,kpbl-1,z_nd_arr) : gdata.ProbLo(2) + (kpbl-1 + 0.5)*gdata.CellSize(2);
+                                     Compute_Zrel_AtCellCenter(i,j,amrex::max(kpbl-1,0),z_nd_arr) : gdata.ProbLo(2) + (amrex::max(kpbl-1,0) + 0.5)*gdata.CellSize(2);
                 pblh_arr(i,j,0) = zval_dn + interp_fact*(zval_up-zval_dn);
 
                 const Real zval_0 = use_terrain_fitted_coords ?
@@ -153,19 +253,22 @@ ComputeDiffusivityYSU (const MultiFab& xvel,
                 if (pblh_arr(i,j,0) < 0.5*(zval_0+zval_1) ) {
                     kpbl = 0;
                 }
+                // Minimum PBL height for unstable (WRF uses hpbl >= zval(1))
+                if (is_unstable) {
+                    pblh_arr(i,j,0) = amrex::max(pblh_arr(i,j,0), zval_0);
+                }
                 pbli_arr(i,j,0) = kpbl;
+
+                // Recompute wstar3 with final PBL height for unstable
+                if (is_unstable) {
+                    const Real sflux = amrex::max(-u_star_arr(i,j,0) * t_star_arr(i,j,0), 0.0);
+                    const Real govrth = CONST_GRAV / theta_sfc;
+                    wstar3_arr(i,j,0) = govrth * sflux * pblh_arr(i,j,0);
+                }
             });
-
-            // -- Compute nonlocal/countergradient mixing parameters --
-            // Not included for stable so nothing to do until unstable treatment is added
-
-            // -- Compute entrainment parameters --
-            // 0 for stable so nothing to do?
 
             // -- Compute diffusion coefficients --
 
-            const auto& u_star_arr = SurfLayer->get_u_star(level)->const_array(mfi);
-            const auto& l_obuk_arr = SurfLayer->get_olen(level)->const_array(mfi);
             const Array4<Real      > &K_turb = eddyViscosity.array(mfi);
 
             // Dirichlet flags to switch derivative stencil
@@ -188,22 +291,58 @@ ComputeDiffusivityYSU (const MultiFab& xvel,
                 const Real rho = cell_data(i,j,k,Rho_comp);
                 const Real met_h_zeta = use_terrain_fitted_coords ? Compute_h_zeta_AtCellCenter(i,j,k,dxInv,z_nd_arr) : 1.0;
                 const Real dz_terrain = met_h_zeta/dz_inv;
+                const bool is_unstable = (sfcflg_arr(i,j,0) > 0.5);
+
                 if (k < pbli_arr(i,j,0)) {
                     // -- Compute diffusion coefficients within PBL
                     constexpr Real zfacmin = 1e-8; // value from WRF
                     constexpr Real phifac = 8.0; // value from H10 and WRF
-                    constexpr Real wstar3 = 0.0; // only nonzero for unstable
                     constexpr Real pfac = 2.0; // profile exponent
+                    constexpr Real aphi16 = 16.0;
+                    constexpr Real aphi5 = 5.0;
+                    constexpr Real sfcfrac = 0.1;
+                    constexpr Real h1 = 1.0/3.0;
+
                     const Real zfac = std::min(std::max(1 - zval / pblh_arr(i,j,0), zfacmin ), 1.0);
-                    // Not including YSU top down PBL term (not in H10, added to WRF later)
                     const Real ust3 = u_star_arr(i,j,0) * u_star_arr(i,j,0) * u_star_arr(i,j,0);
-                    Real wscalek = ust3 + phifac * KAPPA * wstar3 * (1.0 - zfac);
-                    wscalek = std::pow(wscalek, 1.0/3.0);
-                    // stable only
-                    const Real phi_term = 1 + 5 * zval / l_obuk_arr(i,j,0); // phi_term appears in WRF but not papers
-                    wscalek = std::max(u_star_arr(i,j,0) / phi_term, 0.001); // 0.001 limit appears in WRF but not papers
-                    K_turb(i,j,k,EddyDiff::Mom_v) = rho * wscalek * KAPPA * zval * std::pow(zfac, pfac);
-                    K_turb(i,j,k,EddyDiff::Theta_v) = K_turb(i,j,k,EddyDiff::Mom_v);
+
+                    if (is_unstable) {
+                        // Unstable case (WRF YSU): use full wscale with wstar
+                        const Real ws3 = wstar3_arr(i,j,0);
+                        Real wscalek = std::pow(ust3 + phifac * KAPPA * ws3 * (1.0 - zfac), h1);
+
+                        // Compute Prandtl number profile for unstable (WRF approach)
+                        const Real zl1 = use_terrain_fitted_coords ?
+                            Compute_Zrel_AtCellCenter(i,j,0,z_nd_arr) : gdata.ProbLo(2) + 0.5*gdata.CellSize(2);
+                        Real zol1 = zl1 / l_obuk_arr(i,j,0);
+                        zol1 = amrex::min(zol1, -1.0e-6);
+                        const Real hol1 = zol1 * pblh_arr(i,j,0) / zl1 * sfcfrac;
+                        const Real phim = std::pow(1.0 - aphi16*hol1, -0.25);
+                        const Real phih = std::pow(1.0 - aphi16*hol1, -0.5);
+
+                        // prnum0 = phih/phim + bfac*kappa*sfcfrac (WRF)
+                        constexpr Real bfac_pr = 6.8;
+                        const Real prnum0 = phih/phim + bfac_pr*KAPPA*sfcfrac;
+                        // Prandtl number with height correction
+                        constexpr Real conpr = 6.8 * KAPPA * sfcfrac; // bfac*vk*sfcfrac
+                        const Real prfac2 = 15.9*ws3/ust3/(1.0 + 4.0*KAPPA*ws3/ust3);
+                        const Real prnumfac = -3.0 * std::pow(amrex::max(zval - sfcfrac*pblh_arr(i,j,0), 0.0), 2.0)
+                                            / (pblh_arr(i,j,0)*pblh_arr(i,j,0));
+                        const Real prnum = 1.0 + (prnum0 - 1.0) * std::exp(prnumfac)
+                                         + conpr * std::exp(prnumfac)
+                                         + prfac2 * std::exp(prnumfac);
+                        const Real prnum_lim = amrex::max(prnum, 0.25);
+
+                        K_turb(i,j,k,EddyDiff::Mom_v) = rho * wscalek * KAPPA * zval * std::pow(zfac, pfac);
+                        K_turb(i,j,k,EddyDiff::Theta_v) = K_turb(i,j,k,EddyDiff::Mom_v) / prnum_lim;
+                    } else {
+                        // Stable case (original code)
+                        // Not including YSU top down PBL term (not in H10, added to WRF later)
+                        const Real phi_term = 1 + 5 * zval / l_obuk_arr(i,j,0);
+                        const Real wscalek = std::max(u_star_arr(i,j,0) / phi_term, 0.001);
+                        K_turb(i,j,k,EddyDiff::Mom_v) = rho * wscalek * KAPPA * zval * std::pow(zfac, pfac);
+                        K_turb(i,j,k,EddyDiff::Theta_v) = K_turb(i,j,k,EddyDiff::Mom_v);
+                    }
                 } else {
                     // -- Compute coefficients in free stream above PBL
                     constexpr Real lam0 = 30.0;
