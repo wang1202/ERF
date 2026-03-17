@@ -646,6 +646,8 @@ Radiation::mf_to_kokkos_buffers (iMultiFab* lmask,
     {
         t_lev_tab(icol,0) = t_sfc_tab(icol);
     });
+
+
 }
 
 
@@ -764,6 +766,272 @@ Radiation::kokkos_buffers_to_mf (Vector<MultiFab*>& lsm_output_ptrs)
         } // ivar
     }// mfi
 }
+
+
+void
+Radiation::mf_to_kokkos_buffers_single (const MFIter& mfi)
+{
+    // Single-box version: fills Kokkos views from one AMReX box with offset=0
+    Table2D<Real,Order::C> r_lay_tab(r_lay.data(), {0,0}, {static_cast<int>(r_lay.extent(0)),static_cast<int>(r_lay.extent(1))});
+    Table2D<Real,Order::C> p_lay_tab(p_lay.data(), {0,0}, {static_cast<int>(p_lay.extent(0)),static_cast<int>(p_lay.extent(1))});
+    Table2D<Real,Order::C> t_lay_tab(t_lay.data(), {0,0}, {static_cast<int>(t_lay.extent(0)),static_cast<int>(t_lay.extent(1))});
+    Table2D<Real,Order::C> z_del_tab(z_del.data(), {0,0}, {static_cast<int>(z_del.extent(0)),static_cast<int>(z_del.extent(1))});
+    Table2D<Real,Order::C> qv_lay_tab(qv_lay.data(), {0,0}, {static_cast<int>(qv_lay.extent(0)),static_cast<int>(qv_lay.extent(1))});
+    Table2D<Real,Order::C> qc_lay_tab(qc_lay.data(), {0,0}, {static_cast<int>(qc_lay.extent(0)),static_cast<int>(qc_lay.extent(1))});
+    Table2D<Real,Order::C> qi_lay_tab(qi_lay.data(), {0,0}, {static_cast<int>(qi_lay.extent(0)),static_cast<int>(qi_lay.extent(1))});
+    Table2D<Real,Order::C> cldfrac_tot_tab(cldfrac_tot.data(), {0,0}, {static_cast<int>(cldfrac_tot.extent(0)),static_cast<int>(cldfrac_tot.extent(1))});
+    Table2D<Real,Order::C> lwp_tab(lwp.data(), {0,0}, {static_cast<int>(lwp.extent(0)),static_cast<int>(lwp.extent(1))});
+    Table2D<Real,Order::C> iwp_tab(iwp.data(), {0,0}, {static_cast<int>(iwp.extent(0)),static_cast<int>(iwp.extent(1))});
+    Table2D<Real,Order::C> eff_radius_qc_tab(eff_radius_qc.data(), {0,0}, {static_cast<int>(eff_radius_qc.extent(0)),static_cast<int>(eff_radius_qc.extent(1))});
+    Table2D<Real,Order::C> eff_radius_qi_tab(eff_radius_qi.data(), {0,0}, {static_cast<int>(eff_radius_qi.extent(0)),static_cast<int>(eff_radius_qi.extent(1))});
+    Table2D<Real,Order::C> p_lev_tab(p_lev.data(), {0,0}, {static_cast<int>(p_lev.extent(0)),static_cast<int>(p_lev.extent(1))});
+    Table2D<Real,Order::C> t_lev_tab(t_lev.data(), {0,0}, {static_cast<int>(t_lev.extent(0)),static_cast<int>(t_lev.extent(1))});
+    Table1D<Real> lat_tab(lat.data(), {0}, {static_cast<int>(lat.extent(0))});
+    Table1D<Real> lon_tab(lon.data(), {0}, {static_cast<int>(lon.extent(0))});
+    Table1D<Real> t_sfc_tab(t_sfc.data(), {0}, {static_cast<int>(t_sfc.extent(0))});
+
+    bool moist = m_moist;
+    bool ice   = m_ice;
+    const bool has_lsm = m_lsm;
+    const bool has_lat = m_lat;
+    const bool has_lon = m_lon;
+    const bool has_surflayer = (m_p_t_surf);
+    int  ncol  = m_ncol;
+    int  nlay  = m_nlay;
+    Real dz    = m_geom.CellSize(2);
+    Real cons_lat = m_lat_cons;
+    Real cons_lon = m_lon_cons;
+    Real rad_t_sfc = m_rad_t_sfc;
+
+    {
+        const auto& vbx  = mfi.validbox();
+        const int nx     = vbx.length(0);
+        const int imin   = vbx.smallEnd(0);
+        const int jmin   = vbx.smallEnd(1);
+        const int offset = 0; // Single box, offset is always 0
+        const Array4<const Real>& cons_arr = m_cons_in->const_array(mfi);
+        const Array4<const Real>& z_arr    = (m_z_phys) ? m_z_phys->const_array(mfi) :
+                                                          Array4<const Real>{};
+        const Array4<const Real>& lat_arr  = (m_lat)    ? m_lat->const_array(mfi) :
+                                                          Array4<const Real>{};
+        const Array4<const Real>& lon_arr  = (m_lon)    ? m_lon->const_array(mfi) :
+                                                          Array4<const Real>{};
+        ParallelFor(vbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            const int icol   = (j-jmin)*nx + (i-imin) + offset;
+            const int ilay   = k;
+
+            Real r  = cons_arr(i,j,k,Rho_comp);
+            Real rt = cons_arr(i,j,k,RhoTheta_comp);
+            Real qv = (moist) ? std::max(cons_arr(i,j,k,RhoQ1_comp)/r,0.0) : 0.0;
+            Real qc = (moist) ? std::max(cons_arr(i,j,k,RhoQ2_comp)/r,0.0) : 0.0;
+            Real qi = (ice)   ? std::max(cons_arr(i,j,k,RhoQ3_comp)/r,0.0) : 0.0;
+
+            Real r_lo   = cons_arr(i,j,k-1,Rho_comp);
+            Real rt_lo  = cons_arr(i,j,k-1,RhoTheta_comp);
+            Real qv_lo  = (moist) ? cons_arr(i,j,k-1,RhoQ1_comp)/r_lo : 0.0;
+            Real dz_k   = (z_arr) ? 0.125 * ( (z_arr(i  ,j  ,k+1) - z_arr(i  ,j  ,k))
+                                            + (z_arr(i+1,j  ,k+1) - z_arr(i+1,j  ,k))
+                                            + (z_arr(i  ,j+1,k+1) - z_arr(i  ,j+1,k))
+                                              + (z_arr(i+1,j+1,k+1) - z_arr(i+1,j+1,k)) ) : 0.5*dz;
+            Real dz_km1 = (z_arr) ? 0.125 * ( (z_arr(i  ,j  ,k  ) - z_arr(i  ,j  ,k-1))
+                                            + (z_arr(i+1,j  ,k  ) - z_arr(i+1,j  ,k-1))
+                                            + (z_arr(i  ,j+1,k  ) - z_arr(i  ,j+1,k-1))
+                                            + (z_arr(i+1,j+1,k  ) - z_arr(i+1,j+1,k-1)) ) : 0.5*dz;
+            Real r_avg  = (dz_k*r  + dz_km1*r_lo ) / (dz_k + dz_km1);
+            Real rt_avg = (dz_k*rt + dz_km1*rt_lo) / (dz_k + dz_km1);
+            Real qv_avg = (dz_k*qv + dz_km1*qv_lo) / (dz_k + dz_km1);
+
+            r_lay_tab(icol,ilay) = r;
+            p_lay_tab(icol,ilay) = getPgivenRTh(rt, qv);
+            t_lay_tab(icol,ilay) = getTgivenRandRTh(r, rt, qv);
+            z_del_tab(icol,ilay) = (z_arr) ? 0.25 * ( (z_arr(i  ,j  ,k+1) - z_arr(i  ,j  ,k))
+                                                    + (z_arr(i+1,j  ,k+1) - z_arr(i+1,j  ,k))
+                                                    + (z_arr(i  ,j+1,k+1) - z_arr(i  ,j+1,k))
+                                                    + (z_arr(i+1,j+1,k+1) - z_arr(i+1,j+1,k)) ) : dz;
+            qv_lay_tab(icol,ilay) = qv;
+            qc_lay_tab(icol,ilay) = qc;
+            qi_lay_tab(icol,ilay) = qi;
+            cldfrac_tot_tab(icol,ilay) = ((qc+qi)>0.0) ? 1. : 0.;
+            lwp_tab(icol,ilay) = 0.0;
+            iwp_tab(icol,ilay) = 0.0;
+            eff_radius_qc_tab(icol,ilay) = (qc>0.0) ? 10.0 : 0.0;
+            eff_radius_qi_tab(icol,ilay) = (qi>0.0) ? 25.0 : 0.0;
+            p_lev_tab(icol,ilay) = getPgivenRTh(rt_avg, qv_avg);
+            t_lev_tab(icol,ilay) = getTgivenRandRTh(r_avg, rt_avg, qv_avg);
+            if (ilay==(nlay-1)) {
+                Real r_hi  = cons_arr(i,j,k+1,Rho_comp);
+                Real rt_hi = cons_arr(i,j,k+1,RhoTheta_comp);
+                Real qv_hi = (moist) ? std::max(cons_arr(i,j,k+1,RhoQ1_comp)/r_hi,0.0) : 0.0;
+                Real dz_kp1 = (z_arr) ? 0.125 * ( (z_arr(i  ,j  ,k+2) - z_arr(i  ,j  ,k+1))
+                                                + (z_arr(i+1,j  ,k+2) - z_arr(i+1,j  ,k+1))
+                                                + (z_arr(i  ,j+1,k+2) - z_arr(i  ,j+1,k+1))
+                                                + (z_arr(i+1,j+1,k+2) - z_arr(i+1,j+1,k+1)) ) : 0.5*dz;
+                r_avg  = (dz_k*r  + dz_kp1*r_hi ) / (dz_k + dz_kp1);
+                rt_avg = (dz_k*rt + dz_kp1*rt_hi) / (dz_k + dz_kp1);
+                qv_avg = (dz_k*qv + dz_kp1*qv_hi) / (dz_k + dz_kp1);
+                p_lev_tab(icol,ilay+1) = getPgivenRTh(rt_avg, qv_avg);
+                t_lev_tab(icol,ilay+1) = getTgivenRandRTh(r_avg, rt_avg, qv_avg);
+            }
+            if (k==0) {
+                lat_tab(icol) = (has_lat) ? lat_arr(i,j,0) : cons_lat;
+                lon_tab(icol) = (has_lon) ? lon_arr(i,j,0) : cons_lon;
+            }
+        });
+    } // single box
+
+    // Populate surface fields
+    if (!has_lsm && !has_surflayer) {
+        Kokkos::deep_copy(t_sfc, rad_t_sfc);
+        Kokkos::deep_copy(sfc_alb_dir_vis, 0.06);
+        Kokkos::deep_copy(sfc_alb_dir_nir, 0.06);
+        Kokkos::deep_copy(sfc_alb_dif_vis, 0.06);
+        Kokkos::deep_copy(sfc_alb_dif_nir, 0.06);
+        Kokkos::deep_copy(sfc_emis, 0.98);
+        Kokkos::deep_copy(lw_src  , 0.0 );
+    } else {
+        Vector<real1d_k> rrtmgp_in_vars = {t_sfc, sfc_emis,
+                                           sfc_alb_dir_vis, sfc_alb_dir_nir,
+                                           sfc_alb_dif_vis, sfc_alb_dif_nir};
+        Vector<Real> rrtmgp_default_vals = {rad_t_sfc, 0.98,
+                                            0.06, 0.06,
+                                            0.06, 0.06};
+        for (int ivar(0); ivar<m_p_lsm_input_ptrs->size(); ivar++) {
+            auto rrtmgp_default_val = rrtmgp_default_vals[ivar];
+            auto rrtmgp_to_fill_k = rrtmgp_in_vars[ivar];
+            amrex::Table1D<amrex::Real> rrtmgp_to_fill(rrtmgp_to_fill_k.data(),
+                                                       0, rrtmgp_to_fill_k.extent(0));
+            {
+                const auto& vbx  = mfi.validbox();
+                const auto& sbx  = makeSlab(vbx,2,vbx.smallEnd(2));
+                const int nx     = vbx.length(0);
+                const int imin   = vbx.smallEnd(0);
+                const int jmin   = vbx.smallEnd(1);
+                const int offset = 0;
+                const Array4<const int>& lmask_arr  = (m_p_lmask)   ? m_p_lmask->const_array(mfi) :
+                                                                      Array4<const int> {};
+                const Array4<const Real>& tsurf_arr  = (m_p_t_surf) ? m_p_t_surf->const_array(mfi) :
+                                                                      Array4<const Real> {};
+                const Array4<const Real>& lsm_in_arr = ((*m_p_lsm_input_ptrs)[ivar]) ? (*m_p_lsm_input_ptrs)[ivar]->const_array(mfi) :
+                                                                                        Array4<const Real> {};
+                ParallelFor(sbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    const int icol   = (j-jmin)*nx + (i-imin) + offset;
+                    bool is_land = (lmask_arr) ? lmask_arr(i,j,k) : 1;
+                    bool valid_lsm_data{false};
+                    if (lsm_in_arr) { valid_lsm_data = (lsm_in_arr(i,j,k) > 0.); }
+                    if (is_land && valid_lsm_data) {
+                        rrtmgp_to_fill(icol) = lsm_in_arr(i,j,k);
+                    } else if (tsurf_arr && (ivar==0)) {
+                        rrtmgp_to_fill(icol) = tsurf_arr(i,j,k);
+                    } else {
+                        rrtmgp_to_fill(icol) = rrtmgp_default_val;
+                    }
+                });
+            }
+        }
+        Kokkos::deep_copy(lw_src, 0.0 );
+    }
+
+    // Enforce consistency between t_sfc and t_lev at bottom surface
+    Kokkos::parallel_for(Kokkos::RangePolicy(0, ncol),
+                         KOKKOS_LAMBDA (int icol)
+    {
+        t_lev_tab(icol,0) = t_sfc_tab(icol);
+    });
+}
+
+
+void
+Radiation::kokkos_buffers_to_mf_single (const MFIter& mfi,
+                                        Vector<MultiFab*>& lsm_output_ptrs)
+{
+    Vector<real2d_k> rrtmgp_out_vars = {sw_flux_dn, lw_flux_dn};
+
+    Table2D<Real,Order::C> p_lay_tab(p_lay.data(), {0,0}, {static_cast<int>(p_lay.extent(0)),static_cast<int>(p_lay.extent(1))});
+    Table2D<Real,Order::C> sw_heating_tab(sw_heating.data(), {0,0}, {static_cast<int>(sw_heating.extent(0)),static_cast<int>(sw_heating.extent(1))});
+    Table2D<Real,Order::C> lw_heating_tab(lw_heating.data(), {0,0}, {static_cast<int>(lw_heating.extent(0)),static_cast<int>(lw_heating.extent(1))});
+    Table2D<Real,Order::C> sw_flux_up_tab(sw_flux_up.data(), {0,0}, {static_cast<int>(sw_flux_up.extent(0)),static_cast<int>(sw_flux_up.extent(1))});
+    Table2D<Real,Order::C> sw_flux_dn_tab(sw_flux_dn.data(), {0,0}, {static_cast<int>(sw_flux_dn.extent(0)),static_cast<int>(sw_flux_dn.extent(1))});
+    Table2D<Real,Order::C> lw_flux_up_tab(lw_flux_up.data(), {0,0}, {static_cast<int>(lw_flux_up.extent(0)),static_cast<int>(lw_flux_up.extent(1))});
+    Table2D<Real,Order::C> lw_flux_dn_tab(lw_flux_dn.data(), {0,0}, {static_cast<int>(lw_flux_dn.extent(0)),static_cast<int>(lw_flux_dn.extent(1))});
+    Table1D<Real> sfc_flux_dir_vis_tab(sfc_flux_dir_vis.data(), {0}, {static_cast<int>(sfc_flux_dir_vis.extent(0))});
+    Table1D<Real> sfc_flux_dir_nir_tab(sfc_flux_dir_nir.data(), {0}, {static_cast<int>(sfc_flux_dir_nir.extent(0))});
+    Table1D<Real> sfc_flux_dif_vis_tab(sfc_flux_dif_vis.data(), {0}, {static_cast<int>(sfc_flux_dif_vis.extent(0))});
+    Table1D<Real> sfc_flux_dif_nir_tab(sfc_flux_dif_nir.data(), {0}, {static_cast<int>(sfc_flux_dif_nir.extent(0))});
+    Table1D<Real>              mu0_tab(mu0.data(),              {0}, {static_cast<int>(mu0.extent(0))});
+
+    {
+        const auto& vbx      = mfi.validbox();
+        const auto& sbx      = makeSlab(vbx,2,vbx.smallEnd(2));
+        const int nx         = vbx.length(0);
+        const int imin       = vbx.smallEnd(0);
+        const int jmin       = vbx.smallEnd(1);
+        const int offset     = 0; // Single box
+        const Array4<Real>& q_arr = m_qheating_rates->array(mfi);
+        const Array4<Real>& f_arr = m_rad_fluxes->array(mfi);
+        ParallelFor(vbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            const int icol = (j-jmin)*nx + (i-imin) + offset;
+            const int ilay = k;
+            q_arr(i,j,k,0) = sw_heating_tab(icol,ilay);
+            q_arr(i,j,k,1) = lw_heating_tab(icol,ilay);
+            Real iexner = 1./getExnergivenP(Real(p_lay_tab(icol,ilay)), R_d/Cp_d);
+            q_arr(i,j,k,0) *= iexner;
+            q_arr(i,j,k,1) *= iexner;
+            f_arr(i,j,k,0) = sw_flux_up_tab(icol,ilay);
+            f_arr(i,j,k,1) = sw_flux_dn_tab(icol,ilay);
+            f_arr(i,j,k,2) = lw_flux_up_tab(icol,ilay);
+            f_arr(i,j,k,3) = lw_flux_dn_tab(icol,ilay);
+        });
+        if (m_lsm_fluxes) {
+            const Array4<Real>& lsm_arr =  m_lsm_fluxes->array(mfi);
+            ParallelFor(sbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                const int icol = (j-jmin)*nx + (i-imin) + offset;
+                lsm_arr(i,j,k,0) = sfc_flux_dir_vis_tab(icol);
+                lsm_arr(i,j,k,1) = sfc_flux_dir_nir_tab(icol);
+                lsm_arr(i,j,k,2) = sfc_flux_dif_vis_tab(icol);
+                lsm_arr(i,j,k,3) = sfc_flux_dif_nir_tab(icol);
+                lsm_arr(i,j,k,4) = sfc_flux_dir_vis_tab(icol) + sfc_flux_dir_nir_tab(icol)
+                                 + sfc_flux_dif_vis_tab(icol) + sfc_flux_dif_nir_tab(icol);
+                lsm_arr(i,j,k,5) = lw_flux_dn_tab(icol,0);
+            });
+        }
+        if (m_lsm_zenith) {
+            const Array4<Real>& lsm_zenith_arr =  m_lsm_zenith->array(mfi);
+            ParallelFor(sbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                const int icol = (j-jmin)*nx + (i-imin) + offset;
+                lsm_zenith_arr(i,j,k) = mu0_tab(icol);
+            });
+        }
+        for (int ivar(0); ivar<lsm_output_ptrs.size(); ivar++) {
+            if (lsm_output_ptrs[ivar]) {
+                const Array4<Real>& lsm_out_arr = lsm_output_ptrs[ivar]->array(mfi);
+                if (ivar==0) {
+                    ParallelFor(sbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        const int icol   = (j-jmin)*nx + (i-imin) + offset;
+                        lsm_out_arr(i,j,k) = mu0_tab(icol);
+                    });
+                } else {
+                    auto rrtmgp_for_fill_k = rrtmgp_out_vars[ivar-1];
+                    amrex::Table2D<amrex::Real const, amrex::Order::C>
+                        rrtmgp_for_fill(rrtmgp_for_fill_k.data(),
+                                        {0,0}, {int(rrtmgp_for_fill_k.extent(0)),
+                                                int(rrtmgp_for_fill_k.extent(1))});
+                    ParallelFor(sbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        const int icol   = (j-jmin)*nx + (i-imin) + offset;
+                        lsm_out_arr(i,j,k) = rrtmgp_for_fill(icol,0);
+                    });
+                }
+            }
+        }
+    } // single box
+}
+
 
 void
 Radiation::write_rrtmgp_fluxes ()
@@ -1188,6 +1456,7 @@ Radiation::run_impl ()
                                                  sfc_alb_dir_vis, sfc_alb_dir_nir,
                                                  sfc_alb_dif_vis, sfc_alb_dif_nir,
                                                  sfc_alb_dir    , sfc_alb_dif);
+
     // Run RRTMGP driver
     rrtmgp::rrtmgp_main(ncol, m_nlay,
                         p_lay, t_lay,
@@ -1281,6 +1550,39 @@ Radiation::run_impl ()
     // Update heating tendency
     rrtmgp::compute_heating_rate(sw_flux_up, sw_flux_dn, r_lay, z_del, sw_heating);
     rrtmgp::compute_heating_rate(lw_flux_up, lw_flux_dn, r_lay, z_del, lw_heating);
+
+    // Diagnostic: print max/min heating rates
+    {
+        auto sw_h = sw_heating;
+        auto lw_h = lw_heating;
+        Real sw_max = 0, sw_min = 0, lw_max = 0, lw_min = 0;
+        Kokkos::parallel_reduce(ncol * nlay,
+            KOKKOS_LAMBDA(int idx, Real& mx) {
+                int icol = idx / nlay;
+                int ilay = idx % nlay;
+                mx = Kokkos::fmax(mx, sw_h(icol, ilay));
+            }, Kokkos::Max<Real>(sw_max));
+        Kokkos::parallel_reduce(ncol * nlay,
+            KOKKOS_LAMBDA(int idx, Real& mn) {
+                int icol = idx / nlay;
+                int ilay = idx % nlay;
+                mn = Kokkos::fmin(mn, sw_h(icol, ilay));
+            }, Kokkos::Min<Real>(sw_min));
+        Kokkos::parallel_reduce(ncol * nlay,
+            KOKKOS_LAMBDA(int idx, Real& mx) {
+                int icol = idx / nlay;
+                int ilay = idx % nlay;
+                mx = Kokkos::fmax(mx, lw_h(icol, ilay));
+            }, Kokkos::Max<Real>(lw_max));
+        Kokkos::parallel_reduce(ncol * nlay,
+            KOKKOS_LAMBDA(int idx, Real& mn) {
+                int icol = idx / nlay;
+                int ilay = idx % nlay;
+                mn = Kokkos::fmin(mn, lw_h(icol, ilay));
+            }, Kokkos::Min<Real>(lw_min));
+        amrex::Print() << "Heating rates (K/s): SW=[" << sw_min << ", " << sw_max
+                       << "] LW=[" << lw_min << ", " << lw_max << "]\n";
+    }
 
     /*
     // AML DEBUG

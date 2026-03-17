@@ -147,9 +147,18 @@ public:
                          amrex::MultiFab*  t_surf,
                          amrex::Vector<amrex::MultiFab*>& lsm_input_ptrs);
 
+    // Fill KOKKOS Views from a single AMReX box (per-box radiation)
+    void
+    mf_to_kokkos_buffers_single(const amrex::MFIter& mfi);
+
     // Fill AMReX MultiFabs from KOKKOS Views
     void
     kokkos_buffers_to_mf (amrex::Vector<amrex::MultiFab*>& lsm_output_ptrs);
+
+    // Fill a single AMReX box from KOKKOS Views (per-box radiation)
+    void
+    kokkos_buffers_to_mf_single (const amrex::MFIter& mfi,
+                                 amrex::Vector<amrex::MultiFab*>& lsm_output_ptrs);
 
     // Write the rrtmgp fluxes
     void
@@ -271,6 +280,11 @@ private:
     amrex::MultiFab* m_lat = nullptr;
     amrex::MultiFab* m_lon = nullptr;
 
+    // Cached pointers for per-box radiation (set in set_grids, used in rad_run_impl)
+    amrex::iMultiFab* m_p_lmask = nullptr;
+    amrex::MultiFab*  m_p_t_surf = nullptr;
+    amrex::Vector<amrex::MultiFab*>* m_p_lsm_input_ptrs = nullptr;
+
     // Constant lat/lon if the above MFs are not valid
     amrex::Real m_lat_cons =  39.809860;
     amrex::Real m_lon_cons = -98.555183;
@@ -326,6 +340,9 @@ private:
 
     // Offsets for MultiFab <-> KOKKOS transfer
     amrex::Vector<int> m_col_offsets;
+
+    // Per-box column counts for per-box radiation
+    amrex::Vector<int> m_box_ncols;
 
     // Whether we use aerosol forcing in radiation
     bool m_do_aerosol_rad = true;

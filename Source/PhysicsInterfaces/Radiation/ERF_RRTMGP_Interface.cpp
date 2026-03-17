@@ -235,26 +235,39 @@ rrtmgp_initialize (gas_concs_t& gas_concs_k,
     // Initialize Kokkos
     if (!Kokkos::is_initialized()) {  Kokkos::initialize(); }
 
-    // Create objects for static ptrs
-    k_dist_sw_k = std::make_unique<gas_optics_t>();
-    k_dist_lw_k = std::make_unique<gas_optics_t>();
-    cloud_optics_sw_k = std::make_unique<cloud_optics_t>();
-    cloud_optics_lw_k = std::make_unique<cloud_optics_t>();
+    // Only load coefficient data if not yet loaded
+    if (!k_dist_sw_k) {
+        // Create objects for static ptrs
+        k_dist_sw_k = std::make_unique<gas_optics_t>();
+        k_dist_lw_k = std::make_unique<gas_optics_t>();
+        cloud_optics_sw_k = std::make_unique<cloud_optics_t>();
+        cloud_optics_lw_k = std::make_unique<cloud_optics_t>();
 
-    // Load and initialize absorption coefficient data
-    load_and_init(*k_dist_sw_k, coefficients_file_sw, gas_concs_k);
-    load_and_init(*k_dist_lw_k, coefficients_file_lw, gas_concs_k);
+        // Load and initialize absorption coefficient data
+        load_and_init(*k_dist_sw_k, coefficients_file_sw, gas_concs_k);
+        load_and_init(*k_dist_lw_k, coefficients_file_lw, gas_concs_k);
 
-    // Load and initialize cloud optical property look-up table information
-    load_cld_lutcoeff(*cloud_optics_sw_k, cloud_optics_file_sw);
-    load_cld_lutcoeff(*cloud_optics_lw_k, cloud_optics_file_lw);
+        // Load and initialize cloud optical property look-up table information
+        load_cld_lutcoeff(*cloud_optics_sw_k, cloud_optics_file_sw);
+        load_cld_lutcoeff(*cloud_optics_lw_k, cloud_optics_file_lw);
+    }
 
     // Initialize kokkos rrtmgp pool allocator
-    const size_t nvar = 300;
-    const size_t nbnd = std::max(k_dist_sw_k->get_nband(),k_dist_sw_k->get_nband());
+    // The pool is a stack allocator used by rte_lw/rte_sw solver internals.
+    // Peak usage occurs during rte_lw, which nests:
+    //   rte_lw -> lw_solver_noscat_GaussQuad -> lw_solver_noscat
+    // These allocate O(ncol * ngpt * nlay) temporaries from the pool.
+    // The dominant cost is ~8 * ncol * (nlay+1) * ngpt_lw doubles.
+    // We size the pool using ngpt (not nbnd) to correctly account for this.
+    const size_t nvar = 10;
+    const size_t ngpt = std::max(k_dist_sw_k->get_ngpt(),k_dist_lw_k->get_ngpt());
     const size_t ncol = gas_concs_k.ncol;
     const size_t nlay = gas_concs_k.nlay;
-    auto my_size_ref = static_cast<unsigned long>(nvar * ncol * nlay * nbnd);
+    auto my_size_ref = static_cast<unsigned long>(nvar * ncol * nlay * ngpt);
+    std::cout << "RRTMGP pool: nvar=" << nvar << " ncol=" << ncol
+                   << " nlay=" << nlay << " ngpt=" << ngpt
+                   << " total=" << my_size_ref << " ("
+                   << (my_size_ref * 8.0 / (1024*1024*1024)) << " GiB)\n";
     pool_t::init(my_size_ref);
 
     // We are now initialized!
@@ -266,14 +279,24 @@ void
 rrtmgp_finalize ()
 {
     initialized = false;
-    k_dist_sw_k->finalize();
-    k_dist_lw_k->finalize();
-    cloud_optics_sw_k->finalize();
-    cloud_optics_lw_k->finalize();
-    k_dist_sw_k = nullptr;
-    k_dist_lw_k = nullptr;
-    cloud_optics_sw_k = nullptr;
-    cloud_optics_lw_k = nullptr;
+    // Only destroy the pool; keep coefficient data for reuse across boxes
+    pool_t::finalize(true);
+}
+
+void
+rrtmgp_finalize_all ()
+{
+    initialized = false;
+    if (k_dist_sw_k) {
+        k_dist_sw_k->finalize();
+        k_dist_lw_k->finalize();
+        cloud_optics_sw_k->finalize();
+        cloud_optics_lw_k->finalize();
+        k_dist_sw_k = nullptr;
+        k_dist_lw_k = nullptr;
+        cloud_optics_sw_k = nullptr;
+        cloud_optics_lw_k = nullptr;
+    }
     pool_t::finalize();
 }
 
@@ -496,21 +519,6 @@ rrtmgp_main (const int ncol, const int nlay,
     auto nlwgpts = k_dist_lw_k->get_ngpt();
     auto clouds_lw_gpt = get_subsampled_clouds(ncol, nlay, nlwbands, nlwgpts,
                                                clouds_lw, *k_dist_lw_k, cldfrac, p_lay);
-
-    /*
-    // Copy cloud properties to outputs (is this needed, or can we just use pointers?)
-    // Alternatively, just compute and output a subcolumn cloud mask
-    Kokkos::parallel_for(Kokkos::MDRangePolicy<Kokkos::Rank<3>>({0, 0, 0}, {ncol, nlay, nswgpts}),
-                         KOKKOS_LAMBDA (int icol, int ilay, int igpt)
-    {
-        cld_tau_sw_gpt(icol,ilay,igpt) = clouds_sw_gpt.tau(icol,ilay,igpt);
-    });
-    Kokkos::parallel_for(Kokkos::MDRangePolicy<Kokkos::Rank<3>>({0, 0, 0}, {ncol, nlay, nlwgpts}),
-                         KOKKOS_LAMBDA (int icol, int ilay, int igpt)
-    {
-        cld_tau_lw_gpt(icol,ilay,igpt) = clouds_lw_gpt.tau(icol,ilay,igpt);
-    });
-    */
 
   // Do shortwave
   rrtmgp_sw(ncol, nlay,
@@ -1028,6 +1036,9 @@ rrtmgp_lw (const int ncol,
     real3d_k col_gas("col_gas", ncol, nlay, k_dist.get_ngas()+1);
     k_dist.gas_optics(ncol, nlay, top_at_1, p_lay, p_lev, t_lay_limited,
                       t_sfc, gas_concs, col_gas, optics, lw_sources, view_t<RealT**>(), t_lev_limited);
+
+
+
     if (extra_clnsky_diag) {
         k_dist.gas_optics(ncol, nlay, top_at_1, p_lay, p_lev, t_lay_limited,
                           t_sfc, gas_concs, col_gas, optics_no_aerosols, lw_sources, view_t<RealT**>(), t_lev_limited);
@@ -1044,11 +1055,15 @@ rrtmgp_lw (const int ncol,
     // Compute clear-sky fluxes before we add in clouds
     rte_lw(max_gauss_pts, gauss_Ds, gauss_wts, optics, top_at_1, lw_sources, emis_sfc_T, clrsky_fluxes);
 
+
+
     // Combine gas and cloud optics
     clouds.increment(optics);
 
     // Compute allsky fluxes
     rte_lw(max_gauss_pts, gauss_Ds, gauss_wts, optics, top_at_1, lw_sources, emis_sfc_T, fluxes);
+
+
 
     if (extra_clnsky_diag) {
         // First increment clouds in optics_no_aerosols

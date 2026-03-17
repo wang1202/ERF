@@ -801,8 +801,6 @@ SurfaceLayer::init_tke_from_ustar (const int& lev,
     Box bx_lo = u_star[lev]->boxArray().minimalBox();
     FArrayBox u_star_lo(bx_lo, 1); u_star_lo.setVal<RunOn::Device>(0.);
     FArrayBox z_surf_lo(bx_lo, 1); z_surf_lo.setVal<RunOn::Device>(0.);
-    Real* ustar_ptr = u_star_lo.dataPtr();
-    Real* zsurf_ptr = z_surf_lo.dataPtr();
     for (MFIter mfi(cons); mfi.isValid(); ++mfi)
     {
         Box vbx = mfi.validbox();
@@ -822,8 +820,19 @@ SurfaceLayer::init_tke_from_ustar (const int& lev,
                                        + z_phys_arr(i  ,j+1,klo) + z_phys_arr(i+1,j+1,klo) );
         });
     }
-    ParallelDescriptor::ReduceRealSum(ustar_ptr, bx_lo.numPts());
-    ParallelDescriptor::ReduceRealSum(zsurf_ptr, bx_lo.numPts());
+
+    // FArrayBox data lives on GPU; copy to host for MPI reduction
+    Gpu::streamSynchronize();
+    Long npts = bx_lo.numPts();
+    Vector<Real> h_ustar(npts, 0.0);
+    Vector<Real> h_zsurf(npts, 0.0);
+    Gpu::copy(Gpu::deviceToHost, u_star_lo.dataPtr(), u_star_lo.dataPtr() + npts, h_ustar.data());
+    Gpu::copy(Gpu::deviceToHost, z_surf_lo.dataPtr(), z_surf_lo.dataPtr() + npts, h_zsurf.data());
+    ParallelDescriptor::ReduceRealSum(h_ustar.data(), static_cast<int>(npts));
+    ParallelDescriptor::ReduceRealSum(h_zsurf.data(), static_cast<int>(npts));
+    // Copy reduced data back to device
+    Gpu::copy(Gpu::hostToDevice, h_ustar.data(), h_ustar.data() + npts, u_star_lo.dataPtr());
+    Gpu::copy(Gpu::hostToDevice, h_zsurf.data(), h_zsurf.data() + npts, z_surf_lo.dataPtr());
 
     // Now work on all boxes (ustar has been filled above)
     constexpr Real small = 0.01;

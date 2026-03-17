@@ -96,6 +96,9 @@ rrtmgp_initialize (gas_concs_t& gas_concs,
 void
 rrtmgp_finalize ();
 
+void
+rrtmgp_finalize_all ();
+
 
 void
 compute_band_by_band_surface_albedos (const int ncol, const int nswbands,
