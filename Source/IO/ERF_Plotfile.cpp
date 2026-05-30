@@ -1160,7 +1160,10 @@ ERF::Write3DPlotFile (int which, PlotFileType plotfile_type, Vector<std::string>
             if(containerHasElement(plot_var_names, "qp") && (n_qstate_moist >= 3))
             {
                 int n_start = (n_qstate_moist > 3) ? RhoQ4_comp : RhoQ3_comp;
-                int n_end   = ncomp_cons - 1;
+                // Cap at RhoQ6_comp (last mass-mixing-ratio slot). Morrison has
+                // RhoQ7..RhoQ11 holding number concentrations; summing those into
+                // "qp" (total precipitating water mass) would be unitful nonsense.
+                int n_end   = std::min(ncomp_cons - 1, RhoQ6_comp);
                 MultiFab::Copy(  mf[lev], vars_new[lev][Vars::cons], n_start, mf_comp, 1, 0);
                 for (int n_comp(n_start+1); n_comp <= n_end; ++n_comp) {
                     MultiFab::Add(  mf[lev], vars_new[lev][Vars::cons], n_comp, mf_comp, 1, 0);
@@ -1195,7 +1198,9 @@ ERF::Write3DPlotFile (int which, PlotFileType plotfile_type, Vector<std::string>
                  (solverChoice.moisture_type == MoistureType::Morrison_NoIce) ||
                  (solverChoice.moisture_type == MoistureType::SAM_NoIce) )
             {
-                int offset = (solverChoice.moisture_type == MoistureType::Morrison_NoIce) ? 5 : 0;
+                // Morrison number concentrations moved to state (RhoQ7..RhoQ11);
+                // qmoist accumulators now start at index 0 for all variants.
+                int offset = 0;
                 if (containerHasElement(plot_var_names, "rain_accum"))
                 {
                     MultiFab::Copy(mf[lev],*(qmoist[lev][offset]),0,mf_comp,1,0);
@@ -1211,7 +1216,11 @@ ERF::Write3DPlotFile (int which, PlotFileType plotfile_type, Vector<std::string>
                       (solverChoice.moisture_type == MoistureType::Morrison) ||
                       (solverChoice.moisture_type == MoistureType::WSM6) )
             {
-                int offset = (solverChoice.moisture_type == MoistureType::Morrison) ? 5 : 0;
+                // Morrison's qmoist now holds only {rain_accum, snow_accum, graup_accum}
+                // (Nc..Ng were promoted to the prognostic state RhoQ7..RhoQ11), so the
+                // accumulators start at index 0 — same as SAM/WSM6. (Was offset=5 when
+                // the 5 number concentrations preceded the accums in qmoist.)
+                int offset = 0;
                 if (containerHasElement(plot_var_names, "rain_accum"))
                 {
                     MultiFab::Copy(mf[lev],*(qmoist[lev][offset]),0,mf_comp,1,0);

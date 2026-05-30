@@ -45,6 +45,11 @@ void ERF::init_phys_bcs (bool& rho_read, bool& read_prim_theta)
         m_bc_neumann_vals[BCVars::RhoQ4_bc_comp][ori]     = zero;
         m_bc_neumann_vals[BCVars::RhoQ5_bc_comp][ori]     = zero;
         m_bc_neumann_vals[BCVars::RhoQ6_bc_comp][ori]     = zero;
+        m_bc_neumann_vals[BCVars::RhoQ7_bc_comp][ori]     = zero;
+        m_bc_neumann_vals[BCVars::RhoQ8_bc_comp][ori]     = zero;
+        m_bc_neumann_vals[BCVars::RhoQ9_bc_comp][ori]     = zero;
+        m_bc_neumann_vals[BCVars::RhoQ10_bc_comp][ori]    = zero;
+        m_bc_neumann_vals[BCVars::RhoQ11_bc_comp][ori]    = zero;
 
         m_bc_neumann_vals[BCVars::xvel_bc][ori] = zero;
         m_bc_neumann_vals[BCVars::yvel_bc][ori] = zero;

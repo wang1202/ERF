@@ -48,7 +48,10 @@ ERF::sum_integrated_quantities (Real time)
     Real mois_sl = zero;
     if (solverChoice.moisture_type != MoistureType::None) {
         int n_qstate_moist = micro->Get_Qstate_Moist_Size();
-        for (int qoff(0); qoff<n_qstate_moist; ++qoff) {
+        // Cap at 6 so Morrison's RhoQ7..RhoQ11 (number concentrations, 1/kg) are
+        // not summed into "moisture mass" — they are not mass-mixing-ratios.
+        int n_q_mass = std::min(n_qstate_moist, 6);
+        for (int qoff(0); qoff<n_q_mass; ++qoff) {
             mois_sl += volWgtSumMF(0,vars_new[0][Vars::cons],RhoQ1_comp+qoff,dJ0,mfx0,mfy0,false);
         }
     }
@@ -61,7 +64,8 @@ ERF::sum_integrated_quantities (Real time)
         scal_ml += volWgtSumMF(lev,vars_new[lev][Vars::cons],RhoScalar_comp,dJ,mfx,mfy,true);
         if (solverChoice.moisture_type != MoistureType::None) {
             int n_qstate_moist = micro->Get_Qstate_Moist_Size();
-            for (int qoff(0); qoff<n_qstate_moist; ++qoff) {
+            int n_q_mass = std::min(n_qstate_moist, 6);
+            for (int qoff(0); qoff<n_q_mass; ++qoff) {
                 mois_ml += volWgtSumMF(lev,vars_new[lev][Vars::cons],RhoQ1_comp+qoff,dJ,mfx,mfy,false);
             }
         }

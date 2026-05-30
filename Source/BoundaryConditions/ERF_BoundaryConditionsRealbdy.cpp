@@ -46,13 +46,18 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
     Real oma   = one - alpha;
 
     // Flags for read vars and index mapping
+    // NDRY (3) + NSCALARS (1) + NMOIST_max (11) = 15 entries. wrfbdy carries
+    // only QV among moist; everything else is is_read=0 (cons_map index is
+    // then unused — placeholder slots for RhoQ7..RhoQ11 number concentrations).
     Vector<int> cons_read = {0, 1, 0, 0,
                              1, 0, 0,
-                             0, 0, 0};
+                             0, 0, 0,
+                             0, 0, 0, 0, 0};
 
     Vector<int> cons_map = {Rho_comp, RealBdyVars::T, RhoKE_comp, RhoScalar_comp,
                             RealBdyVars::QV, RhoQ2_comp, RhoQ3_comp,
-                            RhoQ4_comp, RhoQ5_comp, RhoQ6_comp};
+                            RhoQ4_comp, RhoQ5_comp, RhoQ6_comp,
+                            RhoQ7_comp, RhoQ8_comp, RhoQ9_comp, RhoQ10_comp, RhoQ11_comp};
 
     Vector<Vector<int>> is_read;
     is_read.push_back( cons_read );
@@ -271,9 +276,11 @@ ERF::fill_from_realbdy_upwind (const Vector<MultiFab*>& mfs,
 
     // Variables read from bdy (indexed with var_idx)
     Vector<Vector<int>> is_read;
+    // NDRY (3) + NSCALARS (1) + NMOIST_max (11) = 15 entries. Only QV is read from wrfbdy.
     is_read.push_back( {0, 1, 0, 0,
                         1, 0, 0,
-                        0, 0, 0} );
+                        0, 0, 0,
+                        0, 0, 0, 0, 0} );
     is_read.push_back( {1} ); // xvel
     is_read.push_back( {1} ); // yvel
     is_read.push_back( {0} ); // zvel
@@ -282,7 +289,8 @@ ERF::fill_from_realbdy_upwind (const Vector<MultiFab*>& mfs,
     Vector<Vector<int>> ind_map;
     ind_map.push_back( {Rho_comp, RealBdyVars::T, RhoKE_comp, RhoScalar_comp,
                         RealBdyVars::QV, RhoQ2_comp, RhoQ3_comp,
-                        RhoQ4_comp, RhoQ5_comp, RhoQ6_comp} );
+                        RhoQ4_comp, RhoQ5_comp, RhoQ6_comp,
+                        RhoQ7_comp, RhoQ8_comp, RhoQ9_comp, RhoQ10_comp, RhoQ11_comp} );
     ind_map.push_back( {RealBdyVars::U} ); // xvel
     ind_map.push_back( {RealBdyVars::V} ); // yvel
     ind_map.push_back( {0} );              // zvel

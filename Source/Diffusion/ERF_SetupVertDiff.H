@@ -76,15 +76,14 @@
        }
     }
 
-//  Vector<int> eddy_diff_idx{EddyDiff::Theta_h, EddyDiff::KE_h, EddyDiff::Scalar_h,
-//                            EddyDiff::Q_h    , EddyDiff::Q_h,  EddyDiff::Q_h ,
-//                            EddyDiff::Q_h    , EddyDiff::Q_h,  EddyDiff::Q_h };
-//  Vector<int> eddy_diff_idy{EddyDiff::Theta_h, EddyDiff::KE_h, EddyDiff::Scalar_h,
-//                            EddyDiff::Q_h    , EddyDiff::Q_h,  EddyDiff::Q_h ,
-//                            EddyDiff::Q_h    , EddyDiff::Q_h,  EddyDiff::Q_h };
-    Vector<int> eddy_diff_idz{EddyDiff::Theta_v, EddyDiff::KE_v, EddyDiff::Scalar_v,
-                              EddyDiff::Q_v    , EddyDiff::Q_v,  EddyDiff::Q_v ,
-                              EddyDiff::Q_v    , EddyDiff::Q_v,  EddyDiff::Q_v };
+    // First three map RhoTheta, RhoKE, RhoScalar; the rest map every moisture
+    // component (RhoQ1..RhoQn) to the vertical moisture diffusivity Q_v. Built
+    // dynamically to span all NMOIST_max slots (Morrison now uses 11, including
+    // the 5 number concentrations promoted to RhoQ7..RhoQ11).
+    Vector<int> eddy_diff_idz{EddyDiff::Theta_v, EddyDiff::KE_v, EddyDiff::Scalar_v};
+    for (int q_comp(0); q_comp < NMOIST_max; ++q_comp) {
+        eddy_diff_idz.push_back(EddyDiff::Q_v);
+    }
 
     // Device vectors
     Gpu::AsyncVector<Real> alpha_eff_d;

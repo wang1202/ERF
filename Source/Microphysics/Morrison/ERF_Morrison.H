@@ -142,18 +142,12 @@ public:
         a_idx.clear();
         a_names.clear();
 
-        // The ordering here needs to match that in
-        // MicVarMap = {MicVar_Morr::nc, MicVar_Morr::nr, MicVar_Morr::ni, MicVar_Morr::ns, MicVar_Morr::ng,
-        //              MicVar_Morr::rain_accum, MicVar_Morr::snow_accum, MicVar_Morr::graup_accum};
-        //
-        a_idx.push_back(0); a_names.push_back("Nc");
-        a_idx.push_back(1); a_names.push_back("Nr");
-        a_idx.push_back(2); a_names.push_back("Ni");
-        a_idx.push_back(3); a_names.push_back("Ns");
-        a_idx.push_back(4); a_names.push_back("Ng");
-        a_idx.push_back(5); a_names.push_back("RainAccum");
-        a_idx.push_back(6); a_names.push_back("SnowAccum");
-        a_idx.push_back(7); a_names.push_back("GraupAccum");
+        // Nc..Ng are now in the prognostic state (RhoQ7..RhoQ11) and saved
+        // automatically as part of the cons MultiFab in checkpoints.
+        // Only the 3 accumulators remain as auxiliary qmoist variables.
+        a_idx.push_back(0); a_names.push_back("RainAccum");
+        a_idx.push_back(1); a_names.push_back("SnowAccum");
+        a_idx.push_back(2); a_names.push_back("GraupAccum");
     }
 
     void
@@ -172,11 +166,13 @@ public:
     }
 
 private:
-    // Number of qmoist variables (Ncloud, Nrain, Nice, Nsnow, Ngraup, rain_accum, snow_accum, graup_accum)
-    int m_qmoist_size = 8;
+    // Number of qmoist variables NOT in the prognostic state — just the 3 accums
+    // (Nc, Nr, Ni, Ns, Ng were promoted to RhoQ7..RhoQ11_comp in ERF_IndexDefines.H
+    // so they get advected by the dycore alongside the mass mixing ratios).
+    int m_qmoist_size = 3;
 
-    // Number of qstate variables
-    int n_qstate_moist_size = 6;
+    // Number of qstate variables: 6 mass ratios + 5 number concentrations
+    int n_qstate_moist_size = 11;
 
     // CFL MAX for vertical advection
     static constexpr amrex::Real CFL_MAX = myhalf;

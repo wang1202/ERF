@@ -33,6 +33,13 @@ Morrison::Copy_Micro_to_State (MultiFab& cons)
         auto qps_arr     = mic_fab_vars[MicVar_Morr::qps]->array(mfi);
         auto qpg_arr     = mic_fab_vars[MicVar_Morr::qpg]->array(mfi);
 
+        // Number concentrations — write back so the dycore advects them next step.
+        auto nc_arr      = mic_fab_vars[MicVar_Morr::nc]->array(mfi);
+        auto nr_arr      = mic_fab_vars[MicVar_Morr::nr]->array(mfi);
+        auto ni_arr      = mic_fab_vars[MicVar_Morr::ni]->array(mfi);
+        auto ns_arr      = mic_fab_vars[MicVar_Morr::ns]->array(mfi);
+        auto ng_arr      = mic_fab_vars[MicVar_Morr::ng]->array(mfi);
+
         // get potential total density, temperature, qt, qp
         ParallelFor( box3d, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
@@ -45,6 +52,13 @@ Morrison::Copy_Micro_to_State (MultiFab& cons)
             states_arr(i,j,k,RhoQ4_comp)    = rho_arr(i,j,k)*std::max(Real(0),qpr_arr(i,j,k));
             states_arr(i,j,k,RhoQ5_comp)    = rho_arr(i,j,k)*std::max(Real(0),qps_arr(i,j,k));
             states_arr(i,j,k,RhoQ6_comp)    = rho_arr(i,j,k)*std::max(Real(0),qpg_arr(i,j,k));
+
+            // Store number concentrations as ρ·N for advection consistency.
+            states_arr(i,j,k,RhoQ7_comp )   = rho_arr(i,j,k)*std::max(Real(0),nc_arr(i,j,k));
+            states_arr(i,j,k,RhoQ8_comp )   = rho_arr(i,j,k)*std::max(Real(0),nr_arr(i,j,k));
+            states_arr(i,j,k,RhoQ9_comp )   = rho_arr(i,j,k)*std::max(Real(0),ni_arr(i,j,k));
+            states_arr(i,j,k,RhoQ10_comp)   = rho_arr(i,j,k)*std::max(Real(0),ns_arr(i,j,k));
+            states_arr(i,j,k,RhoQ11_comp)   = rho_arr(i,j,k)*std::max(Real(0),ng_arr(i,j,k));
         });
     }
 

@@ -33,8 +33,8 @@ Morrison::Init (const MultiFab& cons_in,
     m_detJ_cc   = detJ_cc.get();
 
     MicVarMap.resize(m_qmoist_size);
-    MicVarMap = {MicVar_Morr::nc, MicVar_Morr::nr, MicVar_Morr::ni, MicVar_Morr::ns, MicVar_Morr::ng,
-                 MicVar_Morr::rain_accum, MicVar_Morr::snow_accum, MicVar_Morr::graup_accum};
+    // Nc..Ng moved to prognostic state (RhoQ7..RhoQ11); only accums remain auxiliary.
+    MicVarMap = {MicVar_Morr::rain_accum, MicVar_Morr::snow_accum, MicVar_Morr::graup_accum};
 
     // initialize microphysics variables
     for (auto ivar = 0; ivar < MicVar_Morr::NumVars; ++ivar) {
@@ -108,6 +108,13 @@ Morrison::Copy_State_to_Micro (const MultiFab& cons_in)
         auto qpg_array   = mic_fab_vars[MicVar_Morr::qpg]->array(mfi);
         auto qp_array    = mic_fab_vars[MicVar_Morr::qp]->array(mfi);
 
+        // Number concentrations (advected through RhoQ7..RhoQ11)
+        auto nc_array    = mic_fab_vars[MicVar_Morr::nc]->array(mfi);
+        auto nr_array    = mic_fab_vars[MicVar_Morr::nr]->array(mfi);
+        auto ni_array    = mic_fab_vars[MicVar_Morr::ni]->array(mfi);
+        auto ns_array    = mic_fab_vars[MicVar_Morr::ns]->array(mfi);
+        auto ng_array    = mic_fab_vars[MicVar_Morr::ng]->array(mfi);
+
         auto rho_array   = mic_fab_vars[MicVar_Morr::rho]->array(mfi);
         auto theta_array = mic_fab_vars[MicVar_Morr::theta]->array(mfi);
         auto tabs_array  = mic_fab_vars[MicVar_Morr::tabs]->array(mfi);
@@ -129,6 +136,51 @@ Morrison::Copy_State_to_Micro (const MultiFab& cons_in)
             qps_array(i,j,k)   = std::max(Real(0),states_array(i,j,k,RhoQ5_comp)/states_array(i,j,k,Rho_comp));
             qpg_array(i,j,k)   = std::max(Real(0),states_array(i,j,k,RhoQ6_comp)/states_array(i,j,k,Rho_comp));
              qp_array(i,j,k)   = qpr_array(i,j,k) + qps_array(i,j,k) + qpg_array(i,j,k);
+
+            // Number concentrations stored as ρ·N in RhoQ7..RhoQ11; divide by ρ
+            // to recover N (per kg). Clamp to ≥0 against advection overshoots.
+            nc_array(i,j,k)    = std::max(Real(0),states_array(i,j,k,RhoQ7_comp )/states_array(i,j,k,Rho_comp));
+            nr_array(i,j,k)    = std::max(Real(0),states_array(i,j,k,RhoQ8_comp )/states_array(i,j,k,Rho_comp));
+            ni_array(i,j,k)    = std::max(Real(0),states_array(i,j,k,RhoQ9_comp )/states_array(i,j,k,Rho_comp));
+            ns_array(i,j,k)    = std::max(Real(0),states_array(i,j,k,RhoQ10_comp)/states_array(i,j,k,Rho_comp));
+            ng_array(i,j,k)    = std::max(Real(0),states_array(i,j,k,RhoQ11_comp)/states_array(i,j,k,Rho_comp));
+
+            // (q,N) consistency clamp. Advection (WENOMZQ3) of the mass ratio and
+            // its number concentration is done independently, so overshoots can
+            // leave (q,N) pairs that imply a non-physical mean particle size. That
+            // drives Morrison's process rates (autoconversion, evaporation,
+            // sublimation) to blow up -> latent-heat-driven temperature collapse.
+            // Re-impose Morrison's own slope-parameter bounds here so the scheme
+            // always sees a physically consistent (q,N): for each species the
+            // limiter recomputes N = lam^3 * q / (pi*rho_x) with lam in
+            // [lam_min, lam_max]. Because the dimension exponent is 3 and
+            // Gamma(4)=6 cancels the pi/6 in the mass-size coefficient, the
+            // coefficient is exactly pi*rho_x for all species (matches the in-loop
+            // limiters in ERF_AdvanceMorrison.cpp). q<qsmall => N=0.
+            {
+                constexpr Real pi_c    = Real(3.14159265358979323846);
+                constexpr Real qsmall_c= Real(1.0e-14);
+                auto clamp_N = [=] (Real q_in, Real N_in, Real rho_x,
+                                    Real lam_min, Real lam_max) -> Real {
+                    if (q_in < qsmall_c) { return Real(0); }
+                    const Real coef = pi_c * rho_x;
+                    const Real N_lo = lam_min*lam_min*lam_min * q_in / coef;
+                    const Real N_hi = lam_max*lam_max*lam_max * q_in / coef;
+                    return amrex::min(amrex::max(N_in, N_lo), N_hi);
+                };
+                // Rain   : rho=997, D in [20, 2800] um  -> lam in [1/2800u, 1/20u]
+                nr_array(i,j,k) = clamp_N(qpr_array(i,j,k), nr_array(i,j,k), Real(997.0),
+                                          one/Real(2800.0e-6), one/Real(20.0e-6));
+                // Ice    : rho=500, D in [1, 350] um
+                ni_array(i,j,k) = clamp_N(qi_array(i,j,k),  ni_array(i,j,k), Real(500.0),
+                                          one/(Real(2)*Real(125.0e-6)+Real(100.0e-6)), one/Real(1.0e-6));
+                // Snow   : rho=100, D in [10, 2000] um
+                ns_array(i,j,k) = clamp_N(qps_array(i,j,k), ns_array(i,j,k), Real(100.0),
+                                          one/Real(2000.0e-6), one/Real(10.0e-6));
+                // Graupel: rho=400, D in [20, 2000] um
+                ng_array(i,j,k) = clamp_N(qpg_array(i,j,k), ng_array(i,j,k), Real(400.0),
+                                          one/Real(2000.0e-6), one/Real(20.0e-6));
+            }
 
             tabs_array(i,j,k)  = getTgivenRandRTh(states_array(i,j,k,Rho_comp),
                                                   states_array(i,j,k,RhoTheta_comp),

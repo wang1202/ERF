@@ -54,12 +54,17 @@
         BL_PROFILE("make_qt()");
 
         int n_qstate_moist = micro->Get_Qstate_Moist_Size();
+        // Only the mass mixing ratios (RhoQ1..RhoQ6) contribute to total water.
+        // Morrison's RhoQ7..RhoQ11 hold number concentrations (units 1/kg, ~1e6)
+        // and must NOT be summed into qt — doing so corrupts the moist density /
+        // buoyancy / EOS and blows up temperature within a few steps.
+        int n_q_mass = std::min(n_qstate_moist, 6);
 
         // All moisture models are guaranteed to have RhoQ1_comp
         MultiFab::Copy(qt, cons_state, RhoQ1_comp, 0, 1, qt.nGrowVect());
 
-        // Sum up each component
-        for (int n(1); n<n_qstate_moist; ++n) {
+        // Sum up each mass-mixing-ratio component
+        for (int n(1); n<n_q_mass; ++n) {
             MultiFab::Add(qt, cons_state, RhoQ1_comp+n, 0, 1, qt.nGrowVect());
         }
 

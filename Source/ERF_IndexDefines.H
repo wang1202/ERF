@@ -15,8 +15,13 @@
 // This defines the ACTUAL number of non-moisture scalar vars
 #define NSCALARS   1
 
-// This defines the MAXIMUM number of moisture vars
-#define NMOIST_max 6
+// This defines the MAXIMUM number of moisture vars. Morrison uses all 11:
+// 6 mass mixing ratios (qv, qcl, qci, qpr, qps, qpg) in RhoQ1..RhoQ6, plus
+// 5 number concentrations (nc, nr, ni, ns, ng) in RhoQ7..RhoQ11. The number
+// concentrations need to be in state so they're advected by the dycore
+// alongside the mass ratios — without this, qc gets advected but Nc stays
+// put, breaking KK2000 autoconversion's mean-diameter calc downstream.
+#define NMOIST_max 11
 
 // This is the number of components if using moisture
 // We use this to allocate the 1d arrays of boundary condition types,
@@ -45,6 +50,12 @@
 #define RhoQ4_comp     (RhoQ1_comp+3)
 #define RhoQ5_comp     (RhoQ1_comp+4)
 #define RhoQ6_comp     (RhoQ1_comp+5)
+// Q7..Q11 carry Morrison number concentrations Nc, Nr, Ni, Ns, Ng (per kg)
+#define RhoQ7_comp     (RhoQ1_comp+6)
+#define RhoQ8_comp     (RhoQ1_comp+7)
+#define RhoQ9_comp     (RhoQ1_comp+8)
+#define RhoQ10_comp    (RhoQ1_comp+9)
+#define RhoQ11_comp    (RhoQ1_comp+10)
 
 // Cell-centered primitive variables
 #define PrimTheta_comp   (RhoTheta_comp -1)
@@ -56,6 +67,11 @@
 #define PrimQ4_comp      (RhoQ4_comp-1)
 #define PrimQ5_comp      (RhoQ5_comp-1)
 #define PrimQ6_comp      (RhoQ6_comp-1)
+#define PrimQ7_comp      (RhoQ7_comp-1)
+#define PrimQ8_comp      (RhoQ8_comp-1)
+#define PrimQ9_comp      (RhoQ9_comp-1)
+#define PrimQ10_comp     (RhoQ10_comp-1)
+#define PrimQ11_comp     (RhoQ11_comp-1)
 
 // Base state variables
 namespace BaseState {
@@ -84,6 +100,11 @@ namespace BCVars {
         RhoQ4_bc_comp,
         RhoQ5_bc_comp,
         RhoQ6_bc_comp,
+        RhoQ7_bc_comp,
+        RhoQ8_bc_comp,
+        RhoQ9_bc_comp,
+        RhoQ10_bc_comp,
+        RhoQ11_bc_comp,
         xvel_bc = NBCVAR_max,
         yvel_bc = NBCVAR_max+1,
         zvel_bc = NBCVAR_max+2,

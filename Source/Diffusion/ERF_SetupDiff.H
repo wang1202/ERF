@@ -17,15 +17,17 @@
     [[maybe_unused]] const Real l_inv_theta0 = (use_ref_theta) ? one / turbChoice.theta_ref : one;
 
     // vertical diffusivities are defined in ERF_SetupVertDiff.H
-    Vector<int> eddy_diff_idx{EddyDiff::Theta_h, EddyDiff::KE_h, EddyDiff::Scalar_h,
-                              EddyDiff::Q_h    , EddyDiff::Q_h,  EddyDiff::Q_h ,
-                              EddyDiff::Q_h    , EddyDiff::Q_h,  EddyDiff::Q_h };
-    Vector<int> eddy_diff_idy{EddyDiff::Theta_h, EddyDiff::KE_h, EddyDiff::Scalar_h,
-                              EddyDiff::Q_h    , EddyDiff::Q_h,  EddyDiff::Q_h ,
-                              EddyDiff::Q_h    , EddyDiff::Q_h,  EddyDiff::Q_h };
-//  Vector<int> eddy_diff_idz{EddyDiff::Theta_v, EddyDiff::KE_v, EddyDiff::Scalar_v,
-//                            EddyDiff::Q_v    , EddyDiff::Q_v,  EddyDiff::Q_v ,
-//                            EddyDiff::Q_v    , EddyDiff::Q_v,  EddyDiff::Q_v };
+    // The first three entries map RhoTheta, RhoKE, RhoScalar (prim indices 0,1,2);
+    // the remaining NMOIST_max entries map every moisture component (RhoQ1..RhoQn,
+    // prim indices 3..2+NMOIST_max) to the moisture eddy-diffusivity Q_h/Q_v. Build
+    // dynamically so the table always spans all moist slots — Morrison now uses 11
+    // (6 mass mixing ratios + 5 number concentrations in RhoQ7..RhoQ11).
+    Vector<int> eddy_diff_idx{EddyDiff::Theta_h, EddyDiff::KE_h, EddyDiff::Scalar_h};
+    Vector<int> eddy_diff_idy{EddyDiff::Theta_h, EddyDiff::KE_h, EddyDiff::Scalar_h};
+    for (int q_comp(0); q_comp < NMOIST_max; ++q_comp) {
+        eddy_diff_idx.push_back(EddyDiff::Q_h);
+        eddy_diff_idy.push_back(EddyDiff::Q_h);
+    }
 
     // Device vectors
 //  Gpu::AsyncVector<Real> alpha_eff_d;
