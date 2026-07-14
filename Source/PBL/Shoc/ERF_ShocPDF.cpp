@@ -24,17 +24,19 @@ namespace
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE Real shoc_sqrt_pdf_tmp () noexcept { return 0.77459666924148337704_rt; }
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE bool shoc_do_thetal_skew () noexcept { return false; }
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE Real inv_sqrt_two_pi () noexcept { return 0.39894228040143267794_rt; }
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE Real shoc_eps () noexcept {
 #ifdef AMREX_USE_FLOAT
-    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE Real eps () { return  Real(1.e-6); }
+        return static_cast<Real>(1.e-6);
 #else
-    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE Real eps () { return Real(1.e-12); }
+        return 1.e-12;
 #endif
+    }
 
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
     Real clamp01 (Real x) { return shoc_clamp(x, 0.0_rt, 1.0_rt); }
 
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-    Real signed_denominator (Real value, Real eps_in = eps())
+    Real signed_denominator (Real value, Real eps_in = shoc_eps())
     {
         if (amrex::Math::abs(value) >= eps_in) {
             return value;
@@ -46,7 +48,7 @@ namespace
     Real weighted_linear_interp (Real x0, Real x1, Real y0, Real y1, Real x)
     {
         const Real denom = x1 - x0;
-        if (amrex::Math::abs(denom) <= eps()) {
+        if (amrex::Math::abs(denom) <= shoc_eps()) {
             return 0.5_rt * (y0 + y1);
         }
         return y0 + (y1 - y0) * (x - x0) / denom;
@@ -216,7 +218,7 @@ namespace
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
     Real compute_temperature (Real thl1, Real pval)
     {
-        const Real pressure_ratio = p_0 / amrex::max(pval, eps());
+        const Real pressure_ratio = p_0 / amrex::max(pval, shoc_eps());
         return thl1 / std::exp((R_d / Cp_d) * std::log(pressure_ratio));
     }
 
@@ -268,7 +270,7 @@ namespace
     Real compute_buoyancy_flux (Real wthlsec, Real wqwsec, Real pval, Real wqls)
     {
         const Real epsterm = R_d / R_v;
-        const Real pressure_ratio = p_0 / amrex::max(pval, eps());
+        const Real pressure_ratio = p_0 / amrex::max(pval, shoc_eps());
         const Real pressure_term = std::exp((R_d / Cp_d) * std::log(pressure_ratio));
         return wthlsec
                  + ((1.0_rt - epsterm) / epsterm) * shoc_base_temp() * wqwsec
@@ -401,8 +403,8 @@ ShocPDF::diagnose_pdf (ShocColumnData& col,
             if (opts.extra_shoc_diags) {
                 const Real dt = static_cast<Real>(dt_d);
                 const Real ql_change = ql - old_ql;
-                shoc_cond(ic,k,0) = amrex::max(0.0_rt, ql_change / amrex::max(dt, eps()));
-                shoc_evap(ic,k,0) = amrex::max(0.0_rt, -ql_change / amrex::max(dt, eps()));
+                shoc_cond(ic,k,0) = amrex::max(0.0_rt, ql_change / amrex::max(dt, shoc_eps()));
+                shoc_evap(ic,k,0) = amrex::max(0.0_rt, -ql_change / amrex::max(dt, shoc_eps()));
             } else {
                 shoc_cond(ic,k,0) = 0.0_rt;
                 shoc_evap(ic,k,0) = 0.0_rt;

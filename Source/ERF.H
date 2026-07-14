@@ -4,6 +4,7 @@
 #include <string>
 #include <limits>
 #include <memory>
+#include <fstream>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -542,6 +543,9 @@ public:
                               double time);
 #endif //ERF_USE_NETCDF
 
+    //! Write a timestep to ground-station output
+    void writeGroundStationData (amrex::Real time, int nstep);
+
     void init_from_input_sounding (int lev);
 
     void init_immersed_forcing (int lev);
@@ -645,6 +649,37 @@ public:
     void init_from_metgrid  (int lev);
     void init_from_ncfile   (int lev);
 #endif // ERF_USE_NETCDF
+
+    struct GroundStationSample {
+        amrex::Real u = amrex::Real(0.0);
+        amrex::Real v = amrex::Real(0.0);
+        amrex::Real theta = amrex::Real(0.0);
+        amrex::Real temp = amrex::Real(0.0);
+        amrex::Real qv = amrex::Real(0.0);
+        amrex::Real rh = amrex::Real(0.0);
+    };
+
+    void initializeGroundStationFile ();
+    int findGroundStationLevel () const;
+    void sampleGroundStationColumn (int lev,
+                                    amrex::Vector<amrex::Real>& z_agl,
+                                    amrex::Vector<GroundStationSample>& samples,
+                                    amrex::Real& surface_pressure,
+                                    amrex::Real& accumulated_precip) const;
+    GroundStationSample makeMOSTGroundStationSample (const GroundStationSample& ref_sample,
+                                                     amrex::Real target_height,
+                                                     amrex::Real surface_pressure,
+                                                     amrex::Real ustar,
+                                                     amrex::Real tstar,
+                                                     amrex::Real qstar,
+                                                     amrex::Real olen,
+                                                     amrex::Real theta_surf,
+                                                     amrex::Real qv_surf,
+                                                     amrex::Real z0) const;
+    GroundStationSample interpolateGroundStationSample (amrex::Real target_height,
+                                                        const amrex::Vector<amrex::Real>& z_agl,
+                                                        const amrex::Vector<GroundStationSample>& samples) const;
+    static std::string formatGroundStationHeightLabel (amrex::Real height);
 
 #ifdef ERF_USE_WINDFARM
     void init_windfarm(int lev);
@@ -1385,6 +1420,14 @@ private:
     static amrex::Real column_loc_x;
     static amrex::Real column_loc_y;
     static std::string column_file_name;
+
+    bool ground_station_output = false;
+    bool ground_station_header_written = false;
+    int ground_station_i_loc = -1;
+    int ground_station_j_loc = -1;
+    int ground_station_interval = -1;
+    amrex::Vector<amrex::Real> ground_station_heights;
+    std::string ground_station_file_name = "ground_station.dat";
 
     // 2D BndryRegister output (for ingestion in AMR-Wind)
     static int         output_bndry_planes;

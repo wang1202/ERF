@@ -433,6 +433,10 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
 #endif
     }
 
+    if (ground_station_output && (nstep == 0 || ((nstep + 1) % ground_station_interval == 0))) {
+        writeGroundStationData(time, nstep);
+    }
+
     if (output_bndry_planes)
     {
       if (is_it_time_for_action(istep[0], time, dt_lev0, bndry_output_planes_interval, bndry_output_planes_per) &&
@@ -2251,6 +2255,15 @@ ERF::ReadParameters ()
         pp.query("column_loc_y", column_loc_y);
         pp.query("column_file_name", column_file_name);
 
+        pp.query("doppler_lidar.i_loc", ground_station_i_loc);
+        pp.query("doppler_lidar.j_loc", ground_station_j_loc);
+        pp.query("doppler_lidar.interval", ground_station_interval);
+        pp.query("doppler_lidar.file_name", ground_station_file_name);
+        if (pp.countval("doppler_lidar.height") > 0) {
+            pp.queryarr("doppler_lidar.height", ground_station_heights);
+        }
+        ground_station_output = (ground_station_interval > 0 && !ground_station_heights.empty());
+
         // Sampler output frequency
         pp.query("line_sampling_per", line_sampling_per);
         pp.query("line_sampling_interval", line_sampling_interval);
@@ -2526,6 +2539,22 @@ ERF::ParameterSanityChecks ()
 
     if (solverChoice.coupling_type == CouplingType::TwoWay && cf_width > 0) {
         Abort("For two-way coupling you must set cf_width = 0");
+    }
+
+    if (ground_station_output) {
+        if (ground_station_i_loc < 0 || ground_station_i_loc >= geom[0].Domain().length(0) ||
+            ground_station_j_loc < 0 || ground_station_j_loc >= geom[0].Domain().length(1)) {
+            Abort("erf.doppler_lidar.i_loc and j_loc must be valid level-0 cell indices");
+        }
+
+        for (const auto& height : ground_station_heights) {
+            if (height < zero) {
+                Abort("erf.doppler_lidar.height entries must be non-negative");
+            }
+        }
+    } else if (ground_station_interval > 0 || !ground_station_heights.empty() ||
+               ground_station_i_loc >= 0 || ground_station_j_loc >= 0) {
+        Abort("Ground station output requires erf.doppler_lidar.i_loc, j_loc, interval, and at least one height");
     }
 }
 
