@@ -225,8 +225,8 @@ ERF::makeMOSTGroundStationSample (const GroundStationSample& ref_sample,
     Real psi_h = Real(0.0);
     if (std::abs(olen) > tiny && std::abs(olen) < bogus_large_value * Real(0.5)) {
         const Real zeta = z_eval / olen;
-        psi_m = sfuns.calc_psi_m(zeta);
-        psi_h = sfuns.calc_psi_h(zeta);
+        psi_m = sfuns.calc_psi_m2(zeta);
+        psi_h = sfuns.calc_psi_h2(zeta);
     }
 
     const Real profile_factor = std::max(std::log(z_eval / amrex::max(z0, tiny)) - psi_m, tiny);
