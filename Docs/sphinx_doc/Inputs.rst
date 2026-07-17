@@ -927,6 +927,33 @@ The sampled variables can be selected with the ``erf.line_sampling_vars`` and
 The water vapor mixing ratio "qv" will only output valid values if a moisture model is used.
 Pressure is calculated from rho*theta and will account for moisture if qv is requested.
 
+Doppler lidar ground-station output
+-----------------------------------
+
+Ground-station columns can be written to one or more text files. The legacy
+single-station parameters ``erf.doppler_lidar.i_loc``, ``j_loc``, ``interval``,
+``height``, and ``file_name`` remain supported. For multiple stations, set
+``erf.doppler_lidar.num_stations`` and use zero-based station names:
+
+.. code-block:: text
+
+   erf.doppler_lidar.num_stations = 2
+   erf.doppler_lidar.station0.i_loc = 382
+   erf.doppler_lidar.station0.j_loc = 258
+   erf.doppler_lidar.station0.interval = 1
+   erf.doppler_lidar.station0.height = 2.0 10.0 25.0
+   erf.doppler_lidar.station0.file_name = station_381_258.dat
+
+   erf.doppler_lidar.station1.i_loc = 500
+   erf.doppler_lidar.station1.j_loc = 300
+   erf.doppler_lidar.station1.interval = 1
+   erf.doppler_lidar.station1.height = 2.0 10.0 25.0
+   erf.doppler_lidar.station1.file_name = station_499_300.dat
+
+Each station must have a valid level-0 cell location, a positive output
+interval, and at least one non-negative height. Do not mix the indexed and
+legacy parameter forms in the same run.
+
 .. _list-of-parameters-10b:
 
 

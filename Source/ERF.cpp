@@ -433,8 +433,12 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
 #endif
     }
 
-    if (ground_station_output && (nstep == 0 || ((nstep + 1) % ground_station_interval == 0))) {
-        writeGroundStationData(time, nstep);
+    if (ground_station_output) {
+        for (auto& station : ground_stations) {
+            if (nstep == 0 || ((nstep + 1) % station.interval == 0)) {
+                writeGroundStationData(station, time, nstep);
+            }
+        }
     }
 
     if (output_bndry_planes)
@@ -2267,14 +2271,51 @@ ERF::ReadParameters ()
         pp.query("column_loc_y", column_loc_y);
         pp.query("column_file_name", column_file_name);
 
-        pp.query("doppler_lidar.i_loc", ground_station_i_loc);
-        pp.query("doppler_lidar.j_loc", ground_station_j_loc);
-        pp.query("doppler_lidar.interval", ground_station_interval);
-        pp.query("doppler_lidar.file_name", ground_station_file_name);
-        if (pp.countval("doppler_lidar.height") > 0) {
-            pp.queryarr("doppler_lidar.height", ground_station_heights);
+        ground_stations.clear();
+
+        int num_ground_stations = 0;
+        pp.query("doppler_lidar.num_stations", num_ground_stations);
+        if (num_ground_stations < 0) {
+            Abort("erf.doppler_lidar.num_stations must be non-negative");
         }
-        ground_station_output = (ground_station_interval > 0 && !ground_station_heights.empty());
+
+        const bool have_legacy_ground_station =
+            pp.countval("doppler_lidar.i_loc") > 0 ||
+            pp.countval("doppler_lidar.j_loc") > 0 ||
+            pp.countval("doppler_lidar.interval") > 0 ||
+            pp.countval("doppler_lidar.height") > 0 ||
+            pp.countval("doppler_lidar.file_name") > 0;
+
+        if (num_ground_stations > 0 && have_legacy_ground_station) {
+            Abort("Use either erf.doppler_lidar.num_stations/stationN or the legacy "
+                  "erf.doppler_lidar.i_loc/j_loc/... parameters, not both");
+        }
+
+        if (num_ground_stations > 0) {
+            ground_stations.resize(num_ground_stations);
+            for (int n = 0; n < num_ground_stations; ++n) {
+                const std::string prefix = "doppler_lidar.station" + std::to_string(n);
+                auto& station = ground_stations[n];
+                pp.query(prefix + ".i_loc", station.i_loc);
+                pp.query(prefix + ".j_loc", station.j_loc);
+                pp.query(prefix + ".interval", station.interval);
+                pp.query(prefix + ".file_name", station.file_name);
+                if (pp.countval(prefix + ".height") > 0) {
+                    pp.queryarr(prefix + ".height", station.heights);
+                }
+            }
+        } else if (have_legacy_ground_station) {
+            ground_stations.resize(1);
+            auto& station = ground_stations.front();
+            pp.query("doppler_lidar.i_loc", station.i_loc);
+            pp.query("doppler_lidar.j_loc", station.j_loc);
+            pp.query("doppler_lidar.interval", station.interval);
+            pp.query("doppler_lidar.file_name", station.file_name);
+            if (pp.countval("doppler_lidar.height") > 0) {
+                pp.queryarr("doppler_lidar.height", station.heights);
+            }
+        }
+        ground_station_output = !ground_stations.empty();
 
         // Sampler output frequency
         pp.query("line_sampling_per", line_sampling_per);
@@ -2553,20 +2594,23 @@ ERF::ParameterSanityChecks ()
         Abort("For two-way coupling you must set cf_width = 0");
     }
 
-    if (ground_station_output) {
-        if (ground_station_i_loc < 0 || ground_station_i_loc >= geom[0].Domain().length(0) ||
-            ground_station_j_loc < 0 || ground_station_j_loc >= geom[0].Domain().length(1)) {
-            Abort("erf.doppler_lidar.i_loc and j_loc must be valid level-0 cell indices");
+    for (int n = 0; n < static_cast<int>(ground_stations.size()); ++n) {
+        const auto& station = ground_stations[n];
+        if (station.i_loc < 0 || station.i_loc >= geom[0].Domain().length(0) ||
+            station.j_loc < 0 || station.j_loc >= geom[0].Domain().length(1)) {
+            Abort("erf.doppler_lidar station " + std::to_string(n) +
+                  " i_loc and j_loc must be valid level-0 cell indices");
         }
-
-        for (const auto& height : ground_station_heights) {
+        if (station.interval <= 0 || station.heights.empty()) {
+            Abort("erf.doppler_lidar station " + std::to_string(n) +
+                  " requires interval > 0 and at least one height");
+        }
+        for (const auto& height : station.heights) {
             if (height < zero) {
-                Abort("erf.doppler_lidar.height entries must be non-negative");
+                Abort("erf.doppler_lidar station " + std::to_string(n) +
+                      " height entries must be non-negative");
             }
         }
-    } else if (ground_station_interval > 0 || !ground_station_heights.empty() ||
-               ground_station_i_loc >= 0 || ground_station_j_loc >= 0) {
-        Abort("Ground station output requires erf.doppler_lidar.i_loc, j_loc, interval, and at least one height");
     }
 }
 

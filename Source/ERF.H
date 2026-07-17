@@ -553,8 +553,18 @@ public:
                               double time);
 #endif //ERF_USE_NETCDF
 
+    struct GroundStationConfig {
+        int i_loc = -1;
+        int j_loc = -1;
+        int interval = -1;
+        amrex::Vector<amrex::Real> heights;
+        std::string file_name = "ground_station.dat";
+        bool header_written = false;
+    };
+
     //! Write a timestep to ground-station output
-    void writeGroundStationData (amrex::Real time, int nstep);
+    void writeGroundStationData (GroundStationConfig& station,
+                                 amrex::Real time, int nstep);
 
     void init_from_input_sounding (int lev);
 
@@ -669,9 +679,10 @@ public:
         amrex::Real rh = amrex::Real(0.0);
     };
 
-    void initializeGroundStationFile ();
-    int findGroundStationLevel () const;
+    void initializeGroundStationFile (GroundStationConfig& station);
+    int findGroundStationLevel (const GroundStationConfig& station) const;
     void sampleGroundStationColumn (int lev,
+                                    const GroundStationConfig& station,
                                     amrex::Vector<amrex::Real>& z_agl,
                                     amrex::Vector<GroundStationSample>& samples,
                                     amrex::Real& surface_pressure,
@@ -1437,12 +1448,7 @@ private:
     static std::string column_file_name;
 
     bool ground_station_output = false;
-    bool ground_station_header_written = false;
-    int ground_station_i_loc = -1;
-    int ground_station_j_loc = -1;
-    int ground_station_interval = -1;
-    amrex::Vector<amrex::Real> ground_station_heights;
-    std::string ground_station_file_name = "ground_station.dat";
+    amrex::Vector<GroundStationConfig> ground_stations;
 
     // 2D BndryRegister output (for ingestion in AMR-Wind)
     static int         output_bndry_planes;

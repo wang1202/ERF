@@ -26,39 +26,39 @@ ERF::formatGroundStationHeightLabel (Real height)
 }
 
 void
-ERF::initializeGroundStationFile ()
+ERF::initializeGroundStationFile (GroundStationConfig& station)
 {
-    if (ground_station_header_written) { return; }
+    if (station.header_written) { return; }
 
     if (ParallelDescriptor::IOProcessor()) {
         bool write_header = true;
         {
-            std::ifstream existing(ground_station_file_name, std::ios::binary | std::ios::ate);
+            std::ifstream existing(station.file_name, std::ios::binary | std::ios::ate);
             write_header = (!existing.good() || existing.tellg() == std::streampos(0));
         }
 
-        std::ofstream out(ground_station_file_name, std::ios::out | std::ios::app);
+        std::ofstream out(station.file_name, std::ios::out | std::ios::app);
         if (!out.good()) {
             Abort("Failed to open ground station output file");
         }
 
         if (write_header) {
-            const Real xloc = geom[0].ProbLo(0) + (static_cast<Real>(ground_station_i_loc) + Real(0.5)) * geom[0].CellSize(0);
-            const Real yloc = geom[0].ProbLo(1) + (static_cast<Real>(ground_station_j_loc) + Real(0.5)) * geom[0].CellSize(1);
+            const Real xloc = geom[0].ProbLo(0) + (static_cast<Real>(station.i_loc) + Real(0.5)) * geom[0].CellSize(0);
+            const Real yloc = geom[0].ProbLo(1) + (static_cast<Real>(station.j_loc) + Real(0.5)) * geom[0].CellSize(1);
 
             out << "# ERF ground station output\n";
-            out << "# i_loc=" << ground_station_i_loc
-                << " j_loc=" << ground_station_j_loc
+            out << "# i_loc=" << station.i_loc
+                << " j_loc=" << station.j_loc
                 << " x_m=" << xloc
                 << " y_m=" << yloc << "\n";
             out << "# heights_agl_m";
-            for (const auto& height : ground_station_heights) {
+            for (const auto& height : station.heights) {
                 out << " " << height;
             }
             out << "\n";
 
             out << "step time_s surface_pressure_pa accumulated_precip_mm";
-            for (const auto& height : ground_station_heights) {
+            for (const auto& height : station.heights) {
                 const std::string suffix = formatGroundStationHeightLabel(height);
                 out << " u_" << suffix
                     << " v_" << suffix
@@ -71,14 +71,14 @@ ERF::initializeGroundStationFile ()
         }
     }
 
-    ground_station_header_written = true;
+    station.header_written = true;
 }
 
 int
-ERF::findGroundStationLevel () const
+ERF::findGroundStationLevel (const GroundStationConfig& station) const
 {
-    const Real xloc = geom[0].ProbLo(0) + (static_cast<Real>(ground_station_i_loc) + Real(0.5)) * geom[0].CellSize(0);
-    const Real yloc = geom[0].ProbLo(1) + (static_cast<Real>(ground_station_j_loc) + Real(0.5)) * geom[0].CellSize(1);
+    const Real xloc = geom[0].ProbLo(0) + (static_cast<Real>(station.i_loc) + Real(0.5)) * geom[0].CellSize(0);
+    const Real yloc = geom[0].ProbLo(1) + (static_cast<Real>(station.j_loc) + Real(0.5)) * geom[0].CellSize(1);
 
     int lev_station = 0;
     for (int lev = finest_level; lev >= 0; --lev) {
@@ -95,13 +95,14 @@ ERF::findGroundStationLevel () const
 
 void
 ERF::sampleGroundStationColumn (int lev,
+                                const GroundStationConfig& station,
                                 Vector<Real>& z_agl,
                                 Vector<GroundStationSample>& samples,
                                 Real& surface_pressure,
                                 Real& accumulated_precip) const
 {
-    const Real xloc = geom[0].ProbLo(0) + (static_cast<Real>(ground_station_i_loc) + Real(0.5)) * geom[0].CellSize(0);
-    const Real yloc = geom[0].ProbLo(1) + (static_cast<Real>(ground_station_j_loc) + Real(0.5)) * geom[0].CellSize(1);
+    const Real xloc = geom[0].ProbLo(0) + (static_cast<Real>(station.i_loc) + Real(0.5)) * geom[0].CellSize(0);
+    const Real yloc = geom[0].ProbLo(1) + (static_cast<Real>(station.j_loc) + Real(0.5)) * geom[0].CellSize(1);
 
     const int i_lev = static_cast<int>(std::floor((xloc - geom[lev].ProbLo(0)) * geom[lev].InvCellSize(0)));
     const int j_lev = static_cast<int>(std::floor((yloc - geom[lev].ProbLo(1)) * geom[lev].InvCellSize(1)));
@@ -134,10 +135,19 @@ ERF::sampleGroundStationColumn (int lev,
                                           z_nd_arr(i_lev    , j_lev + 1, klo) +
                                           z_nd_arr(i_lev + 1, j_lev + 1, klo));
 
-        packed[0] = getPgivenRTh(cons_arr(i_lev, j_lev, klo, RhoTheta_comp),
-                                 use_moisture ? cons_arr(i_lev, j_lev, klo, RhoQ1_comp) /
-                                                    cons_arr(i_lev, j_lev, klo, Rho_comp)
-                                              : Real(0.0));
+        // Diagnose pressure at the lowest cell center, then hydrostatically
+        // extrapolate it downward to the actual terrain surface.
+        const Real rho_low = cons_arr(i_lev, j_lev, klo, Rho_comp);
+        const Real qv_low = use_moisture
+                                ? cons_arr(i_lev, j_lev, klo, RhoQ1_comp) / rho_low
+                                : Real(0.0);
+        const Real p_low = getPgivenRTh(
+            cons_arr(i_lev, j_lev, klo, RhoTheta_comp), qv_low);
+        const Real dz_low_to_surface =
+            amrex::max(z_cc_arr(i_lev, j_lev, klo) - z_surf, Real(0.0));
+        const Real rho_moist_low = rho_low * (Real(1.0) + qv_low);
+
+        packed[0] = p_low + rho_moist_low * CONST_GRAV * dz_low_to_surface;
 
         const int nprecip = std::min(3, static_cast<int>(qmoist[lev].size()));
         for (int n = 0; n < nprecip; ++n) {
@@ -286,26 +296,26 @@ ERF::interpolateGroundStationSample (Real target_height,
 }
 
 void
-ERF::writeGroundStationData (Real time, int nstep)
+ERF::writeGroundStationData (GroundStationConfig& station, Real time, int nstep)
 {
-    initializeGroundStationFile();
+    initializeGroundStationFile(station);
 
-    const int lev = findGroundStationLevel();
+    const int lev = findGroundStationLevel(station);
 
     Vector<Real> z_agl;
     Vector<GroundStationSample> column_samples;
     Real surface_pressure = Real(0.0);
     Real accumulated_precip = Real(0.0);
 
-    sampleGroundStationColumn(lev, z_agl, column_samples, surface_pressure, accumulated_precip);
+    sampleGroundStationColumn(lev, station, z_agl, column_samples, surface_pressure, accumulated_precip);
 
     bool have_surface_layer = (m_SurfaceLayer != nullptr);
     Real ustar = Real(0.0), tstar = Real(0.0), qstar = Real(0.0);
     Real olen = bogus_large_value, theta_surf = Real(0.0), qv_surf = Real(0.0), z0 = Real(0.1);
 
     if (have_surface_layer) {
-        const int i2d = ground_station_i_loc;
-        const int j2d = ground_station_j_loc;
+        const int i2d = station.i_loc;
+        const int j2d = station.j_loc;
         const int mlev = 0;
 
         Vector<Real> surface_pack(7, Real(0.0));
@@ -352,7 +362,7 @@ ERF::writeGroundStationData (Real time, int nstep)
     }
 
     if (ParallelDescriptor::IOProcessor()) {
-        std::ofstream out(ground_station_file_name, std::ios::out | std::ios::app);
+        std::ofstream out(station.file_name, std::ios::out | std::ios::app);
         if (!out.good()) {
             Abort("Failed to append ground station output");
         }
@@ -362,7 +372,7 @@ ERF::writeGroundStationData (Real time, int nstep)
             << std::setprecision(datprecision) << surface_pressure << " "
             << accumulated_precip;
 
-        for (const auto& height : ground_station_heights) {
+        for (const auto& height : station.heights) {
             GroundStationSample sample;
             if (have_surface_layer && !z_agl.empty() && height <= z_agl.front()) {
                 sample = makeMOSTGroundStationSample(column_samples.front(), height, surface_pressure,
