@@ -425,7 +425,7 @@ ShocMoments::diagnose_third_moments (ShocColumnData& col,
             const Real iso = isotropy_i(ic,k,0);
             const Real isosq = iso * iso;
             const Real buoy_sgs2 = isosq * brunt_i(ic,k,0);
-            const Real bet2 = CONST_GRAV_d / amrex::max(thetal_i(ic,k,0), shoc_eps());
+            const Real bet2 = CONST_GRAV / amrex::max(thetal_i(ic,k,0), shoc_eps());
 
             // E3SM's top-down indexing forms above-minus-below centered
             // differences here. In ERF's bottom-up ordering, the upper
