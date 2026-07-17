@@ -238,7 +238,7 @@ namespace
     {
         const Real beta_qs = 1.0_rt + beta * qs;
         const Real pressure_ratio = pval / p_0;
-        const Real pressure_term = std::exp((R_d / Cp_d) * std::log(pressure_ratio));
+        const Real pressure_term = std::exp(RdoCp * std::log(pressure_ratio));
         const Real cthl = ((1.0_rt + beta * qw1) / (beta_qs * beta_qs))
                         * (Cp_d / L_v) * beta * qs * pressure_term;
         const Real cqt = 1.0_rt / (1.0_rt + beta * qs);

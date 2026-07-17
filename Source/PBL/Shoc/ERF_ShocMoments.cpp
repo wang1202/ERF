@@ -149,7 +149,7 @@ namespace
 
         const auto layout = col.layout;
         const Box col_box(IntVect(0,0,0), IntVect(layout.ncell - 1, 0, 0));
-        ParallelFor(col_box, [=,CONST_GRAV_d=CONST_GRAV] AMREX_GPU_DEVICE (int ic, int, int) noexcept
+        ParallelFor(col_box, [=] AMREX_GPU_DEVICE (int ic, int, int) noexcept
         {
             const Real wthl_sfc = sflux(ic,0,0);
             const Real wqw_sfc = lflux(ic,0,0);
@@ -157,7 +157,7 @@ namespace
             const Real vw_sfc = tauv(ic,0,0);
             const Real ustar2 = std::sqrt(uw_sfc * uw_sfc + vw_sfc * vw_sfc);
             const Real wstar = (wthl_sfc >= 0.0_rt)
-                ? std::cbrt((CONST_GRAV_d / shoc_base_temp()) * wthl_sfc)
+                ? std::cbrt((CONST_GRAV / shoc_base_temp()) * wthl_sfc)
                 : 0.0_rt;
             const Real uf = amrex::max(shoc_ufmin(),
                                        std::sqrt(ustar2 + 0.3_rt * wstar * wstar));
@@ -406,7 +406,7 @@ ShocMoments::diagnose_third_moments (ShocColumnData& col,
     const auto zi = col.zi.const_array();
     const auto layout = col.layout;
     const Box col_box(IntVect(0,0,0), IntVect(layout.ncell - 1, 0, 0));
-    ParallelFor(col_box, [=,CONST_GRAV_d=CONST_GRAV] AMREX_GPU_DEVICE (int ic, int, int) noexcept
+    ParallelFor(col_box, [=] AMREX_GPU_DEVICE (int ic, int, int) noexcept
     {
         w3(ic,0,0) = 0.0_rt;
         w3(ic,layout.nlev,0) = 0.0_rt;
