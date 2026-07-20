@@ -433,14 +433,6 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
 #endif
     }
 
-    if (ground_station_output) {
-        for (auto& station : ground_stations) {
-            if (nstep == 0 || ((nstep + 1) % station.interval == 0)) {
-                writeGroundStationData(station, time, nstep);
-            }
-        }
-    }
-
     if (output_bndry_planes)
     {
       if (is_it_time_for_action(istep[0], time, dt_lev0, bndry_output_planes_interval, bndry_output_planes_per) &&
@@ -573,6 +565,11 @@ ERF::InitData_post ()
         restart();
     }
 
+    // Select 2-D variables after the active LSM has initialized its runtime
+    // field inventory, including provider-specific soil layers.
+    setPlotVariables2D("plot2d_vars_1", plot2d_var_names_1);
+    setPlotVariables2D("plot2d_vars_2", plot2d_var_names_2);
+
     //
     // Make sure that detJ and z_phys_cc are the average of the data on a finer level if there is one and if two way coupling
     //
@@ -684,7 +681,7 @@ ERF::InitData_post ()
                                              bdy_data_xlo,bdy_data_xhi,bdy_data_ylo,bdy_data_yhi,
                                              wrf_MUB, wrf_C1H, wrf_C2H, wrf_RDNW, wrf_PHB, z_phys_nd[0],
                                              vars_new[0][Vars::xvel], vars_new[0][Vars::yvel], vars_new[0][Vars::cons],
-                                             r_hse, area_vec, geom[0], use_moist, solverChoice.rebalance_wrf_bdy, domain_bcs_type,
+                                             r_hse, area_vec, geom[0], use_moist, solverChoice.rebalance_wrf_input, domain_bcs_type,
                                              real_width, bdy_time_interval, is_anelastic);
             }
 
@@ -697,7 +694,7 @@ ERF::InitData_post ()
                                              bdy_data_xlo,bdy_data_xhi,bdy_data_ylo,bdy_data_yhi,
                                              wrf_MUB, wrf_C1H, wrf_C2H, wrf_RDNW, wrf_PHB, z_phys_nd[0],
                                              vars_new[0][Vars::xvel], vars_new[0][Vars::yvel], vars_new[0][Vars::cons],
-                                             r_hse, area_vec, geom[0], use_moist, solverChoice.rebalance_wrf_bdy, domain_bcs_type,
+                                             r_hse, area_vec, geom[0], use_moist, solverChoice.rebalance_wrf_input, domain_bcs_type,
                                              real_width, bdy_time_interval, is_anelastic);
             } // itime
         } // use_real_bcs
@@ -744,6 +741,15 @@ ERF::InitData_post ()
                                vars_new[lev][Vars::cons], *mf_PSFC[lev],
                                solverChoice.rdOcp, lmask_lev[lev][0], use_moist);
             } // itime
+        }
+#endif
+#ifdef ERF_USE_FFT
+        for (int lev = 0; lev <= finest_level; lev++) {
+            // rebuild fft solvers here in case mesh type was changed when reading the checkpoint file
+            if ( ( (solverChoice.anelastic[lev] == 1)               || (solverChoice.project_initial_velocity[lev] == 1) ) &&
+                 ( (solverChoice.mesh_type == MeshType::ConstantDz) || (solverChoice.mesh_type == MeshType::StretchedDz) ) ) {
+                build_fft_solvers(lev);
+            }
         }
 #endif
     } // end restart
@@ -2271,52 +2277,6 @@ ERF::ReadParameters ()
         pp.query("column_loc_y", column_loc_y);
         pp.query("column_file_name", column_file_name);
 
-        ground_stations.clear();
-
-        int num_ground_stations = 0;
-        pp.query("doppler_lidar.num_stations", num_ground_stations);
-        if (num_ground_stations < 0) {
-            Abort("erf.doppler_lidar.num_stations must be non-negative");
-        }
-
-        const bool have_legacy_ground_station =
-            pp.countval("doppler_lidar.i_loc") > 0 ||
-            pp.countval("doppler_lidar.j_loc") > 0 ||
-            pp.countval("doppler_lidar.interval") > 0 ||
-            pp.countval("doppler_lidar.height") > 0 ||
-            pp.countval("doppler_lidar.file_name") > 0;
-
-        if (num_ground_stations > 0 && have_legacy_ground_station) {
-            Abort("Use either erf.doppler_lidar.num_stations/stationN or the legacy "
-                  "erf.doppler_lidar.i_loc/j_loc/... parameters, not both");
-        }
-
-        if (num_ground_stations > 0) {
-            ground_stations.resize(num_ground_stations);
-            for (int n = 0; n < num_ground_stations; ++n) {
-                const std::string prefix = "doppler_lidar.station" + std::to_string(n);
-                auto& station = ground_stations[n];
-                pp.query(prefix + ".i_loc", station.i_loc);
-                pp.query(prefix + ".j_loc", station.j_loc);
-                pp.query(prefix + ".interval", station.interval);
-                pp.query(prefix + ".file_name", station.file_name);
-                if (pp.countval(prefix + ".height") > 0) {
-                    pp.queryarr(prefix + ".height", station.heights);
-                }
-            }
-        } else if (have_legacy_ground_station) {
-            ground_stations.resize(1);
-            auto& station = ground_stations.front();
-            pp.query("doppler_lidar.i_loc", station.i_loc);
-            pp.query("doppler_lidar.j_loc", station.j_loc);
-            pp.query("doppler_lidar.interval", station.interval);
-            pp.query("doppler_lidar.file_name", station.file_name);
-            if (pp.countval("doppler_lidar.height") > 0) {
-                pp.queryarr("doppler_lidar.height", station.heights);
-            }
-        }
-        ground_station_output = !ground_stations.empty();
-
         // Sampler output frequency
         pp.query("line_sampling_per", line_sampling_per);
         pp.query("line_sampling_interval", line_sampling_interval);
@@ -2592,25 +2552,6 @@ ERF::ParameterSanityChecks ()
 
     if (solverChoice.coupling_type == CouplingType::TwoWay && cf_width > 0) {
         Abort("For two-way coupling you must set cf_width = 0");
-    }
-
-    for (int n = 0; n < static_cast<int>(ground_stations.size()); ++n) {
-        const auto& station = ground_stations[n];
-        if (station.i_loc < 0 || station.i_loc >= geom[0].Domain().length(0) ||
-            station.j_loc < 0 || station.j_loc >= geom[0].Domain().length(1)) {
-            Abort("erf.doppler_lidar station " + std::to_string(n) +
-                  " i_loc and j_loc must be valid level-0 cell indices");
-        }
-        if (station.interval <= 0 || station.heights.empty()) {
-            Abort("erf.doppler_lidar station " + std::to_string(n) +
-                  " requires interval > 0 and at least one height");
-        }
-        for (const auto& height : station.heights) {
-            if (height < zero) {
-                Abort("erf.doppler_lidar station " + std::to_string(n) +
-                      " height entries must be non-negative");
-            }
-        }
     }
 }
 

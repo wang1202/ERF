@@ -1726,7 +1726,8 @@ List of Parameters
 |                                  | true                |                    |                       |
 +----------------------------------+---------------------+--------------------+-----------------------+
 | **erf.rebalance_wrf_input**      | rebalance state     |  bool              | true                  |
-|                                  | from wrf input?     |                    |                       |
+|                                  | from wrfinput and   |                    |                       |
+|                                  | wrfbdy?             |                    |                       |
 +----------------------------------+---------------------+--------------------+-----------------------+
 | **erf.rebalance_wrf_bdy**        | rebalance WRF       |  bool              | true                  |
 |                                  | boundary state?     |                    |                       |
