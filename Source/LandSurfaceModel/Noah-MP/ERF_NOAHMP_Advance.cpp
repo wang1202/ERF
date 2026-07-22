@@ -139,8 +139,8 @@ NOAHMP::stage_forcing (const MFIter& mfi,
                     ? amrex::max(zero_d, (accum_now[s](i,j,kklo) - accum_prv[s](i,j,kklo)) * accum_fac[s])
                     : zero_d;
             }
-            // Hail is folded into MP_GRAUP (no ERF scheme fills the hail slot
-            // today); to feed it separately, stage dd[hail] into MP_HAIL instead.
+            // Hail is folded into MP_GRAUP; the current ERF-Noah-MP interface
+            // does not expose a separate MP_HAIL field.
             dsnow  = dd[NoahmpPrecipSlot::snow];
             dgraup = dd[NoahmpPrecipSlot::graupel] + dd[NoahmpPrecipSlot::hail];
             const Real dfroz = dsnow + dgraup;
@@ -195,8 +195,6 @@ NOAHMP::stage_forcing (const MFIter& mfi,
         noahmpio->MP_RAINNC(i,j) = drain_h;                                       // [mm]
         noahmpio->MP_SNOW(i,j)   = dsnow_h;                                       // [mm]
         noahmpio->MP_GRAUP(i,j)  = dgraup_h;                                      // [mm] (includes folded hail)
-        // 0 = "no hail" (a real value, not a sentinel; lsm_undefined would corrupt opt_snf=4)
-        noahmpio->MP_HAIL(i,j)   = zero_d;                                        // [mm]
     });
 }
 

@@ -933,7 +933,9 @@ Doppler lidar ground-station output
 Ground-station columns can be written to one or more text files. The legacy
 single-station parameters ``erf.doppler_lidar.i_loc``, ``j_loc``, ``interval``,
 ``height``, and ``file_name`` remain supported. For multiple stations, set
-``erf.doppler_lidar.num_stations`` and use zero-based station names:
+``erf.doppler_lidar.num_stations`` and use either zero-based station names
+(``station0`` through ``stationN-1``) or one-based station names (``station1``
+through ``stationN``):
 
 .. code-block:: text
 
@@ -952,7 +954,8 @@ single-station parameters ``erf.doppler_lidar.i_loc``, ``j_loc``, ``interval``,
 
 Each station must have a valid level-0 cell location, a positive output
 interval, and at least one non-negative height. Do not mix the indexed and
-legacy parameter forms in the same run.
+legacy parameter forms, or zero-based and one-based station numbering, in the
+same run.
 
 .. _list-of-parameters-10b:
 
@@ -1729,8 +1732,10 @@ List of Parameters
 |                                  | from wrfinput and   |                    |                       |
 |                                  | wrfbdy?             |                    |                       |
 +----------------------------------+---------------------+--------------------+-----------------------+
-| **erf.rebalance_wrf_bdy**        | rebalance WRF       |  bool              | true                  |
-|                                  | boundary state?     |                    |                       |
+| **erf.maintain_Th**              | maintain potential  | bool               | false                 |
+|                                  | temperature during  |                    |                       |
+|                                  | WRF boundary HSE   |                    |                       |
+|                                  | solve?              |                    |                       |
 +----------------------------------+---------------------+--------------------+-----------------------+
 | **erf.real_extrap_w**            | First-order         | bool               | true                  |
 |                                  | extrapolation of    |                    |                       |
