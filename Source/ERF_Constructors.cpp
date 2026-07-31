@@ -422,13 +422,12 @@ ERF::ERF_shared ()
     // Construct the EB data structures and store in a separate class
     //
     // This is needed before initializing level MultiFabs
+    std::string geometry ="terrain";
+    ParmParse pp_eb2("eb2");
+    pp_eb2.queryAdd("geometry", geometry);
     if ( solverChoice.terrain_type == TerrainType::EB ||
          solverChoice.terrain_type == TerrainType::ImmersedForcing)
     {
-        std::string geometry ="terrain";
-        ParmParse pp_eb2("eb2");
-        pp_eb2.queryAdd("geometry", geometry);
-
         constexpr int ngrow_for_eb = 4;  // This is the default in amrex but we need to explicitly pass it here since
                                // we want to also pass the build_coarse_level_by_coarsening argument
         const bool build_eb_for_multigrid = (solverChoice.terrain_type == TerrainType::EB &&
@@ -451,6 +450,9 @@ ERF::ERF_shared ()
                             ngrow_for_eb, build_coarse_level_by_coarsening);
             } else {
                 EB2::Build(gshop, this->Geom(), ngrow_for_eb);
+#if USE_FC_FACTORY
+                EB2::BuildFC();
+#endif
             }
         } else if (geometry == "plane") {
             RealArray plane_point{zero, zero, zero};
@@ -464,6 +466,9 @@ ERF::ERF_shared ()
                             ngrow_for_eb, build_coarse_level_by_coarsening);
             } else {
                 EB2::Build(gshop, this->Geom(), ngrow_for_eb);
+#if USE_FC_FACTORY
+                EB2::BuildFC();
+#endif
             }
         } else if (geometry == "box") {
             RealArray box_lo{zero, zero, zero};
@@ -477,6 +482,9 @@ ERF::ERF_shared ()
                             ngrow_for_eb, build_coarse_level_by_coarsening);
             } else {
                 EB2::Build(gshop, this->Geom(), ngrow_for_eb);
+#if USE_FC_FACTORY
+                EB2::BuildFC();
+#endif
             }
         } else if (geometry == "sphere") {
             auto ProbLoArr = geom[max_level].ProbLoArray();
@@ -491,19 +499,36 @@ ERF::ERF_shared ()
                             ngrow_for_eb, build_coarse_level_by_coarsening);
             } else {
                 EB2::Build(gshop, this->Geom(), ngrow_for_eb);
+#if USE_FC_FACTORY
+                EB2::BuildFC();
+#endif
             }
         }
     }
 
     if ( solverChoice.buildings_type == BuildingsType::ImmersedForcing) {
         constexpr int ngrow_for_eb = 4;
-        Box buildings_bx(surroundingNodes(geom[max_level].Domain())); buildings_bx.grow(3);
-        FArrayBox buildings_fab(makeSlab(buildings_bx,2,0),1);
-        double dummy_time = 0.0;
-        prob->init_buildings_surface(geom[max_level], buildings_fab, dummy_time);
-        TerrainIF implicit_fun(buildings_fab, geom[max_level], stretched_dz_d[max_level]);
-        auto gshop = EB2::makeShop(implicit_fun);
-        EB2::Build(gshop, this->Geom(), ngrow_for_eb);
+        if (geometry == "terrain") {
+            Box buildings_bx(surroundingNodes(geom[max_level].Domain())); buildings_bx.grow(3);
+            FArrayBox buildings_fab(makeSlab(buildings_bx,2,0),1);
+            double dummy_time = 0.0;
+            prob->init_buildings_surface(geom[max_level], buildings_fab, dummy_time);
+            TerrainIF implicit_fun(buildings_fab, geom[max_level], stretched_dz_d[max_level]);
+            auto gshop = EB2::makeShop(implicit_fun);
+            EB2::Build(gshop, this->Geom(), ngrow_for_eb);
+        } else if (geometry == "plane") {
+            amrex::Abort("plane geometry is not supported with ImmersedForcing for buildings");
+        } else if (geometry == "box") {
+            RealArray box_lo{zero, zero, zero};
+            RealArray box_hi{zero, zero, zero};
+            pp_eb2.query("box_lo", box_lo);
+            pp_eb2.query("box_hi", box_hi);
+            EB2::BoxIF implicit_fun(box_lo, box_hi, false);
+            auto gshop = EB2::makeShop(implicit_fun);
+            EB2::Build(gshop, this->Geom(), ngrow_for_eb);
+        } else if (geometry == "sphere") {
+            amrex::Abort("sphere geometry is not supported with ImmersedForcing for buildings");
+        }
     }
 
     forecast_state_1.resize(nlevs_max);
