@@ -2028,29 +2028,42 @@ compiled with particles.
 
 The following run-time options control how the full moisture model is used.
 
+For WSM6, the fixed single-moment cloud-droplet concentration can be set in
+``cm^-3``. The default preserves the historical value of ``300 cm^-3``:
+
+.. code-block:: text
+
+   erf.moisture_model = "WSM6"
+   erf.wsm6_cloud_droplet_number = 250
+
 List of Parameters
 ------------------
 
-+---------------------------------+--------------------------+-----------------------+------------+
-| Parameter                       | Definition               | Acceptable            | Default    |
-|                                 |                          | Values                |            |
-+=================================+==========================+=======================+============+
-| **erf.moisture_model**          | Name of moisture model   |  "None", "SAM",       | "None"     |
-|                                 |                          |  "Kessler", "SatAdj"  |            |
-|                                 |                          |  "Kessler_NoRain",    |            |
-|                                 |                          |  "Morrison",          |            |
-|                                 |                          |  "Morrison_NoIce",    |            |
-|                                 |                          |  "SAM_NoPrecip_NoIce",|            |
-|                                 |                          |  "SAM_NoIce", "P3",   |            |
-|                                 |                          |  "MoistNoCondensation"|            |
-+---------------------------------+--------------------------+-----------------------+------------+
-| **erf.moisture_tight_coupling** | If true, advance         |  Bool                 | false      |
-|                                 | microphysics after every |                       |            |
-|                                 | slow step in the dycore; |                       |            |
-|                                 | otherwise, update after  |                       |            |
-|                                 | the dycore has been      |                       |            |
-|                                 | advanced at each timestep|                       |            |
-+---------------------------------+--------------------------+-----------------------+------------+
++----------------------------------+--------------------------+-----------------------+------------+
+| Parameter                        | Definition               | Acceptable            | Default    |
+|                                  |                          | Values                |            |
++==================================+==========================+=======================+============+
+| **erf.moisture_model**           | Name of moisture model   |  "None", "SAM",       | "None"     |
+|                                  |                          |  "Kessler", "SatAdj"  |            |
+|                                  |                          |  "Kessler_NoRain",    |            |
+|                                  |                          |  "Morrison",          |            |
+|                                  |                          |  "Morrison_NoIce",    |            |
+|                                  |                          |  "SAM_NoPrecip_NoIce",|            |
+|                                  |                          |  "SAM_NoIce", "P3",   |            |
+|                                  |                          |  "WSM6",              |            |
+|                                  |                          |  "MoistNoCondensation"|            |
++----------------------------------+--------------------------+-----------------------+------------+
+| **erf.wsm6_cloud_droplet_number**| Fixed cloud-droplet      | Real > 0 [cm^-3];     | 300.0      |
+|                                  | number concentration     | WSM6 only             |            |
+|                                  | used by WSM6             |                       |            |
++----------------------------------+--------------------------+-----------------------+------------+
+| **erf.moisture_tight_coupling**  | If true, advance         |  Bool                 | false      |
+|                                  | microphysics after every |                       |            |
+|                                  | slow step in the dycore; |                       |            |
+|                                  | otherwise, update after  |                       |            |
+|                                  | the dycore has been      |                       |            |
+|                                  | advanced at each timestep|                       |            |
++----------------------------------+--------------------------+-----------------------+------------+
 
 Radiation
 =========

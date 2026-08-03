@@ -872,6 +872,8 @@ WSM6::Advance(const Real& dt_advance,
     bool run_wsm6_fort = !use_wsm6_cpp_answer;
 
     static bool wsm6_inited = false;
+    static double wsm6_xncr = 0.0;
+    const double configured_xncr = static_cast<double>(m_xncr);
 
     // Minimal phase-1 initialization for single-moment WSM6.
     if (!wsm6_inited) {
@@ -881,8 +883,13 @@ WSM6::Advance(const Real& dt_advance,
         constexpr double cl = static_cast<double>(Cp_l);
         constexpr double cpv = static_cast<double>(Cp_v);
         constexpr int hail_opt = 0;                   // Graupel mode
-        mp_wsm6_init_c(den0, denr, dens, cl, cpv, hail_opt);
+        mp_wsm6_init_c(den0, denr, dens, cl, cpv, configured_xncr, hail_opt);
+        wsm6_xncr = configured_xncr;
         wsm6_inited = true;
+    } else {
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+            wsm6_xncr == configured_xncr,
+            "All WSM6 instances must use the same cloud droplet number concentration");
     }
 #endif
 
@@ -904,6 +911,7 @@ WSM6::Advance(const Real& dt_advance,
     constexpr double cliq = static_cast<double>(Cp_l);
     constexpr double cice = 2106.0;
     constexpr double psat = 610.78;
+    const Real xncr = m_xncr;
     for (MFIter mfi(*mic_fab_vars[MicVar_WSM6::qv], TileNoZ()); mfi.isValid(); ++mfi) {
         const Box box = mfi.tilebox();
         const Box fab_box = mfi.fabbox();
@@ -1702,7 +1710,7 @@ WSM6::Advance(const Real& dt_advance,
                     const Real pfrzdtc = amrex::min(
                         Real(pfrz1) *
                         (std::exp(Real(pfrz2) * supcolt) - Real(1.0)) *
-                        den_arr(i,j,k) / Real(denr) / Real(WSM6::xncr) *
+                        den_arr(i,j,k) / Real(denr) / xncr *
                         qc_arr(i,j,k) * qc_arr(i,j,k) * dtcld,
                         qc_arr(i,j,k));
                     pihtf_arr(i,j,k) = pfrzdtc;

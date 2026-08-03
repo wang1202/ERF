@@ -20,7 +20,7 @@
  real(kind=kind_phys),parameter,private:: bvtr = 0.8        ! a constant for terminal velocity of rain
  real(kind=kind_phys),parameter,private:: r0 = .8e-5        ! 8 microm  in contrast to 10 micro m
  real(kind=kind_phys),parameter,private:: peaut = .55       ! collection efficiency
- real(kind=kind_phys),parameter,private:: xncr = 3.e8       ! maritime cloud in contrast to 3.e8 in tc80
+ real(kind=kind_phys),save,private:: xncr = 3.e8             ! cloud droplet number concentration [m^-3]
  real(kind=kind_phys),parameter,private:: xmyu = 1.718e-5   ! the dynamic viscosity kgm-1s-1
  real(kind=kind_phys),parameter,private:: avts = 11.72      ! a constant for terminal velocity of snow
  real(kind=kind_phys),parameter,private:: bvts = .41        ! a constant for terminal velocity of snow
@@ -69,18 +69,25 @@
 !>\section arg_table_mp_wsm6_init
 !!\html\include mp_wsm6_init.html
 !!
- subroutine mp_wsm6_init(den0,denr,dens,cl,cpv,hail_opt,errmsg,errflg)
+ subroutine mp_wsm6_init(den0,denr,dens,cl,cpv,xncr_in,hail_opt,errmsg,errflg)
 !=================================================================================================================
 
 !input arguments:
  integer,intent(in):: hail_opt ! RAS
- real(kind=kind_phys),intent(in):: den0,denr,dens,cl,cpv
+ real(kind=kind_phys),intent(in):: den0,denr,dens,cl,cpv,xncr_in
 
 !output arguments:
  character(len=*),intent(out):: errmsg
  integer,intent(out):: errflg
 
 !-----------------------------------------------------------------------------------------------------------------
+
+ if (xncr_in .le. 0.) then
+    errmsg = 'mp_wsm6_init requires xncr_in > 0 m^-3'
+    errflg = 1
+    return
+ endif
+ xncr = xncr_in
 
 ! RAS13.1 define graupel parameters as graupel-like or hail-like,
 !         depending on namelist option

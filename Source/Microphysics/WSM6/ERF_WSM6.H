@@ -47,6 +47,7 @@ public:
         m_moisture_type = sc.moisture_type;
         m_axis = sc.ave_plane;
         m_do_cond = (!sc.uses_shoc_family());
+        m_xncr = sc.wsm6_cloud_droplet_number * cloud_droplet_number_cm3_to_m3;
     }
 
     // WSM6 module parameter constants (Fortran: parameter, private)
@@ -56,7 +57,8 @@ public:
     static constexpr amrex::Real bvtr       = amrex::Real(0.8);
     static constexpr amrex::Real r0         = amrex::Real(0.8e-5);
     static constexpr amrex::Real peaut      = amrex::Real(0.55);
-    static constexpr amrex::Real xncr       = amrex::Real(3.0e8);
+    static constexpr amrex::Real default_xncr = amrex::Real(3.0e8); // [m^-3]
+    static constexpr amrex::Real cloud_droplet_number_cm3_to_m3 = amrex::Real(1.0e6);
     static constexpr amrex::Real xmyu       = amrex::Real(1.718e-5);
     static constexpr amrex::Real avts       = amrex::Real(11.72);
     static constexpr amrex::Real bvts       = amrex::Real(0.41);
@@ -151,6 +153,7 @@ private:
     // ---- WSM6 init coefficients (from mp_wsm6_init save variables) ----
     // hail_opt-dependent (set in Initialize() based on m_hail_opt)
     bool m_hail_opt{false};
+    amrex::Real m_xncr{default_xncr}; // [m^-3]
     amrex::Real m_n0g{0}, m_deng{0}, m_avtg{0}, m_bvtg{0}, m_lamdagmax{0};
 
     void initialize_coeffs();

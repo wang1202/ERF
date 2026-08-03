@@ -17,13 +17,13 @@ contains
 
 
 
-  subroutine mp_wsm6_init_c(den0, denr, dens, cl, cpv, hail_opt) bind(C, name="mp_wsm6_init_c")
-    real(c_double), value, intent(in) :: den0, denr, dens, cl, cpv
+  subroutine mp_wsm6_init_c(den0, denr, dens, cl, cpv, xncr_in, hail_opt) bind(C, name="mp_wsm6_init_c")
+    real(c_double), value, intent(in) :: den0, denr, dens, cl, cpv, xncr_in
     integer(c_int), value, intent(in) :: hail_opt
     character(len=256) :: errmsg
     integer :: errflg
 
-    call mp_wsm6_init(den0, denr, dens, cl, cpv, int(hail_opt, kind(0)), errmsg, errflg)
+    call mp_wsm6_init(den0, denr, dens, cl, cpv, xncr_in, int(hail_opt, kind(0)), errmsg, errflg)
     if (errflg /= 0) then
       write(*,'(A,1X,A)') 'mp_wsm6_init_c error:', trim(errmsg)
       stop 1

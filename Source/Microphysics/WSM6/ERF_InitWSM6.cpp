@@ -128,9 +128,9 @@ WSM6::initialize_coeffs()
     m_xlv1    = cl - cpv_loc;
 
     m_qc0  = Real(4.0)/Real(3.0) * m_pi_wsm6 * denr
-              * std::pow(r0, Real(3.0)) * xncr / den0;
+              * std::pow(r0, Real(3.0)) * m_xncr / den0;
     m_qck1 = Real(0.104) * Real(9.8) * peaut
-              / std::pow(xncr * denr, Real(1.0)/Real(3.0))
+              / std::pow(m_xncr * denr, Real(1.0)/Real(3.0))
               / xmyu * std::pow(den0, Real(4.0)/Real(3.0));
     m_pidnc = m_pi_wsm6 * denr / Real(6.0);
 

@@ -2,6 +2,10 @@
 
 This workflow reproduces a like-for-like WSM6 vs Morrison comparison using the same ERF executable, runtime controls, and `fcompare` postprocessing.
 
+WSM6 uses a fixed cloud-droplet number concentration of `300 cm^-3` by default.
+Override it with `erf.wsm6_cloud_droplet_number = <positive value in cm^-3>`;
+the native C++ and optional Fortran bridge both use the same configured value.
+
 ## Setup
 
 Set `ERF_HOME` and derived paths once:

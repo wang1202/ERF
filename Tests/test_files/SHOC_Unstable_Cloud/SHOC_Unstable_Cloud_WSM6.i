@@ -5,6 +5,7 @@ erf.init_type = "input_sounding"
 erf.sounding_type = Ideal
 erf.input_sounding_file = "input_sounding_unstable_cloud"
 erf.moisture_model = WSM6
+erf.wsm6_cloud_droplet_number = 300.0
 
 stop_time = 20.0
 max_step = 20
