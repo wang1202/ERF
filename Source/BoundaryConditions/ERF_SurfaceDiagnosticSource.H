@@ -23,6 +23,25 @@ enum class SurfaceDiagnosticSource : int
     RICO                 = 6
 };
 
+// Provenance for the effective surface temperature.  This is deliberately
+// separate from SurfaceDiagnosticSource, which reports the scalar-flux path.
+enum class SurfaceTemperatureSource : int
+{
+    Missing   = 0,
+    Default   = 1,
+    WrfTsk    = 2,
+    Sst       = 3,
+    Noahmp    = 4,
+    OceanSurf = 5
+};
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+amrex::Real
+to_plot_value (SurfaceTemperatureSource source) noexcept
+{
+    return static_cast<amrex::Real>(static_cast<int>(source));
+}
+
 /**
  * Convert a diagnostic source enum to its integer code.
  *

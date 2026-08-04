@@ -125,7 +125,7 @@ Noah-MP ``HFX`` gates the following Noah-MP return fields:
 
 .. code-block:: text
 
-   t_sfc
+   t_skin_noahmp
    sfc_emis
    sfc_alb_dir_vis
    sfc_alb_dir_nir
@@ -143,6 +143,22 @@ Noah-MP ``HFX`` gates the following Noah-MP return fields:
    noahmp_water_vapor_mixing_ratio_2m_vegetated
    noahmp_water_vapor_mixing_ratio_2m_bare
    noahmp_vegetation_fraction
+
+Effective surface temperature
+-----------------------------
+
+``t_skin_noahmp`` is raw Noah-MP ``TSK``. It is populated only by Noah-MP and
+retains a missing/sentinel value when no valid land-cell result exists.
+``t_sfc`` is the effective ERF surface temperature used by MOST and radiation:
+over land it selects valid raw Noah-MP temperature, then WRF lower-boundary
+``TSK``, then the configured/default temperature; over water it preserves the
+OceanSurf/SST selection. Deprecated ``t_surf`` is an exact alias of ``t_sfc``.
+
+``surface_temperature_source`` records this selection: 0 missing, 1 default,
+2 WRF TSK, 3 SST, 4 Noah-MP, and 5 OceanSurf. It is distinct from
+``surface_diagnostic_source``, which records the surface-flux path. Effective
+``t_sfc`` is reconstructed before use after restart while raw
+``t_skin_noahmp`` is restored through the Noah-MP state path.
 
 It also gates Noah-MP surface-flux results and runtime soil result fields. The
 gate rejects nonfinite values and the provider sentinel; it is not a positivity

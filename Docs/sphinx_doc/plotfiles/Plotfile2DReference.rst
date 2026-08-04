@@ -111,6 +111,11 @@ configuration and runtime details that cannot be inferred from metadata alone.
      - ``K``
      - ``FillMinus999WhenUnavailable``
      - Surface temperature from the surface layer
+   * - ``t_sfc``
+     - ``SurfaceLayer``
+     - ``K``
+     - ``FillMinus999WhenUnavailable``
+     - Effective ERF surface temperature used by MOST and radiation; ``t_surf`` is a deprecated alias
    * - ``q_surf``
      - ``SurfaceLayer``
      - ``kg/kg``
@@ -236,11 +241,11 @@ configuration and runtime details that cannot be inferred from metadata alone.
      - ``K m s^-1``
      - ``FillMinus999WhenUnavailable``
      - Native SHOC surface virtual potential temperature flux
-   * - ``t_sfc``
+   * - ``t_skin_noahmp``
      - ``LandSurface``
      - ``K``
      - ``FillMinus999WhenUnavailable``
-     - Noah-MP radiative surface temperature
+     - Raw Noah-MP skin temperature; never overwritten by ERF fallbacks
    * - ``sfc_emis``
      - ``LandSurface``
      - ``1``
@@ -458,7 +463,7 @@ The selection contract and the value written after selection are separate:
    * - ``integrated_qc``, ``integrated_qi``, ``integrated_qr``, ``integrated_qs``, ``integrated_qg``
      - Selectable: the active moisture model exposes the corresponding conserved mass component.
      - Value: the corresponding column water path. An unsupported species is skipped during request validation.
-   * - Fixed land-surface provider names from ``t_sfc`` through ``noahmp_vegetation_fraction``
+   * - Fixed land-surface provider names from ``t_skin_noahmp`` through ``noahmp_vegetation_fraction``
      - Selectable: the active land-surface inventory contains the exact name.
      - Value: finite provider values pass through when valid; absent, nonfinite, or sentinel values become ``-999``. Valid zero and signed values pass through when the field permits them. Raw fields never use MOST fallback.
    * - ``temperature_2m``

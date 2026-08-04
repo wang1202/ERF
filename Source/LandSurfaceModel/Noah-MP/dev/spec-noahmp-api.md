@@ -37,7 +37,7 @@ These are the fields ERF's other components read from / write to the LSM, via th
 `MultiFab` allocated in `Init()`.
 
 - **`LsmData_NOAHMP`** — state shared with **radiation (RRTMGP)**: surface
-  temperature `t_sfc`, emissivity `sfc_emis`, the four albedos
+  raw skin temperature `t_skin_noahmp`, emissivity `sfc_emis`, the four albedos
   (`sfc_alb_{dir,dif}_{vis,nir}`), `cos_zenith_angle`, and the downwelling
   short/long-wave fluxes that radiation produces and Noah-MP consumes
   (`sw_flux_dn*`, `lw_flux_dn`). The same enum also carries Noah-MP's land
@@ -52,7 +52,7 @@ These are the fields ERF's other components read from / write to the LSM, via th
 
 Direction matters: some `LsmData` entries flow *into* Noah-MP as forcing
 (`sw_flux_dn`, `lw_flux_dn`, `cos_zenith_angle`), the rest flow *out* of Noah-MP
-as results (`t_sfc`, `sfc_emis`, albedos). `Init()` initializes every
+as results (`t_skin_noahmp`, `sfc_emis`, albedos). `Init()` initializes every
 `lsm_fab_data` (and `lsm_fab_flux`) field to the `lsm_undefined` sentinel; each
 is overwritten with a real value once radiation (the forcing fields) and Noah-MP
 (the result fields) have run.

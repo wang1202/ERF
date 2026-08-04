@@ -31,7 +31,7 @@ public:
          amrex::Geometry& geom,
          amrex::MultiFab* cons_in,
          amrex::iMultiFab* lmask,
-         amrex::MultiFab*  t_surf,
+         amrex::MultiFab*  effective_t_sfc,
          amrex::Vector<amrex::MultiFab*>& lsm_input_ptrs,
          amrex::Vector<amrex::MultiFab*>& lsm_output_ptrs,
          amrex::MultiFab* qheating_rates,

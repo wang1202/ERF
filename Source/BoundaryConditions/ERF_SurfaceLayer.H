@@ -369,9 +369,10 @@ public:
           w_star.resize(nlevs);
           t_star.resize(nlevs);
           q_star.resize(nlevs);
-          t_surf.resize(nlevs);
+          t_sfc.resize(nlevs);
           q_surf.resize(nlevs);
           surface_diagnostic_source.resize(nlevs);
+          surface_temperature_source.resize(nlevs);
           olen.resize(nlevs);
           pblh.resize(nlevs);
       }
@@ -409,9 +410,9 @@ public:
           m_lsm_data_name[n]     = lsm_data_name[n];
           m_lsm_data_lev[lev][n] = lsm_data[n];
           const std::string lc_name = amrex::toLower(lsm_data_name[n]);
-          if (lc_name == "theta" || lc_name == "t_surf") {
-              m_has_lsm_tsurf  = true;
-              m_lsm_tsurf_indx = n;
+          if (lc_name == "theta" || lc_name == "t_surf" || lc_name == "t_skin_noahmp") {
+              m_has_lsm_temperature  = true;
+              m_lsm_temperature_indx = n;
               m_has_ocean_lsm_tsurf = (lc_name == "t_surf");
           }
       }
@@ -475,7 +476,7 @@ public:
           read_custom_roughness(lev, fname);
       }
 
-      // 2D MFs for U*, T*, T_surf
+      // 2D MFs for U*, T*, and effective T_sfc
       //--------------------------------------------------------
       u_star[lev] = std::make_unique<amrex::MultiFab>(ba_flux, dm, ncomp, ng);
       u_star[lev]->setVal(bogus_large_value);
@@ -495,8 +496,8 @@ public:
       pblh[lev] = std::make_unique<amrex::MultiFab>(ba_flux, dm, ncomp, ng);
       pblh[lev]->setVal(bogus_large_value);
 
-      t_surf[lev] = std::make_unique<amrex::MultiFab>(ba_flux, dm, ncomp, ng);
-      t_surf[lev]->setVal(default_land_surf_temp);
+      t_sfc[lev] = std::make_unique<amrex::MultiFab>(ba_flux, dm, ncomp, ng);
+      t_sfc[lev]->setVal(default_land_surf_temp);
 
       q_surf[lev] = std::make_unique<amrex::MultiFab>(ba_flux, dm, ncomp, ng);
       q_surf[lev]->setVal(default_land_surf_moist);
@@ -504,18 +505,21 @@ public:
       surface_diagnostic_source[lev] = std::make_unique<amrex::MultiFab>(ba_flux, dm, ncomp, ng);
       surface_diagnostic_source[lev]->setVal(
           surface_diagnostics::to_plot_value(surface_diagnostics::SurfaceDiagnosticSource::Missing));
+      surface_temperature_source[lev] = std::make_unique<amrex::MultiFab>(ba_flux, dm, ncomp, ng);
+      surface_temperature_source[lev]->setVal(
+          surface_diagnostics::to_plot_value(surface_diagnostics::SurfaceTemperatureSource::Default));
 
       // TODO: Do we want an enum struct for indexing?
 
       bool use_sst = (!m_sst_lev[lev].empty() && m_sst_lev[lev][0]);
       bool use_tsk = (!m_tsk_lev[lev].empty() && m_tsk_lev[lev][0]);
-      if (use_sst || use_tsk || m_has_lsm_tsurf) {
-          // Valid SST, TSK or LSM data; t_surf set before computing fluxes (avoids
+      if (use_sst || use_tsk || m_has_lsm_temperature) {
+          // Valid SST, TSK or LSM data; t_sfc set before computing fluxes (avoids
           // extended lambda capture) Note that land temp will be set from m_tsk_lev
           //      while sea temp will be set from m_sst_lev
           theta_type = ThetaCalcType::SURFACE_TEMPERATURE;
 
-          // Pathways in fill_tsurf_with_sst_and_tsk
+          // Pathways in fill_t_sfc_with_sst_and_tsk
           amrex::Print() << "Using MOST with specified surface temperature ";
           if (m_has_ocean_lsm_tsurf) {
               amrex::Print() << "(OceanSurf: t_surf)" << std::endl;
@@ -707,7 +711,7 @@ public:
    * @param[in] lev  level index
    * @param[in] time interpolation time
    */
-  void fill_tsurf_with_sst_and_tsk (const int& lev,
+  void fill_t_sfc_with_sst_and_tsk (const int& lev,
                                     const double& time);
 
   /**
@@ -726,7 +730,7 @@ public:
    *
    * @param[in] lev level index
    */
-  void get_lsm_tsurf (const int& lev);
+  void overlay_lsm_surface_temperature (const int& lev);
 
   /**
    * Wrapper around compute_pblh.
@@ -779,7 +783,7 @@ public:
       if (surf_heating_rate != 0) {
           int nlevs = static_cast<int>(m_geom.size());
           for (int lev = 0; lev < nlevs; lev++) {
-              t_surf[lev]->setVal(surf_temp + surf_heating_rate * static_cast<amrex::Real>(time));
+              t_sfc[lev]->setVal(surf_temp + surf_heating_rate * static_cast<amrex::Real>(time));
               amrex::Print() << "Surface temp at t=" << time << ": "
                              << surf_temp + surf_heating_rate * time << std::endl;
           }
@@ -858,11 +862,15 @@ public:
   }
 
   /**
-   * Return the surface-temperature field.
+   * Return the effective surface-temperature field used by MOST and radiation.
    *
    * @param[in] lev level index
    */
-  amrex::MultiFab* get_t_surf (const int& lev) { return t_surf[lev].get(); }
+  amrex::MultiFab* get_t_sfc (const int& lev) { return t_sfc[lev].get(); }
+
+  // Transitional compatibility accessor.  It aliases get_t_sfc() and never
+  // owns independent state.
+  amrex::MultiFab* get_t_surf (const int& lev) { return get_t_sfc(lev); }
 
   /**
    * Set the surface-temperature field to a constant value.
@@ -870,7 +878,8 @@ public:
    * @param[in] lev   level index
    * @param[in] tsurf surface temperature
    */
-  void set_t_surf(const int& lev, const amrex::Real tsurf) { t_surf[lev]->setVal(tsurf); }
+  void set_t_sfc(const int& lev, const amrex::Real tsurf) { t_sfc[lev]->setVal(tsurf); }
+  void set_t_surf(const int& lev, const amrex::Real tsurf) { set_t_sfc(lev, tsurf); }
 
   /**
    * Return the surface-moisture field.
@@ -893,6 +902,7 @@ public:
    * @param[in] lev level index
    */
   amrex::MultiFab* get_surface_diagnostic_source (const int& lev) { return surface_diagnostic_source[lev].get(); }
+  amrex::MultiFab* get_surface_temperature_source (const int& lev) { return surface_temperature_source[lev].get(); }
 
   /**
    * Return the minimum reference height for one level.
@@ -1039,9 +1049,9 @@ private:
 
   bool use_moisture;
   bool m_has_lsm_fluxes = false;
-  bool m_has_lsm_tsurf  = false;
+  bool m_has_lsm_temperature  = false;
   bool m_has_ocean_lsm_tsurf = false;
-  int  m_lsm_tsurf_indx = -1;
+  int  m_lsm_temperature_indx = -1;
 
   amrex::Real m_Cd = zero;
   amrex::Real m_Ch = zero;
@@ -1058,12 +1068,13 @@ private:
   amrex::Vector<std::unique_ptr<amrex::MultiFab>> q_star;
   amrex::Vector<std::unique_ptr<amrex::MultiFab>> olen;
   amrex::Vector<std::unique_ptr<amrex::MultiFab>> pblh;
-  amrex::Vector<std::unique_ptr<amrex::MultiFab>> t_surf;
+  amrex::Vector<std::unique_ptr<amrex::MultiFab>> t_sfc;
   amrex::Vector<std::unique_ptr<amrex::MultiFab>> q_surf;
   // Diagnostic-only provenance mask. This records the cell-centered source
   // path used by the SurfaceLayer scalar diagnostic path. It must not feed
   // back into flux calculations, boundary conditions, or model state.
   amrex::Vector<std::unique_ptr<amrex::MultiFab>> surface_diagnostic_source;
+  amrex::Vector<std::unique_ptr<amrex::MultiFab>> surface_temperature_source;
 
   amrex::Vector<amrex::Vector<amrex::MultiFab*>>  m_sst_lev;
   amrex::Vector<amrex::Vector<amrex::MultiFab*>>  m_tsk_lev;

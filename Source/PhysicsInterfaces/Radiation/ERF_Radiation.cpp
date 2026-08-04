@@ -164,7 +164,7 @@ Radiation::set_grids (int& level,
                       Geometry& geom,
                       MultiFab* cons_in,
                       iMultiFab* lmask,
-                      MultiFab*  t_surf,
+                      MultiFab*  effective_t_sfc,
                       Vector<MultiFab*>& lsm_input_ptrs,
                       MultiFab* qheating_rates,
                       MultiFab* rad_fluxes,
@@ -212,7 +212,7 @@ Radiation::set_grids (int& level,
         alloc_buffers();
 
         // Fill the KOKKOS Views from AMReX MFs
-        mf_to_kokkos_buffers(lmask, t_surf, lsm_input_ptrs);
+        mf_to_kokkos_buffers(lmask, effective_t_sfc, lsm_input_ptrs);
 
         // Initialize datalog MF on first step
         if (m_first_step) {
@@ -469,7 +469,7 @@ Radiation::dealloc_buffers ()
 
 void
 Radiation::mf_to_kokkos_buffers (iMultiFab* lmask,
-                                 MultiFab*  t_surf,
+                                 MultiFab*  effective_t_sfc,
                                  Vector<MultiFab*>& lsm_input_ptrs)
 {
     Table2D<Real,Order::C> r_lay_tab(r_lay.data(), {0,0}, {static_cast<int>(r_lay.extent(0)),static_cast<int>(r_lay.extent(1))});
@@ -499,7 +499,7 @@ Radiation::mf_to_kokkos_buffers (iMultiFab* lmask,
     const bool has_lsm = m_lsm;
     const bool has_lat = m_lat;
     const bool has_lon = m_lon;
-    const bool has_surflayer = (t_surf);
+    const bool has_surflayer = (effective_t_sfc);
     int  ncol  = m_ncol;
     int  nlay  = m_nlay;
     Real dz    = m_geom.CellSize(2);
@@ -637,7 +637,7 @@ Radiation::mf_to_kokkos_buffers (iMultiFab* lmask,
                 const int offset = m_col_offsets[mfi.index()];
                 const Array4<const int>& lmask_arr   = (lmask)   ? lmask->const_array(mfi) :
                                                                    Array4<const int> {};
-                const Array4<const Real>& tsurf_arr  = (t_surf) ? t_surf->const_array(mfi) :
+                const Array4<const Real>& tsurf_arr  = (effective_t_sfc) ? effective_t_sfc->const_array(mfi) :
                                                                   Array4<const Real> {};
                 const Array4<      Real>& lsm_in_arr = (lsm_input_ptrs[ivar]) ? lsm_input_ptrs[ivar]->array(mfi) :
                                                                                 Array4<      Real> {};
@@ -652,19 +652,20 @@ Radiation::mf_to_kokkos_buffers (iMultiFab* lmask,
                     // Check if valid LSM data
                     bool valid_lsm_data = (lsm_in_arr && (lsm_in_arr(i,j,k) < lsm_undefined));
 
-                    // Have LSM and are over land
-                    if (is_land && valid_lsm_data) {
-                        rrtmgp_to_fill(icol) = lsm_in_arr(i,j,k);
-                    }
-                    // We have a SurfLayer (enforce consistency with temperature)
-                    else if (tsurf_arr && (ivar==0)) {
+                    // SurfaceLayer selects the effective temperature once.  Its
+                    // fallback must not be written into raw Noah-MP TSK.
+                    if (ivar == 0 && tsurf_arr) {
                         rrtmgp_to_fill(icol) = tsurf_arr(i,j,k);
-                        if (lsm_in_arr) { lsm_in_arr(i,j,k) = tsurf_arr(i,j,k); }
+                    }
+                    // Without SurfaceLayer, raw Noah-MP TSK remains a safe
+                    // land-only fallback for radiation.
+                    else if (is_land && valid_lsm_data) {
+                        rrtmgp_to_fill(icol) = lsm_in_arr(i,j,k);
                     }
                     // Use the default value
                     else {
                         rrtmgp_to_fill(icol) = rrtmgp_default_val;
-                        if (lsm_in_arr) { lsm_in_arr(i,j,k) = rrtmgp_default_val; }
+                        if (lsm_in_arr && ivar != 0) { lsm_in_arr(i,j,k) = rrtmgp_default_val; }
                     }
                 });
             } //mfi

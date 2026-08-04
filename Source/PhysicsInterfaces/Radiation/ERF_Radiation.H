@@ -101,7 +101,7 @@ public:
          amrex::Geometry& geom,
          amrex::MultiFab* cons_in,
          amrex::iMultiFab* lmask,
-         amrex::MultiFab*  t_surf,
+         amrex::MultiFab*  effective_t_sfc,
          amrex::Vector<amrex::MultiFab*>& lsm_input_ptrs,
          amrex::Vector<amrex::MultiFab*>& lsm_output_ptrs,
          amrex::MultiFab* qheating_rates,
@@ -112,7 +112,7 @@ public:
          const bool updated_lsm) override
     {
         set_grids(level, step, time, dt, ba, geom,
-                  cons_in, lmask, t_surf,
+                  cons_in, lmask, effective_t_sfc,
                   lsm_input_ptrs, qheating_rates,
                   rad_fluxes, z_phys, lat_ptr, lon_ptr,
                   updated_lsm);
@@ -129,7 +129,7 @@ public:
                amrex::Geometry& geom,
                amrex::MultiFab* cons_in,
                amrex::iMultiFab* lmask,
-               amrex::MultiFab*  t_surf,
+               amrex::MultiFab*  effective_t_sfc,
                amrex::Vector<amrex::MultiFab*>& lsm_input_ptrs,
                amrex::MultiFab* qheating_rates,
                amrex::MultiFab* rad_fluxes,
@@ -149,7 +149,7 @@ public:
     // Fill KOKKOS Views from AMReX MultiFabs
     void
     mf_to_kokkos_buffers(amrex::iMultiFab* lmask,
-                         amrex::MultiFab*  t_surf,
+                         amrex::MultiFab*  effective_t_sfc,
                          amrex::Vector<amrex::MultiFab*>& lsm_input_ptrs);
 
     // Fill AMReX MultiFabs from KOKKOS Views
@@ -251,7 +251,9 @@ private:
     bool m_lsm   = false;
 
     // List of input parameter names
-    amrex::Vector<std::string> m_lsm_input_names = {"t_sfc"          , "sfc_emis"       ,
+    // Raw Noah-MP TSK is used only when SurfaceLayer is absent.  Otherwise
+    // radiation receives effective_t_sfc directly from SurfaceLayer.
+    amrex::Vector<std::string> m_lsm_input_names = {"t_skin_noahmp"  , "sfc_emis"       ,
                                                     "sfc_alb_dir_vis", "sfc_alb_dir_nir",
                                                     "sfc_alb_dif_vis", "sfc_alb_dif_nir"};
 

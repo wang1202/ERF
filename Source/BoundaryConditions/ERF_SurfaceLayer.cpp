@@ -1,6 +1,8 @@
 #include "ERF_SurfaceLayer.H"
 #include "ERF_SurfaceLayerStress.H"
 
+#include <cmath>
+
 using namespace amrex;
 
 /**
@@ -25,8 +27,9 @@ SurfaceLayer::update_fluxes (const int& lev,
 {
     // Update with SST/TSK data if we have a valid pointer
     if (!m_has_ocean_lsm_tsurf &&
-        !m_sst_lev[lev].empty() && m_sst_lev[lev][0]) {
-        fill_tsurf_with_sst_and_tsk(lev, elapsed_time_since_start_low);
+        ((!m_sst_lev[lev].empty() && m_sst_lev[lev][0]) ||
+         (!m_tsk_lev[lev].empty() && m_tsk_lev[lev][0]))) {
+        fill_t_sfc_with_sst_and_tsk(lev, elapsed_time_since_start_low);
     }
 
     // Apply heating rate if needed
@@ -40,11 +43,13 @@ SurfaceLayer::update_fluxes (const int& lev,
         fill_qsurf_with_qsat(lev, cons_in, z_phys_nd);
     }
 
-    // Update land surface temp if we have a valid pointer
-    if (m_has_lsm_tsurf) { get_lsm_tsurf(lev); }
+    // Overlay only valid provider values.  The lower-boundary/default values
+    // established above remain the effective fallback for invalid Noah-MP TSK.
+    if (m_has_lsm_temperature) { overlay_lsm_surface_temperature(lev); }
 
     // Fill interior ghost cells
-    t_surf[lev]->FillBoundary(m_geom[lev].periodicity());
+    t_sfc[lev]->FillBoundary(m_geom[lev].periodicity());
+    surface_temperature_source[lev]->FillBoundary(m_geom[lev].periodicity());
 
     // Compute plane averages for all vars (regardless of flux type)
     m_ma.compute_averages(lev);
@@ -306,7 +311,7 @@ SurfaceLayer::compute_fluxes (const int& lev,
         auto u_star_arr = u_star[lev]->array(mfi);
         auto t_star_arr = t_star[lev]->array(mfi);
         auto q_star_arr = q_star[lev]->array(mfi);
-        auto t_surf_arr = t_surf[lev]->array(mfi);
+        auto t_surf_arr = t_sfc[lev]->array(mfi);
         auto q_surf_arr = q_surf[lev]->array(mfi);
         auto olen_arr   = olen[lev]->array(mfi);
 
@@ -571,7 +576,7 @@ SurfaceLayer::compute_SurfaceLayer_bcs (const int& lev,
         const auto u_star_arr = u_star[lev]->array(mfi);
         const auto t_star_arr = t_star[lev]->array(mfi);
         const auto q_star_arr = q_star[lev]->array(mfi);
-        const auto t_surf_arr = t_surf[lev]->array(mfi);
+        const auto t_surf_arr = t_sfc[lev]->array(mfi);
         const auto q_surf_arr = q_surf[lev]->array(mfi);
         auto surface_source_arr = surface_diagnostic_source[lev]->array(mfi);
 
@@ -949,7 +954,7 @@ SurfaceLayer::compute_SurfaceLayer_bcs_EB (const int& lev,
         // Get derived arrays
         const auto u_star_arr = u_star[lev]->array(mfi);
         const auto t_star_arr = t_star[lev]->array(mfi);
-        const auto t_surf_arr = t_surf[lev]->array(mfi);
+        const auto t_surf_arr = t_sfc[lev]->array(mfi);
 
         // Rho*Theta flux
         //============================================================================
@@ -1128,10 +1133,13 @@ SurfaceLayer::compute_sfc_params_from_lsm_fluxes (const int& lev,
  * @param[in] elapsed_time_since_start_low Time since the start of the lower-boundary data
  */
 void
-SurfaceLayer::fill_tsurf_with_sst_and_tsk (const int& lev,
+SurfaceLayer::fill_t_sfc_with_sst_and_tsk (const int& lev,
                                            const double& elapsed_time_since_start_low)
 {
-    int n_times_in_sst = static_cast<int>(m_sst_lev[lev].size());
+    const bool has_sst = !m_sst_lev[lev].empty() && m_sst_lev[lev][0];
+    const bool has_tsk = !m_tsk_lev[lev].empty() && m_tsk_lev[lev][0];
+    const int n_times_in_sst = has_sst ? static_cast<int>(m_sst_lev[lev].size())
+                                       : static_cast<int>(m_tsk_lev[lev].size());
 
     double dT = m_low_time_interval;
 
@@ -1166,22 +1174,25 @@ SurfaceLayer::fill_tsurf_with_sst_and_tsk (const int& lev,
     // Define a default land surface temperature if we don't read in tsk
     Real lst = default_land_surf_temp;
 
-    bool use_tsk = (m_tsk_lev[lev][0]);
+    bool use_tsk = has_tsk;
     bool ignore_sst = m_ignore_sst;
 
     const int klo = m_geom[lev].Domain().smallEnd(2);
 
-    // Populate t_surf
-    for (MFIter mfi(*t_surf[lev]); mfi.isValid(); ++mfi)
+    // Populate the effective field and its provenance together.
+    for (MFIter mfi(*t_sfc[lev]); mfi.isValid(); ++mfi)
     {
         Box gtbx = mfi.growntilebox();
 
         if (gtbx.smallEnd(2) != klo) { continue; }
 
-        auto t_surf_arr = t_surf[lev]->array(mfi);
+        auto t_surf_arr = t_sfc[lev]->array(mfi);
+        auto source_arr = surface_temperature_source[lev]->array(mfi);
 
-        const auto sst_lo_arr = m_sst_lev[lev][n_time_lo]->const_array(mfi);
-        const auto sst_hi_arr = m_sst_lev[lev][n_time_hi]->const_array(mfi);
+        const auto sst_lo_arr = has_sst ? m_sst_lev[lev][n_time_lo]->const_array(mfi) :
+                                          Array4<const Real> {};
+        const auto sst_hi_arr = has_sst ? m_sst_lev[lev][n_time_hi]->const_array(mfi) :
+                                          Array4<const Real> {};
 
         auto lmask_arr  = (m_lmask_lev[lev][0]) ? m_lmask_lev[lev][0]->array(mfi) :
                                                   Array4<int> {};
@@ -1191,27 +1202,36 @@ SurfaceLayer::fill_tsurf_with_sst_and_tsk (const int& lev,
             ParallelFor(gtbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
             {
                 int is_land = (lmask_arr) ? lmask_arr(i,j,k) : 1;
-                if (!is_land && !ignore_sst) {
+                if (!is_land && !ignore_sst && has_sst) {
                     t_surf_arr(i,j,k) = oma   * sst_lo_arr(i,j,k)
                                       + alpha * sst_hi_arr(i,j,k);
+                    source_arr(i,j,k) = surface_diagnostics::to_plot_value(
+                        surface_diagnostics::SurfaceTemperatureSource::Sst);
                 } else {
                     t_surf_arr(i,j,k) = tsk_arr(i,j,k);
+                    source_arr(i,j,k) = surface_diagnostics::to_plot_value(
+                        surface_diagnostics::SurfaceTemperatureSource::WrfTsk);
                 }
             });
         } else {
             ParallelFor(gtbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
             {
                 int is_land = (lmask_arr) ? lmask_arr(i,j,k) : 1;
-                if (!is_land) {
+                if (!is_land && has_sst) {
                     t_surf_arr(i,j,k) = oma   * sst_lo_arr(i,j,k)
                                       + alpha * sst_hi_arr(i,j,k);
+                    source_arr(i,j,k) = surface_diagnostics::to_plot_value(
+                        surface_diagnostics::SurfaceTemperatureSource::Sst);
                 } else {
                     t_surf_arr(i,j,k) = lst;
+                    source_arr(i,j,k) = surface_diagnostics::to_plot_value(
+                        surface_diagnostics::SurfaceTemperatureSource::Default);
                 }
             });
         }
     }
-    t_surf[lev]->FillBoundary(m_geom[lev].periodicity());
+    t_sfc[lev]->FillBoundary(m_geom[lev].periodicity());
+    surface_temperature_source[lev]->FillBoundary(m_geom[lev].periodicity());
 }
 
 /**
@@ -1237,7 +1257,7 @@ SurfaceLayer::fill_qsurf_with_qsat (const int& lev,
 
         if (gtbx.smallEnd(2) != klo) { continue; }
 
-        auto t_surf_arr = t_surf[lev]->array(mfi);
+        auto t_surf_arr = t_sfc[lev]->array(mfi);
         auto q_surf_arr = q_surf[lev]->array(mfi);
         auto lmask_arr  = (m_lmask_lev[lev][0]) ? m_lmask_lev[lev][0]->array(mfi) :
                                                   Array4<int> {};
@@ -1270,12 +1290,12 @@ SurfaceLayer::fill_qsurf_with_qsat (const int& lev,
  * @param[in] lev Current level
  */
 void
-SurfaceLayer::get_lsm_tsurf (const int& lev)
+SurfaceLayer::overlay_lsm_surface_temperature (const int& lev)
 {
     const int klo = m_geom[lev].Domain().smallEnd(2);
     const bool has_sea_tsurf = (m_has_ocean_lsm_tsurf &&
-                                amrex::toLower(m_lsm_data_name[m_lsm_tsurf_indx]) == "t_surf");
-    for (MFIter mfi(*t_surf[lev]); mfi.isValid(); ++mfi)
+                                amrex::toLower(m_lsm_data_name[m_lsm_temperature_indx]) == "t_surf");
+    for (MFIter mfi(*t_sfc[lev]); mfi.isValid(); ++mfi)
     {
         Box gtbx = mfi.growntilebox();
 
@@ -1289,10 +1309,11 @@ SurfaceLayer::get_lsm_tsurf (const int& lev)
         int i_lo = vbx.smallEnd(0); int i_hi = vbx.bigEnd(0);
         int j_lo = vbx.smallEnd(1); int j_hi = vbx.bigEnd(1);
 
-        auto t_surf_arr = t_surf[lev]->array(mfi);
+        auto t_surf_arr = t_sfc[lev]->array(mfi);
+        auto source_arr = surface_temperature_source[lev]->array(mfi);
         auto lmask_arr  = (m_lmask_lev[lev][0]) ? m_lmask_lev[lev][0]->array(mfi) :
                                                   Array4<int> {};
-        const auto lsm_arr = m_lsm_data_lev[lev][m_lsm_tsurf_indx]->const_array(mfi);
+        const auto lsm_arr = m_lsm_data_lev[lev][m_lsm_temperature_indx]->const_array(mfi);
 
         ParallelFor(gtbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
         {
@@ -1301,7 +1322,15 @@ SurfaceLayer::get_lsm_tsurf (const int& lev)
                 (has_sea_tsurf && !is_land)) {
                 int li = amrex::min(amrex::max(i, i_lo), i_hi);
                 int lj = amrex::min(amrex::max(j, j_lo), j_hi);
-                t_surf_arr(i,j,k) = lsm_arr(li,lj,k);
+                const Real provider_t = lsm_arr(li,lj,k);
+                const bool valid_provider_t = std::isfinite(provider_t) &&
+                    provider_t > Real(-9990.0) && provider_t < Real(0.5) * lsm_undefined;
+                if (valid_provider_t) {
+                    t_surf_arr(i,j,k) = provider_t;
+                    source_arr(i,j,k) = surface_diagnostics::to_plot_value(
+                        has_sea_tsurf ? surface_diagnostics::SurfaceTemperatureSource::OceanSurf
+                                      : surface_diagnostics::SurfaceTemperatureSource::Noahmp);
+                }
             }
         });
     }

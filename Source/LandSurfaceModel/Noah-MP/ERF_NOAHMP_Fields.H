@@ -7,7 +7,7 @@
 // (SMOIS/SH2O/TSLB) is appended at RUNTIME after NumVars -- see soil_data_idx.
 #define NOAHMP_LSMDATA_FIELDS(X)                                               \
     /* radiation coupling */                                                  \
-    X(t_sfc)             X(sfc_emis)                                          \
+    X(t_skin_noahmp)     X(sfc_emis)                                          \
     X(sfc_alb_dir_vis)   X(sfc_alb_dir_nir)                                   \
     X(sfc_alb_dif_vis)   X(sfc_alb_dif_nir)                                   \
     X(cos_zenith_angle)  X(sw_flux_dn)                                        \
@@ -73,7 +73,7 @@
 // comp ). Banded albedos are listed but read explicitly; SMSTAV/SMSTOT are not listed.
 #define NOAHMP_RESULT_FIELDS(X)                                               \
     /*   ERF Array4 alias  LsmData comp       Output comp    */               \
-    X(   TSK,              t_sfc,             tsk           )                  \
+    X(   TSK,              t_skin_noahmp,     tsk           )                  \
     X(   EMISS,            sfc_emis,          emiss         )                  \
     X(   ALBSFCDIR_VIS,    sfc_alb_dir_vis,   albsfcdir_vis )                  \
     X(   ALBSFCDIR_NIR,    sfc_alb_dir_nir,   albsfcdir_nir )                  \
@@ -94,7 +94,7 @@
 
 // ---------------------------------------------------------------------------
 //  Reusable field emitters -- the per-row action applied when a registry is
-//  expanded, e.g. NOAHMP_LSMDATA_FIELDS(NOAHMP_QUOTE) -> "t_sfc", "sfc_emis", ...
+//  expanded, e.g. NOAHMP_LSMDATA_FIELDS(NOAHMP_QUOTE) -> "t_skin_noahmp", "sfc_emis", ...
 #define NOAHMP_ENUM(comp)          comp,    // (comp)         -> enum entry
 #define NOAHMP_QUOTE(comp)         #comp,   // (comp)         -> "comp" literal
 #define NOAHMP_COMP(comp, member)  comp,    // (comp, member) -> enum entry

@@ -14,8 +14,8 @@ void ERF::advance_radiation (int lev,
         MultiFab *lat_ptr = nullptr;
         MultiFab *lon_ptr = nullptr;
 #endif
-        // T surf from SurfaceLayer if we have it
-        MultiFab* t_surf = (m_SurfaceLayer) ? m_SurfaceLayer->get_t_surf(lev) : nullptr;
+        // SurfaceLayer owns the single effective surface temperature.
+        MultiFab* effective_t_sfc = (m_SurfaceLayer) ? m_SurfaceLayer->get_t_sfc(lev) : nullptr;
 
         // RRTMGP inputs names and pointers
         Vector<std::string> lsm_input_names = rad[lev]->get_lsm_input_varnames();
@@ -40,7 +40,7 @@ void ERF::advance_radiation (int lev,
         double time_for_rad = t_old[lev] + start_time;
         rad[lev]->Run(lev, istep[lev], time_for_rad, dt_advance,
                       cons.boxArray(), geom[lev], &(cons),
-                      lmask_lev[lev][0].get(), t_surf,
+                      lmask_lev[lev][0].get(), effective_t_sfc,
                       lsm_input_ptrs, lsm_output_ptrs,
                       qheating_rates[lev].get(), rad_fluxes[lev].get(),
                       z_phys_nd[lev].get()     , lat_ptr, lon_ptr,

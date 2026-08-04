@@ -255,17 +255,17 @@ TEST(Plotfile2D, CatalogNamesMatchCanonicalOrder)
     const amrex::Vector<std::string> expected{
         "z_surf", "landmask", "mapfac", "lat_m", "lon_m",
         "u_star", "w_star", "t_star", "q_star", "Olen", "pblh",
-        "t_surf", "q_surf", "z0", "OLR", "sens_flux", "laten_flux",
+        "t_surf", "t_sfc", "q_surf", "z0", "OLR", "sens_flux", "laten_flux",
         "surf_pres",
         "sea_level_pressure",
         "precip_total_accum", "precip_rain_accum", "precip_snow_accum",
         "precip_graupel_accum", "precip_hail_accum", "precip_frozen_accum",
         "integrated_qv", "integrated_qc", "integrated_qi",
         "integrated_qr", "integrated_qs", "integrated_qg",
-        "surface_diagnostic_source",
+        "surface_diagnostic_source", "surface_temperature_source",
         "sensible_heat_flux", "latent_heat_flux",
         "shoc_u_star", "shoc_Olen", "shoc_wthv_sfc",
-        "t_sfc", "sfc_emis", "sfc_alb_dir_vis", "sfc_alb_dir_nir",
+        "t_skin_noahmp", "sfc_emis", "sfc_alb_dir_vis", "sfc_alb_dir_nir",
         "sfc_alb_dif_vis", "sfc_alb_dif_nir", "cos_zenith_angle",
         "sw_flux_dn", "sw_flux_dn_dir_vis", "sw_flux_dn_dir_nir",
         "sw_flux_dn_dif_vis", "sw_flux_dn_dif_nir", "lw_flux_dn",
@@ -392,7 +392,7 @@ TEST(Plotfile2DWaterPath, LandSurfaceAvailabilityIsSchemeAware)
     EXPECT_TRUE(has_name(surface_layer_names, "temperature_2m"));
     EXPECT_FALSE(has_name(surface_layer_names, "water_vapor_mixing_ratio_2m"));
     EXPECT_TRUE(has_name(surface_layer_names, "near_surface_diagnostic_source"));
-    EXPECT_FALSE(has_name(surface_layer_names, "t_sfc"));
+    EXPECT_TRUE(has_name(surface_layer_names, "t_sfc"));
     EXPECT_FALSE(has_name(surface_layer_names, "noahmp_vegetation_fraction"));
 
     SolverChoice moist = dry;
@@ -579,11 +579,11 @@ TEST(Plotfile2D, ActiveLandSurfaceInventoryControlsAvailability)
     SolverChoice sc;
     sc.moisture_type = MoistureType::MoistNoCondensation;
     const amrex::Vector<std::string> active{
-        "t_sfc", "smois_1", "tslb_1", "smois_2"
+        "t_skin_noahmp", "smois_1", "tslb_1", "smois_2"
     };
     const auto available = plotfile2d::available_diagnostic_names(sc, true, active);
 
-    EXPECT_TRUE(has_name(available, "t_sfc"));
+    EXPECT_TRUE(has_name(available, "t_skin_noahmp"));
     EXPECT_FALSE(has_name(available, "sfc_emis"));
     EXPECT_TRUE(has_name(available, "smois_1"));
     EXPECT_TRUE(has_name(available, "tslb_1"));

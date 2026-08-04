@@ -373,10 +373,17 @@ ERF::Write2DPlotFile (int which, PlotFileType plotfile_type, Vector<std::string>
 
         if (containerHasElement(plot_var_names, "t_surf")) {
             plotfile2d::fill_component_from_klevel_or_value(
-                mf[lev], mf_comp, m_SurfaceLayer ? m_SurfaceLayer->get_t_surf(lev) : nullptr,
+                mf[lev], mf_comp, m_SurfaceLayer ? m_SurfaceLayer->get_t_sfc(lev) : nullptr,
                 0, -999);
             mf_comp++;
         } // t_surf
+
+        if (containerHasElement(plot_var_names, "t_sfc")) {
+            plotfile2d::fill_component_from_klevel_or_value(
+                mf[lev], mf_comp, m_SurfaceLayer ? m_SurfaceLayer->get_t_sfc(lev) : nullptr,
+                0, -999);
+            mf_comp++;
+        } // t_sfc
 
         if (containerHasElement(plot_var_names, "q_surf")) {
             plotfile2d::fill_component_from_klevel_or_value(
@@ -499,6 +506,14 @@ ERF::Write2DPlotFile (int which, PlotFileType plotfile_type, Vector<std::string>
             mf_comp++;
         } // surface_diagnostic_source
 
+        if (containerHasElement(plot_var_names, "surface_temperature_source")) {
+            plotfile2d::fill_component_from_klevel_or_value(
+                mf[lev], mf_comp,
+                m_SurfaceLayer ? m_SurfaceLayer->get_surface_temperature_source(lev) : nullptr,
+                0, 0);
+            mf_comp++;
+        } // surface_temperature_source
+
         if (containerHasElement(plot_var_names, "sensible_heat_flux")) {
             plotfile2d::fill_sensible_heat_flux_from_klevel_or_missing(
                 mf[lev], mf_comp, sens_flux_source, klo, -999);
@@ -575,7 +590,7 @@ ERF::Write2DPlotFile (int which, PlotFileType plotfile_type, Vector<std::string>
             near_surface_sources.native_vegetation_fraction =
                 lsm.Get_Data_Ptr(lev, "noahmp_vegetation_fraction");
             near_surface_sources.theta_surface =
-                m_SurfaceLayer ? m_SurfaceLayer->get_t_surf(lev) : nullptr;
+                m_SurfaceLayer ? m_SurfaceLayer->get_t_sfc(lev) : nullptr;
             near_surface_sources.theta_star =
                 m_SurfaceLayer ? m_SurfaceLayer->get_t_star(lev) : nullptr;
             near_surface_sources.mixing_ratio_surface =

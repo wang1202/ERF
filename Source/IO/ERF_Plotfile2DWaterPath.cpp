@@ -97,7 +97,7 @@ bool is_noahmp_active (const SolverChoice& solver_choice) noexcept
 bool is_land_surface_provider_field (DiagnosticID id) noexcept
 {
     switch (id) {
-    case DiagnosticID::LandSurfaceTsfC:
+    case DiagnosticID::LandSurfaceNoahmpSkinTemperature:
     case DiagnosticID::LandSurfaceEmissivity:
     case DiagnosticID::LandSurfaceAlbDirVis:
     case DiagnosticID::LandSurfaceAlbDirNir:
