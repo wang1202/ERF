@@ -5,10 +5,31 @@
 #include "ERF_TerrainMetrics.H"
 
 #include <algorithm>
+#include <cmath>
 #include <iomanip>
 #include <sstream>
 
 using namespace amrex;
+
+namespace {
+
+bool
+validNoahMPGroundStationSurfaceTemperature (Real t_sfc, Real t_flux, int land_mask)
+{
+    // The Noah-MP result scatter writes lsm_undefined for every field in an
+    // unprocessed cell.  Use the temperature-flux validity as the coupling
+    // gate, matching the scalar surface-flux path, and independently reject a
+    // bad skin temperature.  Restrict this to land: Noah-MP does not provide
+    // an ocean skin-temperature result, so ocean stations must use MOST's SST
+    // based t_surf.
+    return land_mask == 1 &&
+           std::isfinite(t_flux) && t_flux > Real(-9990.0) &&
+           t_flux < Real(0.5) * lsm_undefined &&
+           std::isfinite(t_sfc) && t_sfc > Real(0.0) &&
+           t_sfc < Real(0.5) * lsm_undefined;
+}
+
+} // anonymous namespace
 
 std::string
 ERF::formatGroundStationHeightLabel (Real height)
@@ -318,6 +339,23 @@ ERF::writeGroundStationData (GroundStationConfig& station, Real time, int nstep)
         const int j2d = station.j_loc;
         const int mlev = 0;
 
+        const MultiFab* noahmp_t_sfc = lsm.Has_Model()
+                                         ? lsm.Get_Data_Ptr(mlev, "t_sfc")
+                                         : nullptr;
+        const MultiFab* noahmp_t_flux = nullptr;
+        if (mlev < static_cast<int>(lsm_flux.size())) {
+            for (int n = 0; n < static_cast<int>(lsm_flux_name.size()); ++n) {
+                if (amrex::toLower(lsm_flux_name[n]) == "t_flux" &&
+                    n < static_cast<int>(lsm_flux[mlev].size())) {
+                    noahmp_t_flux = lsm_flux[mlev][n];
+                    break;
+                }
+            }
+        }
+        const bool has_land_mask = mlev < static_cast<int>(lmask_lev.size()) &&
+                                   !lmask_lev[mlev].empty();
+        const iMultiFab* land_mask = has_land_mask ? lmask_lev[mlev][0].get() : nullptr;
+
         Vector<Real> surface_pack(7, Real(0.0));
         int found_surface = 0;
 
@@ -334,12 +372,29 @@ ERF::writeGroundStationData (GroundStationConfig& station, Real time, int nstep)
             const auto tsurf_arr = m_SurfaceLayer->get_t_surf(mlev)->const_array(mfi);
             const auto qsurf_arr = m_SurfaceLayer->get_q_surf(mlev)->const_array(mfi);
             const auto z0_arr    = m_SurfaceLayer->get_z0(mlev)->const_array(mfi);
+            const auto t_sfc_arr = noahmp_t_sfc ? noahmp_t_sfc->const_array(mfi)
+                                                 : Array4<const Real> {};
+            const auto t_flux_arr = noahmp_t_flux ? noahmp_t_flux->const_array(mfi)
+                                                   : Array4<const Real> {};
+            const auto lmask_arr = land_mask ? land_mask->const_array(mfi)
+                                              : Array4<const int> {};
 
             surface_pack[0] = ustar_arr(i2d, j2d, 0);
             surface_pack[1] = tstar_arr(i2d, j2d, 0);
             surface_pack[2] = qstar_arr(i2d, j2d, 0);
             surface_pack[3] = olen_arr(i2d, j2d, 0);
-            surface_pack[4] = tsurf_arr(i2d, j2d, 0);
+            const int is_land = lmask_arr ? lmask_arr(i2d, j2d, 0) : 1;
+            if (t_sfc_arr && t_flux_arr &&
+                validNoahMPGroundStationSurfaceTemperature(
+                    t_sfc_arr(i2d, j2d, 0), t_flux_arr(i2d, j2d, 0), is_land)) {
+                // Noah-MP TSK/t_sfc is a physical skin temperature.  MOST
+                // profiles use potential temperature, so convert it at the
+                // station's diagnosed surface pressure before extrapolating.
+                surface_pack[4] = getThgivenTandP(
+                    t_sfc_arr(i2d, j2d, 0), surface_pressure, R_d / Cp_d);
+            } else {
+                surface_pack[4] = tsurf_arr(i2d, j2d, 0);
+            }
             surface_pack[5] = qsurf_arr(i2d, j2d, 0);
             surface_pack[6] = z0_arr(i2d, j2d, 0);
             break;
