@@ -52,7 +52,8 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
 
     // Flags for read vars and index mapping
     const bool read_wrf_density = solverChoice.use_wrf_bdy_density;
-    Vector<int> cons_read = {read_wrf_density ? 1 : 0, 1, 0, 0,
+    int rho_is_read = (read_wrf_density) ? 1 : 0;
+    Vector<int> cons_read = {rho_is_read, 1, 0, 0,
                              1, 0, 0,
                              0, 0, 0,
                              0, 0, 0,
@@ -64,8 +65,8 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
     is_read.push_back( {0} ); // zvel
 
     // Real BC mapping (WRF/MetGrid)
-    Vector<int> cons_map = {read_wrf_density ? WRFBdyVars::R : RealBdyVars::U,
-                            RealBdyVars::T, RhoKE_comp, RhoScalar_comp,
+    int rho_index = (read_wrf_density) ? RealBdyVars::R : Rho_comp;
+    Vector<int> cons_map = {rho_index, RealBdyVars::T, RhoKE_comp, RhoScalar_comp,
                             RealBdyVars::QV, RhoQ2_comp, RhoQ3_comp,
                             RhoQ4_comp, RhoQ5_comp, RhoQ6_comp,
                             RhoQ7_comp, RhoQ8_comp, RhoQ9_comp,
@@ -182,9 +183,6 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                                 dest_arr(i,j,k,comp_idx) = oma   * bdatxlo_n  (ii,jj,k,0)
                                                          + alpha * bdatxlo_np1(ii,jj,k,0);
                         }
-                        if (read_wrf_density && var_idx == Vars::cons && comp_idx == Rho_comp) {
-                            AMREX_DEVICE_ASSERT(dest_arr(i,j,k,comp_idx) > zero);
-                        }
                         if (var_idx == Vars::cons && comp_idx != Rho_comp) {
                             dest_arr(i,j,k,comp_idx) *= dest_arr(i,j,k,Rho_comp);
                         }
@@ -201,9 +199,6 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                                 jj = std::min(jj, dom_hi.y);
                                 dest_arr(i,j,k,comp_idx) = oma   * bdatxhi_n  (ii,jj,k,0)
                                                          + alpha * bdatxhi_np1(ii,jj,k,0);
-                        }
-                        if (read_wrf_density && var_idx == Vars::cons && comp_idx == Rho_comp) {
-                            AMREX_DEVICE_ASSERT(dest_arr(i,j,k,comp_idx) > zero);
                         }
                         if (var_idx == Vars::cons && comp_idx != Rho_comp) {
                             dest_arr(i,j,k,comp_idx) *= dest_arr(i,j,k,Rho_comp);
@@ -223,9 +218,6 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                             dest_arr(i,j,k,comp_idx) = oma   * bdatylo_n  (i,jj,k,0)
                                                      + alpha * bdatylo_np1(i,jj,k,0);
                         }
-                        if (read_wrf_density && var_idx == Vars::cons && comp_idx == Rho_comp) {
-                            AMREX_DEVICE_ASSERT(dest_arr(i,j,k,comp_idx) > zero);
-                        }
                         if (var_idx == Vars::cons && comp_idx != Rho_comp) {
                             dest_arr(i,j,k,comp_idx) *= dest_arr(i,j,k,Rho_comp);
                         }
@@ -240,9 +232,6 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                             int jj = std::min(j , dom_hi.y);
                             dest_arr(i,j,k,comp_idx) = oma   * bdatyhi_n  (i,jj,k,0)
                                                      + alpha * bdatyhi_np1(i,jj,k,0);
-                        }
-                        if (read_wrf_density && var_idx == Vars::cons && comp_idx == Rho_comp) {
-                            AMREX_DEVICE_ASSERT(dest_arr(i,j,k,comp_idx) > zero);
                         }
                         if (var_idx == Vars::cons && comp_idx != Rho_comp) {
                             dest_arr(i,j,k,comp_idx) *= dest_arr(i,j,k,Rho_comp);
