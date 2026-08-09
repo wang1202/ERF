@@ -935,54 +935,6 @@ The sampled variables can be selected with the ``erf.line_sampling_vars`` and
 The water vapor mixing ratio "qv" will only output valid values if a moisture model is used.
 Pressure is calculated from rho*theta and will account for moisture if qv is requested.
 
-Doppler lidar ground-station output
------------------------------------
-
-Ground-station columns can be written to one text file per station. Set
-``erf.doppler_lidar.num_stations`` and define stations with the one-based names
-``station1`` through ``stationN``. Each station requires level-0 cell indices
-``i_loc`` and ``j_loc``, a positive coarse-step ``interval``, one or more
-non-negative ``height`` values above ground level, and an output ``file_name``.
-
-.. code-block:: text
-
-   erf.doppler_lidar.num_stations = 4
-
-   erf.doppler_lidar.station1.i_loc = 382
-   erf.doppler_lidar.station1.j_loc = 258
-   erf.doppler_lidar.station1.interval = 1
-   erf.doppler_lidar.station1.height = 2.0 10.0 25.0
-   erf.doppler_lidar.station1.file_name = station_382_258.dat
-
-   erf.doppler_lidar.station2.i_loc = 381
-   erf.doppler_lidar.station2.j_loc = 258
-   erf.doppler_lidar.station2.interval = 1
-   erf.doppler_lidar.station2.height = 2.0 10.0 25.0
-   erf.doppler_lidar.station2.file_name = station_381_258.dat
-
-   erf.doppler_lidar.station3.i_loc = 382
-   erf.doppler_lidar.station3.j_loc = 257
-   erf.doppler_lidar.station3.interval = 1
-   erf.doppler_lidar.station3.height = 2.0 10.0 25.0
-   erf.doppler_lidar.station3.file_name = station_382_257.dat
-
-   erf.doppler_lidar.station4.i_loc = 381
-   erf.doppler_lidar.station4.j_loc = 257
-   erf.doppler_lidar.station4.interval = 1
-   erf.doppler_lidar.station4.height = 2.0 10.0 25.0
-   erf.doppler_lidar.station4.file_name = station_381_257.dat
-
-For compatibility, zero-based station names (``station0`` through
-``stationN-1``) and the legacy single-station parameters without a ``stationN``
-prefix are supported. Do not mix zero-based and one-based names, or either
-indexed form with legacy parameters.
-
-Each output file is appended across restarts and receives its header only when
-initially empty. The header identifies the station and requested heights. Each
-data row contains step, time, surface pressure, accumulated precipitation, and,
-for every requested height, horizontal wind components, potential temperature,
-temperature, water-vapor mixing ratio, and relative humidity.
-
 .. _list-of-parameters-10b:
 
 
@@ -1767,7 +1719,7 @@ List of Parameters
 |                                  | use_real_bcs is     |                    |                       |
 |                                  | true                |                    |                       |
 +----------------------------------+---------------------+--------------------+-----------------------+
-| **erf.use_wrf_height_grid**      | use z heights       |  bool              | false                 |
+| **erf.use_wrf_height_grid**      | use z heights       |  bool              | true                  |
 |                                  | from wrfinput or    |                    |                       |
 |                                  | make our own?       |                    |                       |
 +----------------------------------+---------------------+--------------------+-----------------------+
@@ -2032,42 +1984,29 @@ compiled with particles.
 
 The following run-time options control how the full moisture model is used.
 
-For WSM6, the fixed single-moment cloud-droplet concentration can be set in
-``cm^-3``. The default preserves the historical value of ``300 cm^-3``:
-
-.. code-block:: text
-
-   erf.moisture_model = "WSM6"
-   erf.wsm6_cloud_droplet_number = 250
-
 List of Parameters
 ------------------
 
-+----------------------------------+--------------------------+-----------------------+------------+
-| Parameter                        | Definition               | Acceptable            | Default    |
-|                                  |                          | Values                |            |
-+==================================+==========================+=======================+============+
-| **erf.moisture_model**           | Name of moisture model   |  "None", "SAM",       | "None"     |
-|                                  |                          |  "Kessler", "SatAdj"  |            |
-|                                  |                          |  "Kessler_NoRain",    |            |
-|                                  |                          |  "Morrison",          |            |
-|                                  |                          |  "Morrison_NoIce",    |            |
-|                                  |                          |  "SAM_NoPrecip_NoIce",|            |
-|                                  |                          |  "SAM_NoIce", "P3",   |            |
-|                                  |                          |  "WSM6",              |            |
-|                                  |                          |  "MoistNoCondensation"|            |
-+----------------------------------+--------------------------+-----------------------+------------+
-| **erf.wsm6_cloud_droplet_number**| Fixed cloud-droplet      | Real > 0 [cm^-3];     | 300.0      |
-|                                  | number concentration     | WSM6 only             |            |
-|                                  | used by WSM6             |                       |            |
-+----------------------------------+--------------------------+-----------------------+------------+
-| **erf.moisture_tight_coupling**  | If true, advance         |  Bool                 | false      |
-|                                  | microphysics after every |                       |            |
-|                                  | slow step in the dycore; |                       |            |
-|                                  | otherwise, update after  |                       |            |
-|                                  | the dycore has been      |                       |            |
-|                                  | advanced at each timestep|                       |            |
-+----------------------------------+--------------------------+-----------------------+------------+
++---------------------------------+--------------------------+-----------------------+------------+
+| Parameter                       | Definition               | Acceptable            | Default    |
+|                                 |                          | Values                |            |
++=================================+==========================+=======================+============+
+| **erf.moisture_model**          | Name of moisture model   |  "None", "SAM",       | "None"     |
+|                                 |                          |  "Kessler", "SatAdj"  |            |
+|                                 |                          |  "Kessler_NoRain",    |            |
+|                                 |                          |  "Morrison",          |            |
+|                                 |                          |  "Morrison_NoIce",    |            |
+|                                 |                          |  "SAM_NoPrecip_NoIce",|            |
+|                                 |                          |  "SAM_NoIce", "P3",   |            |
+|                                 |                          |  "MoistNoCondensation"|            |
++---------------------------------+--------------------------+-----------------------+------------+
+| **erf.moisture_tight_coupling** | If true, advance         |  Bool                 | false      |
+|                                 | microphysics after every |                       |            |
+|                                 | slow step in the dycore; |                       |            |
+|                                 | otherwise, update after  |                       |            |
+|                                 | the dycore has been      |                       |            |
+|                                 | advanced at each timestep|                       |            |
++---------------------------------+--------------------------+-----------------------+------------+
 
 Radiation
 =========

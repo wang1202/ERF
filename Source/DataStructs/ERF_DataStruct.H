@@ -278,10 +278,6 @@ struct SolverChoice {
         }
 
         pp.query_enum_case_insensitive("moisture_model",moisture_type);
-        pp.query("wsm6_cloud_droplet_number", wsm6_cloud_droplet_number);
-        if (wsm6_cloud_droplet_number <= amrex::Real(0.0)) {
-            amrex::Error("erf.wsm6_cloud_droplet_number must be greater than zero cm^-3");
-        }
         if (moisture_type == MoistureType::Morrison) {
             moisture_indices = MoistureComponentIndices(
                 RhoQ1_comp,  // water vapor
@@ -1200,8 +1196,6 @@ struct SolverChoice {
             amrex::Print() << "Moisture Model: Morrison_NoIce" << std::endl;
         } else if (moisture_type == MoistureType::WSM6) {
             amrex::Print() << "Moisture Model: WSM6" << std::endl;
-            amrex::Print() << "WSM6 cloud droplet number concentration: "
-                           << wsm6_cloud_droplet_number << " cm^-3" << std::endl;
         } else if (moisture_type == MoistureType::Kessler) {
             amrex::Print() << "Moisture Model: Kessler" << std::endl;
         } else if (moisture_type == MoistureType::Kessler_NoRain) {
@@ -1623,7 +1617,6 @@ struct SolverChoice {
     MoistureComponentIndices moisture_indices;
 
     bool moisture_tight_coupling {false};
-    amrex::Real wsm6_cloud_droplet_number = amrex::Real(300.0); // [cm^-3]
 
     std::string windfarm_loc_table, windfarm_spec_table, windfarm_spec_table_extra;
     std::string windfarm_blade_table, windfarm_airfoil_tables;
@@ -1644,7 +1637,7 @@ struct SolverChoice {
     int bdy_moist_nudge_type = 0;
 
     // Keep the WRF grid or remake our own?
-    bool use_wrf_height_grid {false};
+    bool use_wrf_height_grid {true};
 
     // Use forest canopy model?
     bool do_forest_drag {false};
