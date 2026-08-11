@@ -52,6 +52,7 @@
 #include <ERF_WallScalarBC.H>
 #include <ERF_FillPatcher.H>
 #include <ERF_SampleData.H>
+#include <ERF_InstrumentSimulators.H>
 #include <ERF_ForestDrag.H>
 #include <ERF_Provenance.H>
 
@@ -1747,6 +1748,10 @@ private:
     amrex::Real plane_sampling_per = -one;
     std::unique_ptr<LineSampler> line_sampler = nullptr;
     std::unique_ptr<PlaneSampler> plane_sampler = nullptr;
+
+    std::unique_ptr<CeilometerSimulator>   m_ceilometer_sim;
+    std::unique_ptr<DopplerLidarSimulator> m_doppler_lidar_sim;
+    std::unique_ptr<MWRSimulator>          m_mwr_sim;
 
     amrex::Vector<std::unique_ptr<std::fstream> >       datalog;
     amrex::Vector<std::unique_ptr<std::fstream> >   der_datalog;
