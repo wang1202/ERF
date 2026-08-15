@@ -54,7 +54,8 @@
             //       With r0_z = r0 this reduces exactly to prob_type 12.
             //
             const Real r2d_xz_ell = std::sqrt((x-xc)*(x-xc)/(r0*r0) + (z-zc)*(z-zc)/(r0_z*r0_z));
-            state_pert(i, j, k, RhoScalar_comp) = A_0 * fourth * (one + std::cos(PI * std::min(r2d_xz_ell, one)));
+            state_pert(i, j, k, RhoScalar_comp) = A_0 * fourth *
+                (one + std::cos(PI * std::min(r2d_xz_ell, Real(1.0))));
         } else if (prob_type == 14) {
             state_pert(i, j, k, RhoScalar_comp) = std::cos(PI*x);
         } else {
