@@ -689,6 +689,11 @@ struct SolverChoice {
             pp.queryAdd("moisture_tight_coupling",moisture_tight_coupling);
         }
 
+        // WSM6 fixed cloud-droplet number concentration [cm^-3]; defaults to 300 cm^-3
+        pp.queryAdd("wsm6_cloud_droplet_number", wsm6_cloud_droplet_number);
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(wsm6_cloud_droplet_number > 0,
+            "wsm6_cloud_droplet_number must be positive");
+
         // Which expression (1,2/3 or 4) to use for buoyancy
         int default_buoyancy_type = buoyancy_type[0];
         read_int_string(max_level, "buoyancy_type", buoyancy_type, default_buoyancy_type);
@@ -2131,6 +2136,9 @@ struct SolverChoice {
     MoistureComponentIndices moisture_indices;
 
     bool moisture_tight_coupling {false};
+
+    // WSM6 fixed cloud-droplet number concentration [cm^-3]; default matches WSM6::default_xncr (3.0e8 m^-3)
+    amrex::Real wsm6_cloud_droplet_number {300.0};
 
     std::string windfarm_loc_table, windfarm_spec_table, windfarm_spec_table_extra;
     std::string windfarm_blade_table, windfarm_airfoil_tables;
