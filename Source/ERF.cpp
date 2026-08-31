@@ -1739,6 +1739,45 @@ ERF::Interp2DArrays (int lev, const BoxArray& my_ba2d, const DistributionMapping
                               refRatio(lev-1), &cell_cons_interp,
                               domain_bcs_type, BCVars::cons_bc);
     }
+    // init_stuff initializes every newly-created or remade level to the scalar
+    // erf.is_land default.  WRFInput replaces that default when a level exists
+    // at startup, but a level created later by regridding never reads WRFInput.
+    // Carry the actual coarse land/water mask onto such levels so surface
+    // temperature, roughness, and moisture fluxes use the correct surface type.
+    if (lmask_lev[lev-1][0] && lmask_lev[lev][0]) {
+        auto cngv = lmask_lev[lev-1][0]->nGrowVect(); cngv[2] = 0;
+        MultiFab crse_lmask(lmask_lev[lev-1][0]->boxArray(),
+                            lmask_lev[lev-1][0]->DistributionMap(), 1, cngv);
+        for (MFIter mfi(crse_lmask); mfi.isValid(); ++mfi) {
+            const Box& bx = mfi.growntilebox();
+            const Array4<Real>& dst = crse_lmask.array(mfi);
+            const Array4<const int>& src = lmask_lev[lev-1][0]->const_array(mfi);
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                dst(i,j,k) = static_cast<Real>(src(i,j,k));
+            });
+        }
+
+        auto fngv = lmask_lev[lev][0]->nGrowVect(); fngv[2] = 0;
+        MultiFab fine_lmask(my_ba2d, my_dm, 1, fngv);
+        fine_lmask.setVal(static_cast<Real>(solverChoice.is_land[lev]));
+        InterpFromCoarseLevel(fine_lmask, fngv, IntVect(0,0,0),
+                              crse_lmask, 0, 0, 1,
+                              geom[lev-1], geom[lev],
+                              refRatio(lev-1), &pc_interp,
+                              domain_bcs_type, BCVars::cons_bc);
+
+        for (MFIter mfi(*lmask_lev[lev][0]); mfi.isValid(); ++mfi) {
+            const Box& bx = mfi.growntilebox();
+            const Array4<int>& dst = lmask_lev[lev][0]->array(mfi);
+            const Array4<const Real>& src = fine_lmask.const_array(mfi);
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                dst(i,j,k) = static_cast<int>(src(i,j,k));
+            });
+        }
+        lmask_lev[lev][0]->FillBoundary(geom[lev].periodicity());
+    }
     if (sst_lev[lev-1][0]) {
         if (sst_lev[lev].size() < sst_lev[lev-1].size()) {
             sst_lev[lev].resize(sst_lev[lev-1].size());
