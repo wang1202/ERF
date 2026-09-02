@@ -4,6 +4,7 @@
 #ifndef ERF_METGRIDUTIL_H_
 #define ERF_METGRIDUTIL_H_
 
+#include <cmath>
 #include <limits>
 
 #include <ERF.H>
@@ -11,6 +12,7 @@
 #include <ERF_Utils.H>
 #include <ERF_ProbCommon.H>
 #include <ERF_HSEUtils.H>
+#include <ERF_BaseStateParams.H>
 
 /**
  * Read metgrid NetCDF data and populate ERF initialization FABs.
@@ -115,6 +117,7 @@ init_msfs_from_metgrid (const bool metgrid_debug_msf,
                         amrex::FArrayBox& NC_MSFV_fab,
                         amrex::FArrayBox& NC_MSFM_fab);
 
+
 /**
  * Initialize hydrostatic base-state quantities from metgrid data.
  */
@@ -122,6 +125,7 @@ void
 init_base_state_from_metgrid (const bool use_moisture,
                               const bool metgrid_debug_psfc,
                               const amrex::Real l_rdOcp,
+                              const amrex::Box& domain,
                               const amrex::Box& valid_bx,
                               const int& flag_psfc,
                               amrex::FArrayBox& state_fab,
@@ -132,7 +136,8 @@ init_base_state_from_metgrid (const bool use_moisture,
                               amrex::FArrayBox& qv_hse_fab,
                               amrex::FArrayBox& z_phys_nd_fab,
                               amrex::FArrayBox& z_phys_cc_fab,
-                              const amrex::FArrayBox& NC_psfc_fab);
+                              const amrex::FArrayBox& NC_psfc_fab,
+                              const BaseStateParams& bsp);
 
 /**
  * Interpolate a value with a Lagrange polynomial stencil.
