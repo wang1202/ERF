@@ -58,6 +58,7 @@
 #include <ERF_FillPatcher.H>
 #include <ERF_SampleData.H>
 #include <ERF_ForestDrag.H>
+#include <ERF_IBFaceSet.H>
 #include <ERF_Provenance.H>
 
 #ifdef ERF_USE_PARTICLES
@@ -709,6 +710,15 @@ public:
 
     void init_immersed_forcing (int lev);
 
+    // Immersed-boundary surface energy balance (Source/ImmersedBoundarySEB)
+    void init_ibseb ();
+    void ibseb_write_checkpoint (const std::string& checkpointname, int lev) const;
+    void ibseb_report (int nstep, amrex::Real time);
+    amrex::Real ibseb_bulk_richardson_height (int lev, const amrex::MultiFab& cons,
+                                              const amrex::MultiFab& xvel, const amrex::MultiFab& yvel);
+    void ibseb_advance (int lev, amrex::Real time, amrex::Real dt, const amrex::MultiFab& cons,
+                        const amrex::MultiFab& xvel, const amrex::MultiFab& yvel, const amrex::MultiFab& zvel);
+
     void input_sponge (int lev);
 
     void init_from_hse (int lev);
@@ -1243,7 +1253,12 @@ private:
 
     amrex::Vector<std::unique_ptr<IRadiation>> rad; // Radiation model at each level
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> qheating_rates;  // radiation heating rate source terms (SW, LW) (DYCORE)
-    amrex::Vector<std::unique_ptr<amrex::MultiFab>> rad_fluxes;      // radiation fluxes (SW up/dn, LW up/dn) (OUTPUT ONLY)
+    // Radiation fluxes (SW up, SW down, LW up, LW down) [W/m^2] at the
+    // interfaces (OUTPUT ONLY). Index k holds the lower interface of layer k
+    // (k = klo is the surface); the top-of-atmosphere interface is stored in
+    // the z-ghost cell k = khi + 1, so the array has one ghost cell in z.
+    // Both RRTMGP and the two-stream model fill all nz + 1 levels.
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> rad_fluxes;
 
     // Two-stream radiation model (erf.radiation_model = TwoStream): owns its
     // surface and SEB state; every call from ERF is behind a test of
@@ -1322,6 +1337,10 @@ private:
     amrex::Vector<std::unique_ptr<amrex::MultiFab>>   detJ_cc_new;
 
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> z_t_rk;
+
+    // Immersed-boundary surface energy balance: inputs and one face set per level
+    IBSEBParams ibseb_params;
+    amrex::Vector<std::unique_ptr<IBFaceSet>> m_ibseb;
 
     // Data structures for terrain immersed forcing
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> terrain_blanking;
@@ -1550,6 +1569,9 @@ private:
                                                     "rel_humidity", "condensation_rate",
                                                     // Terrain IB mask
                                                     "terrain_IB_mask",
+                                                    "ibseb_nfaces", "ibseb_tskin",
+                                                    "ibseb_sw_abs", "ibseb_shadow",
+                                                    "ibseb_lw_net", "ibseb_f_sky", "ibseb_H", "ibseb_G",
                                                     // EB variables
                                                     "volfrac"
 #ifdef ERF_COMPUTE_ERROR
