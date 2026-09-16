@@ -15,10 +15,13 @@ ERF::compute_native_shoc_tendencies (int lev,
                                      MultiFab* qfx3,
                                      MultiFab* eddyDiffs,
                                      MultiFab* z_phys_nd_in,
+                                     const MultiFab& mapfac_mx,
+                                     const MultiFab& mapfac_my,
                                      const double& dt_advance)
 {
     AMREX_ALWAYS_ASSERT(native_shoc_driver[lev]);
     native_shoc_driver[lev]->advance(*cons, *xvel, *yvel, *zvel,
                                      tau13, tau23, hfx3, qfx3, eddyDiffs,
-                                     *z_phys_nd_in, Geom(lev), dt_advance);
+                                     *z_phys_nd_in, mapfac_mx, mapfac_my,
+                                     Geom(lev), dt_advance);
 }

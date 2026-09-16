@@ -188,6 +188,7 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
                                            Tau[lev][TauType::tau13].get(), Tau[lev][TauType::tau23].get(),
                                            SFS_hfx3_lev[lev].get()       , SFS_q1fx3_lev[lev].get()      ,
                                            eddyDiffs_lev[lev].get()      , z_phys_nd[lev].get()          ,
+                                           *mapfac[lev][MapFacType::m_x], *mapfac[lev][MapFacType::m_y],
                                            dt_lev);
 
             if (native_shoc_driver[lev]) {

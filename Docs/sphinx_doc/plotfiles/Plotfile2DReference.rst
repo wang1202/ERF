@@ -236,6 +236,41 @@ configuration and runtime details that cannot be inferred from metadata alone.
      - ``K m s^-1``
      - ``FillMinus999WhenUnavailable``
      - Native SHOC surface virtual potential temperature flux
+   * - ``we_kinematic``
+     - ``PBL``
+     - ``m s^-1``
+     - ``FillMinus999WhenUnavailable``
+     - Native SHOC kinematic entrainment velocity
+   * - ``we_flux_jump``
+     - ``PBL``
+     - ``m s^-1``
+     - ``FillMinus999WhenUnavailable``
+     - Native SHOC flux-jump entrainment velocity
+   * - ``pblh_tendency``
+     - ``PBL``
+     - ``m s^-1``
+     - ``FillMinus999WhenUnavailable``
+     - Eulerian tendency of the absolute native SHOC PBL-top height
+   * - ``pblh_hadv``
+     - ``PBL``
+     - ``m s^-1``
+     - ``FillMinus999WhenUnavailable``
+     - Horizontal advection of the absolute native SHOC PBL-top height
+   * - ``w_at_pblh``
+     - ``PBL``
+     - ``m s^-1``
+     - ``FillMinus999WhenUnavailable``
+     - Physical vertical velocity interpolated to the native SHOC PBL top
+   * - ``delta_theta_v``
+     - ``PBL``
+     - ``K``
+     - ``FillMinus999WhenUnavailable``
+     - Virtual potential temperature jump used by native SHOC flux entrainment
+   * - ``wthv_at_pblh``
+     - ``PBL``
+     - ``K m s^-1``
+     - ``FillMinus999WhenUnavailable``
+     - Native SHOC virtual-potential-temperature flux at the PBL top
    * - ``t_sfc``
      - ``LandSurface``
      - ``K``
@@ -414,6 +449,9 @@ The selection contract and the value written after selection are separate:
    * - ``pblh``
      - Selectable: fixed request name.
      - Native SHOC ``pblh`` is reported in metres above local ground (AGL). Value: native SHOC PBL height when native SHOC diagnostics are present; otherwise SurfaceLayer; ``-999`` if neither exists.
+   * - ``we_kinematic``, ``we_flux_jump``, ``pblh_tendency``, ``pblh_hadv``, ``w_at_pblh``, ``delta_theta_v``, ``wthv_at_pblh``
+     - Selectable: fixed request names.
+     - Value: native SHOC entrainment diagnostics when ``erf.shoc.diagnose_entrainment = true``; ``-999`` for non-native SHOC, disabled diagnosis, the first history sample, or an invalid/insufficient flux-jump calculation.
    * - ``OLR``
      - Selectable: fixed request name.
      - Value: radiation output; ``-999`` when the radiation source is absent.

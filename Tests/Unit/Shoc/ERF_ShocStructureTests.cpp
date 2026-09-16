@@ -3,6 +3,7 @@
 #include "ERF_ShocThermoUtils.H"
 #include "ERF_ShocTestUtils.H"
 #include "ERF_ShocTypes.H"
+#include "ERF_ShocEntrainment.H"
 
 #include <AMReX_ParmParse.H>
 
@@ -22,6 +23,41 @@ TEST(ShocRuntimeOptions, DefaultsValidate)
     EXPECT_FALSE(opts.debug_summary);
     EXPECT_EQ(opts.transport_mode, ShocTransportMode::StateUpdate);
     EXPECT_EQ(opts.momentum_transport, ShocMomentumTransport::StateUpdate);
+    EXPECT_FALSE(opts.diagnose_entrainment);
+    EXPECT_EQ(opts.entrainment_jump_ncell, 2);
+    EXPECT_DOUBLE_EQ(opts.entrainment_min_delta_theta_v, 0.1);
+}
+
+TEST(ShocEntrainment, KinematicDecompositionAndColdStart)
+{
+    const auto cold = shoc_entrainment::kinematic(
+        100.0, 90.0, 20.0, 2.0, 3.0, 0.5, 0.1, -0.2, false, true);
+    EXPECT_DOUBLE_EQ(cold.we_kinematic, -999.0);
+    EXPECT_DOUBLE_EQ(cold.pblh_tendency, -999.0);
+
+    const auto result = shoc_entrainment::kinematic(
+        100.0, 90.0, 20.0, 2.0, 3.0, 0.5, 0.1, -0.2, true, true);
+    EXPECT_DOUBLE_EQ(result.pblh_tendency, 0.5);
+    EXPECT_DOUBLE_EQ(result.pblh_hadv, -0.4);
+    EXPECT_DOUBLE_EQ(result.we_kinematic, -0.4);
+}
+
+TEST(ShocEntrainment, FluxJumpUsesPhysicalLayerWeightsAndGuards)
+{
+    const amrex::Vector<amrex::Real> z{5.0, 15.0, 25.0, 35.0, 45.0, 55.0};
+    const amrex::Vector<amrex::Real> dz(6, 10.0);
+    const amrex::Vector<amrex::Real> theta_v{300.0, 300.0, 302.0, 302.0, 304.0, 305.0};
+    const amrex::Vector<amrex::Real> wthv{0.0, -0.02, -0.02, -0.03, -0.04, -0.05};
+    const auto result = shoc_entrainment::flux_jump(z, dz, theta_v, wthv,
+                                                     20.0, 2, 0.1);
+    EXPECT_NEAR(result.wthv_at_pblh, -0.02, 1.0e-12);
+    EXPECT_NEAR(result.delta_theta_v, 2.0, 1.0e-12);
+    EXPECT_NEAR(result.we_flux_jump, 0.01, 1.0e-12);
+
+    EXPECT_DOUBLE_EQ(shoc_entrainment::flux_jump(
+        z, dz, theta_v, wthv, 20.0, 2, 2.0).we_flux_jump, -999.0);
+    EXPECT_DOUBLE_EQ(shoc_entrainment::flux_jump(
+        z, dz, theta_v, wthv, 2.0, 2, 0.1).we_flux_jump, -999.0);
 }
 
 TEST(ShocRuntimeOptions, TransportModeHelpersMatchIntent)

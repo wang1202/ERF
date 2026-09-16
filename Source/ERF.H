@@ -630,6 +630,8 @@ public:
                                          amrex::MultiFab* qfx3,
                                          amrex::MultiFab* eddyDiffs,
                                          amrex::MultiFab* z_phys_nd,
+                                         const amrex::MultiFab& mapfac_mx,
+                                         const amrex::MultiFab& mapfac_my,
                                          const double& dt_advance);
 
 #ifdef ERF_USE_P3

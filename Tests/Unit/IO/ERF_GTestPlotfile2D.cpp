@@ -266,6 +266,8 @@ TEST(Plotfile2D, CatalogNamesMatchCanonicalOrder)
         "surface_diagnostic_source",
         "sensible_heat_flux", "latent_heat_flux",
         "shoc_u_star", "shoc_Olen", "shoc_wthv_sfc",
+        "we_kinematic", "we_flux_jump", "pblh_tendency", "pblh_hadv",
+        "w_at_pblh", "delta_theta_v", "wthv_at_pblh",
         "t_sfc", "sfc_emis", "sfc_alb_dir_vis", "sfc_alb_dir_nir",
         "sfc_alb_dif_vis", "sfc_alb_dif_nir", "cos_zenith_angle",
         "sw_flux_dn", "sw_flux_dn_dir_vis", "sw_flux_dn_dir_nir",

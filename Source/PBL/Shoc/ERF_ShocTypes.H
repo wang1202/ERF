@@ -40,6 +40,10 @@ struct ShocRuntimeOptions
     bool debug_summary = false;
     bool allow_tendency_microphysics_overlap = false;
     bool signed_tke_production = false;
+    bool diagnose_entrainment = false;
+    int entrainment_jump_ncell = 2;
+    amrex::Real entrainment_min_delta_theta_v = amrex::Real(0.1);
+    bool entrainment_include_horizontal_advection = true;
     ShocTransportMode transport_mode = ShocTransportMode::StateUpdate;
     ShocMomentumTransport momentum_transport = ShocMomentumTransport::StateUpdate;
     bool debug_bad_column = false;
@@ -174,6 +178,11 @@ read_shoc_runtime_options (ShocRuntimeOptions& opts)
     pp.query("debug_summary", opts.debug_summary);
     pp.query("allow_tendency_microphysics_overlap", opts.allow_tendency_microphysics_overlap);
     pp.query("signed_tke_production", opts.signed_tke_production);
+    pp.query("diagnose_entrainment", opts.diagnose_entrainment);
+    pp.query("entrainment_jump_ncell", opts.entrainment_jump_ncell);
+    pp.query("entrainment_min_delta_theta_v", opts.entrainment_min_delta_theta_v);
+    pp.query("entrainment_include_horizontal_advection",
+             opts.entrainment_include_horizontal_advection);
     pp.query("debug_bad_column", opts.debug_bad_column);
     pp.query("debug_bad_column_abort", opts.debug_bad_column_abort);
     pp.query("debug_bad_column_max_reports", opts.debug_bad_column_max_reports);
@@ -219,6 +228,10 @@ validate_shoc_runtime_options (const ShocRuntimeOptions& opts)
                                      "erf.shoc.debug_bad_column_min_dz must be positive");
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(opts.debug_bad_column_scalar_moment_threshold > 0.0,
                                      "erf.shoc.debug_bad_column_scalar_moment_threshold must be positive");
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(opts.entrainment_jump_ncell >= 1,
+                                     "erf.shoc.entrainment_jump_ncell must be >= 1");
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(opts.entrainment_min_delta_theta_v > 0.0,
+                                     "erf.shoc.entrainment_min_delta_theta_v must be > 0");
 }
 
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE

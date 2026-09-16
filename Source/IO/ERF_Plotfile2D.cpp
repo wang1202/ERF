@@ -544,6 +544,58 @@ ERF::Write2DPlotFile (int which, PlotFileType plotfile_type, Vector<std::string>
             mf_comp++;
         } // shoc_wthv_sfc
 
+        const bool entrainment_available =
+            native_shoc && native_shoc->entrainment_diagnostics_enabled();
+        if (containerHasElement(plot_var_names, "we_kinematic")) {
+            plotfile2d::fill_component_from_klevel_or_value(
+                mf[lev], mf_comp,
+                entrainment_available ? &native_shoc->we_kinematic_diagnostics() : nullptr,
+                klo, -999);
+            mf_comp++;
+        }
+        if (containerHasElement(plot_var_names, "we_flux_jump")) {
+            plotfile2d::fill_component_from_klevel_or_value(
+                mf[lev], mf_comp,
+                entrainment_available ? &native_shoc->we_flux_jump_diagnostics() : nullptr,
+                klo, -999);
+            mf_comp++;
+        }
+        if (containerHasElement(plot_var_names, "pblh_tendency")) {
+            plotfile2d::fill_component_from_klevel_or_value(
+                mf[lev], mf_comp,
+                entrainment_available ? &native_shoc->pblh_tendency_diagnostics() : nullptr,
+                klo, -999);
+            mf_comp++;
+        }
+        if (containerHasElement(plot_var_names, "pblh_hadv")) {
+            plotfile2d::fill_component_from_klevel_or_value(
+                mf[lev], mf_comp,
+                entrainment_available ? &native_shoc->pblh_hadv_diagnostics() : nullptr,
+                klo, -999);
+            mf_comp++;
+        }
+        if (containerHasElement(plot_var_names, "w_at_pblh")) {
+            plotfile2d::fill_component_from_klevel_or_value(
+                mf[lev], mf_comp,
+                entrainment_available ? &native_shoc->w_at_pblh_diagnostics() : nullptr,
+                klo, -999);
+            mf_comp++;
+        }
+        if (containerHasElement(plot_var_names, "delta_theta_v")) {
+            plotfile2d::fill_component_from_klevel_or_value(
+                mf[lev], mf_comp,
+                entrainment_available ? &native_shoc->delta_theta_v_diagnostics() : nullptr,
+                klo, -999);
+            mf_comp++;
+        }
+        if (containerHasElement(plot_var_names, "wthv_at_pblh")) {
+            plotfile2d::fill_component_from_klevel_or_value(
+                mf[lev], mf_comp,
+                entrainment_available ? &native_shoc->wthv_at_pblh_diagnostics() : nullptr,
+                klo, -999);
+            mf_comp++;
+        }
+
         // Land-surface provider fields use the generic LandSurface name/index
         // interface. The catalog supplies metadata; this block only assembles
         // stored values and translates provider sentinels.

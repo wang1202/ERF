@@ -364,6 +364,28 @@ squared, momentum and heat diffusivities, an isotropy timescale, second and
 third moments, and the PDF cloud quantities used by the cloud macrophysics
 closure.
 
+Native SHOC entrainment diagnostics can be enabled with
+``erf.shoc.diagnose_entrainment = true``. The defaults are
+
+.. code-block:: text
+
+   erf.shoc.entrainment_jump_ncell = 2
+   erf.shoc.entrainment_min_delta_theta_v = 0.1
+   erf.shoc.entrainment_include_horizontal_advection = true
+
+The kinematic estimate uses the absolute top height
+:math:`H=z_{sfc}+h_{SHOC}` and reports
+:math:`w_e=\partial_tH+u_i\partial_xH+v_i\partial_yH-w_i`. Its Eulerian
+height history is advanced once per native-SHOC model call, so recorder or
+plotfile cadence cannot affect it. The flux-jump estimate is
+:math:`-\overline{w'\theta_v'}(H)/(\theta_{v,above}-\theta_{v,below})`, using
+the native SHOC ``wthv_sec`` field and
+:math:`\theta_v=\theta(1+0.61q_v-q_c-q_i)`. Both estimates are ``-999`` for
+the first call after a cold start or restart, invalid interpolation or input,
+insufficient levels, or a jump no greater than the configured threshold. The
+flux-jump estimate is a mixed-layer diagnostic and is less reliable for
+diffuse inversions, precipitating/cloudy layers, or ambiguous single PBL tops.
+
 TKE behavior and reduced 1.5-order mode
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -573,6 +595,9 @@ are written with the standard ``-999`` missing value.
 The 2-D diagnostic catalog also provides native SHOC surface/PBL diagnostics
 including ``pblh``, ``shoc_u_star``, ``shoc_Olen``, and ``shoc_wthv_sfc``. See
 :ref:`sec:Plotfile2DReference` for selection and missing-value behavior.
+When entrainment diagnosis is enabled, the 2-D catalog additionally provides
+``we_kinematic``, ``we_flux_jump``, ``pblh_tendency``, ``pblh_hadv``,
+``w_at_pblh``, ``delta_theta_v``, and ``wthv_at_pblh``.
 
 Advanced debugging
 ~~~~~~~~~~~~~~~~~~

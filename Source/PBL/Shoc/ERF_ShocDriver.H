@@ -2,6 +2,7 @@
 #define ERF_SHOC_DRIVER_H_
 
 #include "ERF_ShocDiagnostics.H"
+#include "ERF_ShocEntrainment.H"
 #include "ERF_ShocTypes.H"
 #include "ERF_ShocPreprocess.H"
 #include "ERF_ShocColumnData.H"
@@ -51,6 +52,8 @@ public:
                   amrex::MultiFab* qfx3,
                   amrex::MultiFab* eddy_diffs,
                   amrex::MultiFab& z_phys_nd,
+                  const amrex::MultiFab& mapfac_mx,
+                  const amrex::MultiFab& mapfac_my,
                   const amrex::Geometry& geom,
                   double dt);
 
@@ -64,6 +67,7 @@ public:
     bool disables_momentum_transport () const;
     bool owns_scalar_surface_fluxes () const;
     bool debug_summary_enabled () const { return m_opts.debug_summary; }
+    bool entrainment_diagnostics_enabled () const { return m_opts.diagnose_entrainment; }
     bool has_native_diagnostics () const { return m_eddy_coeffs_cc.isDefined(); }
     bool has_consumed_surface_flux_diagnostics () const
     {
@@ -101,6 +105,13 @@ public:
     const amrex::MultiFab& shear_prod_diagnostics () const { return m_shear_prod_cc; }
     const amrex::MultiFab& buoy_prod_diagnostics () const { return m_buoy_prod_cc; }
     const amrex::MultiFab& diss_tke_diagnostics () const { return m_diss_tke_cc; }
+    const amrex::MultiFab& we_kinematic_diagnostics () const { return m_we_kinematic_cc; }
+    const amrex::MultiFab& we_flux_jump_diagnostics () const { return m_we_flux_jump_cc; }
+    const amrex::MultiFab& pblh_tendency_diagnostics () const { return m_pblh_tendency_cc; }
+    const amrex::MultiFab& pblh_hadv_diagnostics () const { return m_pblh_hadv_cc; }
+    const amrex::MultiFab& w_at_pblh_diagnostics () const { return m_w_at_pblh_cc; }
+    const amrex::MultiFab& delta_theta_v_diagnostics () const { return m_delta_theta_v_cc; }
+    const amrex::MultiFab& wthv_at_pblh_diagnostics () const { return m_wthv_at_pblh_cc; }
 
 private:
     int m_lev;
@@ -142,6 +153,17 @@ private:
     amrex::MultiFab m_shear_prod_cc;
     amrex::MultiFab m_buoy_prod_cc;
     amrex::MultiFab m_diss_tke_cc;
+    amrex::MultiFab m_H_cc;
+    amrex::MultiFab m_prev_H_cc;
+    amrex::MultiFab m_we_kinematic_cc;
+    amrex::MultiFab m_we_flux_jump_cc;
+    amrex::MultiFab m_pblh_tendency_cc;
+    amrex::MultiFab m_pblh_hadv_cc;
+    amrex::MultiFab m_w_at_pblh_cc;
+    amrex::MultiFab m_delta_theta_v_cc;
+    amrex::MultiFab m_wthv_at_pblh_cc;
+    amrex::MultiFab m_u_at_pblh_cc;
+    amrex::MultiFab m_v_at_pblh_cc;
     amrex::MultiFab* m_cons_ptr = nullptr;
     amrex::MultiFab* m_hfx3_ptr = nullptr;
     amrex::MultiFab* m_qfx3_ptr = nullptr;
@@ -151,6 +173,7 @@ private:
     amrex::Vector<std::unique_ptr<ShocColumnWorkspace>> m_column_workspaces;
     int m_advance_calls = 0;
     bool m_prev_turb_valid = false;
+    bool m_prev_H_valid = false;
 
     void ensure_storage (const amrex::MultiFab& cons,
                          const amrex::MultiFab& xvel,
@@ -180,5 +203,9 @@ private:
                                  const amrex::Geometry& geom,
                                  double dt) const;
     void print_debug_summary (double dt) const;
+    void update_entrainment_diagnostics (const amrex::MultiFab& mapfac_mx,
+                                         const amrex::MultiFab& mapfac_my,
+                                         const amrex::Geometry& geom,
+                                         double dt);
 };
 #endif

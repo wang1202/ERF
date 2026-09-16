@@ -144,6 +144,121 @@ namespace
     }
 
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    void diagnose_profile_at_height (const Array4<const Real>& zt,
+                                     const Array4<const Real>& dz,
+                                     const Array4<const Real>& theta_v,
+                                     const Array4<const Real>& wthv_sec,
+                                     const Array4<const Real>& u,
+                                     const Array4<const Real>& v,
+                                     const Array4<const Real>& w,
+                                     int ic,
+                                     int nlev,
+                                     Real H,
+                                     int jump_ncell,
+                                     Real min_delta_theta_v,
+                                     Real& u_at_pblh,
+                                     Real& v_at_pblh,
+                                     Real& w_at_pblh,
+                                     Real& wthv_at_pblh,
+                                     Real& delta_theta_v,
+                                     Real& we_flux_jump)
+    {
+        u_at_pblh = shoc_entrainment::missing_value;
+        v_at_pblh = shoc_entrainment::missing_value;
+        w_at_pblh = shoc_entrainment::missing_value;
+        wthv_at_pblh = shoc_entrainment::missing_value;
+        delta_theta_v = shoc_entrainment::missing_value;
+        we_flux_jump = shoc_entrainment::missing_value;
+
+        if (nlev < 2 || jump_ncell < 1 || !(min_delta_theta_v > 0.0_rt) ||
+            !shoc_entrainment::finite(H)) {
+            return;
+        }
+
+        int bracket = -1;
+        for (int k = 0; k + 1 < nlev; ++k) {
+            if (zt(ic,k,0) <= H && H <= zt(ic,k+1,0)) {
+                bracket = k;
+                break;
+            }
+        }
+        if (bracket < 0) {
+            return;
+        }
+
+        const Real z0 = zt(ic,bracket,0);
+        const Real z1 = zt(ic,bracket+1,0);
+        const Real denom = z1 - z0;
+        if (!(denom > 0.0_rt) || !shoc_entrainment::finite(denom)) {
+            return;
+        }
+        u_at_pblh = weighted_linear_interp(z0, z1, u(ic,bracket,0), u(ic,bracket+1,0), H);
+        v_at_pblh = weighted_linear_interp(z0, z1, v(ic,bracket,0), v(ic,bracket+1,0), H);
+        w_at_pblh = weighted_linear_interp(z0, z1, w(ic,bracket,0), w(ic,bracket+1,0), H);
+        wthv_at_pblh = weighted_linear_interp(z0, z1,
+                                              wthv_sec(ic,bracket,0),
+                                              wthv_sec(ic,bracket+1,0), H);
+        if (!shoc_entrainment::finite(u_at_pblh) ||
+            !shoc_entrainment::finite(v_at_pblh) ||
+            !shoc_entrainment::finite(w_at_pblh) ||
+            !shoc_entrainment::finite(wthv_at_pblh)) {
+            u_at_pblh = v_at_pblh = w_at_pblh =
+                wthv_at_pblh = shoc_entrainment::missing_value;
+            return;
+        }
+
+        Real below_sum = 0.0_rt, below_weight = 0.0_rt;
+        Real above_sum = 0.0_rt, above_weight = 0.0_rt;
+        int below_count = 0, above_count = 0;
+        for (int distance = 0;
+             distance < nlev && (below_count < jump_ncell || above_count < jump_ncell);
+             ++distance) {
+            const int kb = bracket - distance;
+            if (below_count < jump_ncell && kb >= 0 && zt(ic,kb,0) < H) {
+                const Real z = zt(ic,kb,0);
+                const Real layer_dz = dz(ic,kb,0);
+                const Real thv = theta_v(ic,kb,0);
+                if (!shoc_entrainment::finite(z) || !shoc_entrainment::finite(layer_dz) ||
+                    !shoc_entrainment::finite(thv) || !(layer_dz > 0.0_rt)) {
+                    return;
+                }
+                below_sum += layer_dz * thv;
+                below_weight += layer_dz;
+                ++below_count;
+            }
+            const int ka = bracket + 1 + distance;
+            if (above_count < jump_ncell && ka < nlev && zt(ic,ka,0) > H) {
+                const Real z = zt(ic,ka,0);
+                const Real layer_dz = dz(ic,ka,0);
+                const Real thv = theta_v(ic,ka,0);
+                if (!shoc_entrainment::finite(z) || !shoc_entrainment::finite(layer_dz) ||
+                    !shoc_entrainment::finite(thv) || !(layer_dz > 0.0_rt)) {
+                    return;
+                }
+                above_sum += layer_dz * thv;
+                above_weight += layer_dz;
+                ++above_count;
+            }
+        }
+        if (below_count != jump_ncell || above_count != jump_ncell ||
+            !(below_weight > 0.0_rt) || !(above_weight > 0.0_rt)) {
+            u_at_pblh = v_at_pblh = w_at_pblh =
+                wthv_at_pblh = shoc_entrainment::missing_value;
+            return;
+        }
+        delta_theta_v = above_sum / above_weight - below_sum / below_weight;
+        if (!shoc_entrainment::finite(delta_theta_v) ||
+            delta_theta_v <= min_delta_theta_v) {
+            delta_theta_v = wthv_at_pblh = we_flux_jump = shoc_entrainment::missing_value;
+            return;
+        }
+        we_flux_jump = -wthv_at_pblh / delta_theta_v;
+        if (!shoc_entrainment::finite(we_flux_jump)) {
+            delta_theta_v = wthv_at_pblh = we_flux_jump = shoc_entrainment::missing_value;
+        }
+    }
+
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
     int face_neighbor_cell (int idx, int domlo, int domhi, bool periodic)
     {
         return periodic ? idx : shoc_clamp(idx, domlo, domhi);
@@ -334,7 +449,8 @@ ShocDriver::ensure_storage (const MultiFab& cons,
         m_v_tend_fc.boxArray() != yvel.boxArray() ||
         m_v_tend_fc.DistributionMap() != yvel.DistributionMap() ||
         m_eddy_coeffs_cc.boxArray() != eddy_diffs.boxArray() ||
-        m_eddy_coeffs_cc.DistributionMap() != eddy_diffs.DistributionMap();
+        m_eddy_coeffs_cc.DistributionMap() != eddy_diffs.DistributionMap() ||
+        (m_opts.diagnose_entrainment && !m_H_cc.isDefined());
 
     if (storage_changed) {
         m_column_workspaces.clear();
@@ -375,6 +491,31 @@ ShocDriver::ensure_storage (const MultiFab& cons,
         m_shear_prod_cc.define(cons.boxArray(), cons.DistributionMap(), 1, 0);
         m_buoy_prod_cc.define(cons.boxArray(), cons.DistributionMap(), 1, 0);
         m_diss_tke_cc.define(cons.boxArray(), cons.DistributionMap(), 1, 0);
+        if (m_opts.diagnose_entrainment) {
+            m_H_cc.define(cons.boxArray(), cons.DistributionMap(), 1, 1);
+            m_prev_H_cc.define(cons.boxArray(), cons.DistributionMap(), 1, 0);
+            m_we_kinematic_cc.define(cons.boxArray(), cons.DistributionMap(), 1, 0);
+            m_we_flux_jump_cc.define(cons.boxArray(), cons.DistributionMap(), 1, 0);
+            m_pblh_tendency_cc.define(cons.boxArray(), cons.DistributionMap(), 1, 0);
+            m_pblh_hadv_cc.define(cons.boxArray(), cons.DistributionMap(), 1, 0);
+            m_w_at_pblh_cc.define(cons.boxArray(), cons.DistributionMap(), 1, 0);
+            m_delta_theta_v_cc.define(cons.boxArray(), cons.DistributionMap(), 1, 0);
+            m_wthv_at_pblh_cc.define(cons.boxArray(), cons.DistributionMap(), 1, 0);
+            m_u_at_pblh_cc.define(cons.boxArray(), cons.DistributionMap(), 1, 0);
+            m_v_at_pblh_cc.define(cons.boxArray(), cons.DistributionMap(), 1, 0);
+            m_H_cc.setVal(shoc_entrainment::missing_value);
+            m_prev_H_cc.setVal(shoc_entrainment::missing_value);
+            m_we_kinematic_cc.setVal(shoc_entrainment::missing_value);
+            m_we_flux_jump_cc.setVal(shoc_entrainment::missing_value);
+            m_pblh_tendency_cc.setVal(shoc_entrainment::missing_value);
+            m_pblh_hadv_cc.setVal(shoc_entrainment::missing_value);
+            m_w_at_pblh_cc.setVal(shoc_entrainment::missing_value);
+            m_delta_theta_v_cc.setVal(shoc_entrainment::missing_value);
+            m_wthv_at_pblh_cc.setVal(shoc_entrainment::missing_value);
+            m_u_at_pblh_cc.setVal(shoc_entrainment::missing_value);
+            m_v_at_pblh_cc.setVal(shoc_entrainment::missing_value);
+            m_prev_H_valid = false;
+        }
         m_prev_turb_cc.setVal(0.0);
         m_prev_wthv_sec_cc.setVal(0.0);
     }
@@ -411,6 +552,18 @@ ShocDriver::ensure_storage (const MultiFab& cons,
     m_shear_prod_cc.setVal(0.0);
     m_buoy_prod_cc.setVal(0.0);
     m_diss_tke_cc.setVal(0.0);
+    if (m_opts.diagnose_entrainment) {
+        m_H_cc.setVal(shoc_entrainment::missing_value);
+        m_we_kinematic_cc.setVal(shoc_entrainment::missing_value);
+        m_we_flux_jump_cc.setVal(shoc_entrainment::missing_value);
+        m_pblh_tendency_cc.setVal(shoc_entrainment::missing_value);
+        m_pblh_hadv_cc.setVal(shoc_entrainment::missing_value);
+        m_w_at_pblh_cc.setVal(shoc_entrainment::missing_value);
+        m_delta_theta_v_cc.setVal(shoc_entrainment::missing_value);
+        m_wthv_at_pblh_cc.setVal(shoc_entrainment::missing_value);
+        m_u_at_pblh_cc.setVal(shoc_entrainment::missing_value);
+        m_v_at_pblh_cc.setVal(shoc_entrainment::missing_value);
+    }
 }
 
 void
@@ -484,6 +637,8 @@ ShocDriver::advance (MultiFab& cons,
                      MultiFab* qfx3,
                      MultiFab* eddy_diffs,
                      MultiFab& z_phys_nd,
+                     const MultiFab& mapfac_mx,
+                     const MultiFab& mapfac_my,
                      const Geometry& geom,
                      double dt)
 {
@@ -611,6 +766,13 @@ ShocDriver::advance (MultiFab& cons,
         auto shear_prod_arr = m_shear_prod_cc.array(mfi);
         auto buoy_prod_arr = m_buoy_prod_cc.array(mfi);
         auto diss_tke_arr = m_diss_tke_cc.array(mfi);
+        auto H_arr = m_opts.diagnose_entrainment ? m_H_cc.array(mfi) : Array4<Real>{};
+        auto we_flux_jump_arr = m_opts.diagnose_entrainment ? m_we_flux_jump_cc.array(mfi) : Array4<Real>{};
+        auto w_at_pblh_arr = m_opts.diagnose_entrainment ? m_w_at_pblh_cc.array(mfi) : Array4<Real>{};
+        auto delta_theta_v_arr = m_opts.diagnose_entrainment ? m_delta_theta_v_cc.array(mfi) : Array4<Real>{};
+        auto wthv_at_pblh_arr = m_opts.diagnose_entrainment ? m_wthv_at_pblh_cc.array(mfi) : Array4<Real>{};
+        auto u_at_pblh_arr = m_opts.diagnose_entrainment ? m_u_at_pblh_cc.array(mfi) : Array4<Real>{};
+        auto v_at_pblh_arr = m_opts.diagnose_entrainment ? m_v_at_pblh_cc.array(mfi) : Array4<Real>{};
 
         const auto shoc_mix = col.shoc_mix.const_array();
         const auto pblh = col.pblh.const_array();
@@ -636,6 +798,14 @@ ShocDriver::advance (MultiFab& cons,
         const auto shear_prod = col.shear_prod.const_array();
         const auto buoy_prod = col.buoy_prod.const_array();
         const auto diss_tke = col.diss_tke.const_array();
+        const auto col_u = col.u.const_array();
+        const auto col_v = col.v.const_array();
+        const auto col_w = col.w.const_array();
+        const auto col_theta_v = col.theta_v.const_array();
+        const auto col_dz = col.dz.const_array();
+        const bool diagnose_entrainment = m_opts.diagnose_entrainment;
+        const int entrainment_jump_ncell = m_opts.entrainment_jump_ncell;
+        const Real entrainment_min_delta_theta_v = m_opts.entrainment_min_delta_theta_v;
         const auto tk = col.tk.const_array();
         const auto tkh = col.tkh.const_array();
         const auto rho = col.rho.const_array();
@@ -730,9 +900,41 @@ ShocDriver::advance (MultiFab& cons,
                     buoy_prod_arr(i,j,k) = buoy_prod(ic,kk,0);
                     diss_tke_arr(i,j,k) = diss_tke(ic,kk,0);
                 }
+                if (diagnose_entrainment) {
+                    const Real H = zi(ic,0,0) + pblh(ic,0,0);
+                    H_arr(i,j,k0) = H;
+                    Real u_at, v_at, w_at, wthv_at, delta_thv, we_flux;
+                    diagnose_profile_at_height(zt, col_dz,
+                                               col_theta_v, wthv_sec, col_u, col_v, col_w,
+                                               ic, layout.nlev, H,
+                                               entrainment_jump_ncell,
+                                               entrainment_min_delta_theta_v,
+                                               u_at, v_at, w_at, wthv_at, delta_thv, we_flux);
+                    u_at_pblh_arr(i,j,k0) = u_at;
+                    v_at_pblh_arr(i,j,k0) = v_at;
+                    w_at_pblh_arr(i,j,k0) = w_at;
+                    wthv_at_pblh_arr(i,j,k0) = wthv_at;
+                    delta_theta_v_arr(i,j,k0) = delta_thv;
+                    we_flux_jump_arr(i,j,k0) = we_flux;
+                    for (int kk = 1; kk < layout.nlev; ++kk) {
+                        const int kt = layout.kmin + kk;
+                        H_arr(i,j,kt) = H;
+                        u_at_pblh_arr(i,j,kt) = u_at;
+                        v_at_pblh_arr(i,j,kt) = v_at;
+                        w_at_pblh_arr(i,j,kt) = w_at;
+                        wthv_at_pblh_arr(i,j,kt) = wthv_at;
+                        delta_theta_v_arr(i,j,kt) = delta_thv;
+                        we_flux_jump_arr(i,j,kt) = we_flux;
+                    }
+                }
             });
         }
 
+    }
+
+    if (m_opts.diagnose_entrainment) {
+        BL_PROFILE("SHOC::advance::entrainment_diagnostics");
+        update_entrainment_diagnostics(mapfac_mx, mapfac_my, geom, dt);
     }
 
     {
@@ -790,6 +992,79 @@ ShocDriver::advance (MultiFab& cons,
         BL_PROFILE("SHOC::advance::debug_summary");
         print_debug_summary(dt);
     }
+}
+
+void
+ShocDriver::update_entrainment_diagnostics (const MultiFab& mapfac_mx,
+                                            const MultiFab& mapfac_my,
+                                            const Geometry& geom,
+                                            double dt)
+{
+    m_H_cc.FillBoundary(geom.periodicity());
+
+    const Box dom = geom.Domain();
+    const int ilo = dom.smallEnd(0);
+    const int ihi = dom.bigEnd(0);
+    const int jlo = dom.smallEnd(1);
+    const int jhi = dom.bigEnd(1);
+    const bool xper = geom.isPeriodic(0);
+    const bool yper = geom.isPeriodic(1);
+    const Real dxinv = geom.InvCellSize(0);
+    const Real dyinv = geom.InvCellSize(1);
+    const bool history_valid = m_prev_H_valid;
+    const bool include_hadv = m_opts.entrainment_include_horizontal_advection;
+    const Real dt_real = static_cast<Real>(dt);
+
+    for (MFIter mfi(m_H_cc, false); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.validbox();
+        const auto H = m_H_cc.const_array(mfi);
+        const auto Hprev = m_prev_H_cc.const_array(mfi);
+        const auto mx = mapfac_mx.const_array(mfi);
+        const auto my = mapfac_my.const_array(mfi);
+        const auto u = m_u_at_pblh_cc.const_array(mfi);
+        const auto v = m_v_at_pblh_cc.const_array(mfi);
+        const auto w = m_w_at_pblh_cc.const_array(mfi);
+        auto we = m_we_kinematic_cc.array(mfi);
+        auto tendency = m_pblh_tendency_cc.array(mfi);
+        auto hadv = m_pblh_hadv_cc.array(mfi);
+        const int klo = dom.smallEnd(2);
+
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+            if (k != klo) {
+                return;
+            }
+            const int il = xper ? i - 1 : amrex::max(ilo, i - 1);
+            const int ir = xper ? i + 1 : amrex::min(ihi, i + 1);
+            const int jb = yper ? j - 1 : amrex::max(jlo, j - 1);
+            const int jt = yper ? j + 1 : amrex::min(jhi, j + 1);
+
+            const Real dHdx = (i == ilo && !xper)
+                ? mx(i,j,0) * (H(ir,j,k) - H(i,j,k)) * dxinv
+                : (i == ihi && !xper)
+                    ? mx(i,j,0) * (H(i,j,k) - H(il,j,k)) * dxinv
+                    : mx(i,j,0) * (H(ir,j,k) - H(il,j,k)) * (0.5_rt * dxinv);
+            const Real dHdy = (j == jlo && !yper)
+                ? my(i,j,0) * (H(i,jt,k) - H(i,j,k)) * dyinv
+                : (j == jhi && !yper)
+                    ? my(i,j,0) * (H(i,j,k) - H(i,jb,k)) * dyinv
+                    : my(i,j,0) * (H(i,jt,k) - H(i,jb,k)) * (0.5_rt * dyinv);
+
+            const auto result = shoc_entrainment::kinematic(
+                H(i,j,k), Hprev(i,j,k), dt_real, u(i,j,k), v(i,j,k), w(i,j,k),
+                dHdx, dHdy, history_valid, include_hadv);
+            we(i,j,k) = result.we_kinematic;
+            tendency(i,j,k) = result.pblh_tendency;
+            hadv(i,j,k) = result.pblh_hadv;
+            for (int kk = klo + 1; kk <= dom.bigEnd(2); ++kk) {
+                we(i,j,kk) = result.we_kinematic;
+                tendency(i,j,kk) = result.pblh_tendency;
+                hadv(i,j,kk) = result.pblh_hadv;
+            }
+        });
+    }
+
+    MultiFab::Copy(m_prev_H_cc, m_H_cc, 0, 0, 1, 0);
+    m_prev_H_valid = true;
 }
 
 void
