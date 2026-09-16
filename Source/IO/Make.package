@@ -10,6 +10,7 @@ CEXE_sources += ERF_Plotfile2DSampledField.cpp
 CEXE_sources += ERF_Plotfile2DSampledLevel.cpp
 CEXE_sources += ERF_Plotfile2DInterpolator.cpp
 CEXE_sources += ERF_Plotfile2DUtils.cpp
+CEXE_sources += ERF_PBLDiagnosticRecorder.cpp
 CEXE_sources += ERF_Checkpoint.cpp
 CEXE_sources += ERF_Provenance.cpp
 CEXE_sources += ERF_WriteJobInfo.cpp
@@ -39,6 +40,7 @@ CEXE_headers += ERF_Plotfile2DSampledField.H
 CEXE_headers += ERF_Plotfile2DPrecip.H
 CEXE_headers += ERF_Plotfile2DSampledLevel.H
 CEXE_headers += ERF_Plotfile2DInterpolator.H
+CEXE_headers += ERF_PBLDiagnosticRecorder.H
 
 ifeq ($(USE_NETCDF), TRUE)
   CEXE_sources += ERF_ReadFromWRFBdy.cpp

@@ -21,6 +21,7 @@
 #include "ERF_Utils.H"
 #include "ERF_TerrainMetrics.H"
 #include "ERF_SrcHeaders.H"
+#include "ERF_PBLDiagnosticRecorder.H"
 //#include "ERF_BuoyancyUtils.H"
 
 #ifdef ERF_USE_NETCDF
@@ -680,6 +681,23 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
         m_mwr_sim->write(0, t_new[0], nstep,
                          vars_new[0][Vars::cons], base_state[0],
                          vars_new[0][Vars::cons], *z_phys_cc[0], geom[0]);
+    }
+    if (m_pbl_diag_recorder && m_pbl_diag_recorder->summary_step(nstep)) {
+        const int lev = m_pbl_diag_recorder->level();
+        const amrex::MultiFab* qheat =
+            lev < static_cast<int>(qheating_rates.size()) ? qheating_rates[lev].get() : nullptr;
+        m_pbl_diag_recorder->write(
+            t_new[lev], nstep, vars_new[lev][Vars::cons], vars_new[lev][Vars::xvel],
+            vars_new[lev][Vars::yvel], vars_new[lev][Vars::zvel], *z_phys_cc[lev],
+            geom[lev], *native_shoc_driver[lev], solverChoice.moisture_indices, qheat);
+    } else if (m_pbl_diag_recorder && m_pbl_diag_recorder->profile_step(nstep)) {
+        const int lev = m_pbl_diag_recorder->level();
+        const amrex::MultiFab* qheat =
+            lev < static_cast<int>(qheating_rates.size()) ? qheating_rates[lev].get() : nullptr;
+        m_pbl_diag_recorder->write(
+            t_new[lev], nstep, vars_new[lev][Vars::cons], vars_new[lev][Vars::xvel],
+            vars_new[lev][Vars::yvel], vars_new[lev][Vars::zvel], *z_phys_cc[lev],
+            geom[lev], *native_shoc_driver[lev], solverChoice.moisture_indices, qheat);
     }
 
     // Moving terrain
@@ -1923,6 +1941,27 @@ ERF::InitData_post ()
         if (do_mwr) {
             m_mwr_sim = std::make_unique<MWRSimulator>();
             m_mwr_sim->init(geom[0]);
+        }
+    }
+    {
+        amrex::ParmParse pp_rec("erf.pbl_recorder");
+        bool do_record = false;
+        pp_rec.query("do_record", do_record);
+        if (do_record) {
+            int lev = 0;
+            pp_rec.query("level", lev);
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                lev >= 0 && lev <= finest_level,
+                "erf.pbl_recorder.level must select an existing AMR level");
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                solverChoice.turbChoice[lev].uses_native_shoc() && native_shoc_driver[lev],
+                "erf.pbl_recorder requires native SHOC on the selected level");
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                native_shoc_driver[lev]->entrainment_diagnostics_enabled(),
+                "erf.pbl_recorder requires erf.shoc.diagnose_entrainment = true");
+            m_pbl_diag_recorder = std::make_unique<PBLDiagnosticRecorder>();
+            m_pbl_diag_recorder->init(geom[lev], finest_level, !restart_chkfile.empty(),
+                                      *native_shoc_driver[lev]);
         }
     }
 

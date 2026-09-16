@@ -102,6 +102,8 @@ using amrex::MPI_Comm;
 class MultiBlockContainer;
 #endif
 
+class PBLDiagnosticRecorder;
+
 /**
  * Enum of possible interpolation types between coarse/fine
 */
@@ -2042,6 +2044,7 @@ private:
     std::unique_ptr<CeilometerSimulator>   m_ceilometer_sim;
     std::unique_ptr<DopplerLidarSimulator> m_doppler_lidar_sim;
     std::unique_ptr<MWRSimulator>          m_mwr_sim;
+    std::unique_ptr<PBLDiagnosticRecorder> m_pbl_diag_recorder;
 
     amrex::Vector<std::unique_ptr<std::fstream> >       datalog;
     amrex::Vector<std::unique_ptr<std::fstream> >   der_datalog;

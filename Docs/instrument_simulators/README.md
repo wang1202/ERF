@@ -8,6 +8,23 @@ ERF provides column-based forward operators for three ground-based remote-sensin
 | `erf.doppler_lidar` | Halo StreamLine XR+, 1550 nm | vertical-stare velocity/CNR, VAD wind retrieval, and attenuated backscatter |
 | `erf.mwr` | Radiometrics MP-3000A, K+V band | thermodynamic/moisture profiles, LWP/PWV, and optional brightness temperatures |
 
+## PBL diagnostic recorder
+
+`erf.pbl_recorder.do_record = true` writes moving-column native-SHOC
+diagnostics to `pbl_diag_00_summary.txt` and `pbl_diag_00_profile.txt` (one
+pair per configured site). It requires native SHOC and
+`erf.shoc.diagnose_entrainment = true`. Configure `level`, matching zero-based
+`i_loc`/`j_loc`, `summary_output_interval`, `write_profiles`,
+`profile_output_interval`, and `output_file`; the `move_*` schedule uses the
+same physical trajectory convention as the instrument simulators above.
+
+The recorder samples Eulerian diagnostics at the instantaneous moving cell;
+it never differentiates boundary-layer height along the moving trajectory.
+Files are self-describing whitespace-delimited scientific output. Summary
+and profile rows use physical `z_phys` heights and `-999` for unavailable or
+guarded values. Restart initialization appends without duplicating the last
+time row, and each completed write is flushed.
+
 ## Configuration
 
 All simulators require matching, zero-based `i_loc` and `j_loc` arrays; multiple entries configure multiple sites. Common optional parameters are `output_interval` (a positive number of coarse steps) and `output_file` (the output-file prefix). The ceilometer additionally accepts `backscatter_model`, `r_eff_default = 1.0e-5`, `r_eff_ice_default = 3.0e-5`, and `beta_thresh`. The Doppler lidar accepts `backscatter_model` and `r_eff_default = 1.0e-5`. `simple` is the implemented geometric-optics backscatter model; `mie` currently falls back to `simple` with a diagnostic message.
