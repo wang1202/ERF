@@ -18,7 +18,9 @@ The Doppler lidar supports `do_vertical_stare`, `do_vad`, `vad_elevation_angle`,
 
 Each prefix can specify equal-length `move_start_time`, `move_stop_time`, `move_speed_x`, and `move_speed_y` arrays. A schedule moves every configured site from its original cell center at the listed piecewise-constant velocities. Motion accumulates over later intervals; an interval's final displacement remains in effect after it stops. Intervals must be ordered and non-overlapping. The instantaneous physical `(x, y)` is converted to the sampled `(i_loc, j_loc)` cell and clamped at the domain boundary, so motion beyond the domain remains safe while its reported physical position continues to reflect the requested trajectory.
 
-Every data row starts with `time x y i_loc j_loc`. The remaining fields are:
+Every data row starts with `time x y i_loc j_loc`. Every profile `height` field
+is the level's cell-centered physical `z_phys` value, not the computational
+coordinate height. The remaining fields are:
 
 - Ceilometer: `height att_backscatter cloud_base_height`
 - Doppler stare: `height w CNR`; VAD: `height u v wind_speed wind_dir`; backscatter: `height beta_att`

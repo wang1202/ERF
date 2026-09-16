@@ -662,18 +662,19 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
     if (m_ceilometer_sim) {
         m_ceilometer_sim->write(0, t_new[0], nstep,
                                 vars_new[0][Vars::cons], vars_new[0][Vars::cons],
-                                geom[0], ceil_mpdata.get());
+                                *z_phys_cc[0], geom[0], ceil_mpdata.get());
     }
     if (m_doppler_lidar_sim) {
         m_doppler_lidar_sim->write(0, t_new[0], nstep,
                                    vars_new[0][Vars::cons], vars_new[0][Vars::xvel],
                                    vars_new[0][Vars::yvel], vars_new[0][Vars::zvel],
-                                   vars_new[0][Vars::cons], geom[0], dl_mpdata.get());
+                                   vars_new[0][Vars::cons], *z_phys_cc[0],
+                                   geom[0], dl_mpdata.get());
     }
     if (m_mwr_sim) {
         m_mwr_sim->write(0, t_new[0], nstep,
                          vars_new[0][Vars::cons], base_state[0],
-                         vars_new[0][Vars::cons], geom[0]);
+                         vars_new[0][Vars::cons], *z_phys_cc[0], geom[0]);
     }
 
     // Moving terrain

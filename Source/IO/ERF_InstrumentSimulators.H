@@ -484,6 +484,7 @@ struct CeilometerSimulator
     int istep,
     const amrex::MultiFab& cons_mf,
     const amrex::MultiFab& /*qmoist_mf*/,
+    const amrex::MultiFab& z_phys_cc,
     const amrex::Geometry& geom,
     const InstrMicrophySizeData* mpdata = nullptr)
   {
@@ -496,13 +497,17 @@ struct CeilometerSimulator
     int khi = dom.bigEnd(2);
     int nz = khi - klo + 1;
     amrex::Real dz = geom.CellSize(2);
-    amrex::Real zlo = geom.ProbLo(2) + 0.5 * dz;
 
     for (int s = 0; s < m_nsites; ++s) {
       auto loc = InstrumentSimUtil::site_location_at_time(
         m_iloc[s], m_jloc[s], t, geom, m_move);
       int iloc = loc.i;
       int jloc = loc.j;
+
+      // Use the cell-centered physical height field, matching ERF's z_phys
+      // plot variable, rather than the computational coordinate height.
+      auto z_phys_col = InstrumentSimUtil::extract_column(
+        z_phys_cc, 0, iloc, jloc, klo, khi);
 
       // Extract rho [kg/m3] and rho*qc [kg/m3]
       auto rho_col = InstrumentSimUtil::extract_column(
@@ -569,7 +574,7 @@ struct CeilometerSimulator
       amrex::Real z_cb = -9999.0;
       for (int k = 0; k < nz; ++k) {
         if (beta_att[k] > m_beta_thresh) {
-          z_cb = zlo + k * dz;
+          z_cb = z_phys_col[k];
           break;
         }
       }
@@ -577,7 +582,7 @@ struct CeilometerSimulator
       // Write
       auto& out = *m_streams[s];
       for (int k = 0; k < nz; ++k) {
-        amrex::Real z_k = zlo + k * dz;
+        amrex::Real z_k = z_phys_col[k];
         out << std::scientific << std::setprecision(6) << std::setw(14) << t
             << std::setw(14) << loc.x << std::setw(14) << loc.y << std::setw(8)
             << iloc << std::setw(8) << jloc << std::setw(14) << z_k
@@ -767,6 +772,7 @@ struct DopplerLidarSimulator
     const amrex::MultiFab& yvel_mf,
     const amrex::MultiFab& zvel_mf,
     const amrex::MultiFab& /*qmoist_mf*/,
+    const amrex::MultiFab& z_phys_cc,
     const amrex::Geometry& geom,
     const InstrMicrophySizeData* mpdata = nullptr)
   {
@@ -779,7 +785,6 @@ struct DopplerLidarSimulator
     int khi = dom.bigEnd(2);
     int nz = khi - klo + 1;
     amrex::Real dz = geom.CellSize(2);
-    amrex::Real zlo = geom.ProbLo(2) + 0.5 * dz;
 
     int stare_idx = 0, vad_idx = 0, beta_idx = 0;
     for (int s = 0; s < m_nsites; ++s) {
@@ -787,6 +792,11 @@ struct DopplerLidarSimulator
         m_iloc[s], m_jloc[s], t, geom, m_move);
       int iloc = loc.i;
       int jloc = loc.j;
+
+      // Use the cell-centered physical height field for output and lidar
+      // range calculations, not the computational coordinate height.
+      auto z_phys_col = InstrumentSimUtil::extract_column(
+        z_phys_cc, 0, iloc, jloc, klo, khi);
 
       // Extract columns (always on all ranks)
       amrex::Vector<amrex::Real> u_col, v_col, w_col;
@@ -862,7 +872,7 @@ struct DopplerLidarSimulator
       if (m_do_stare) {
         auto& out = *m_stare_streams[stare_idx];
         for (int k = 0; k < nz; ++k) {
-          amrex::Real z_k = zlo + k * dz;
+          amrex::Real z_k = z_phys_col[k];
           amrex::Real cnr = 0.0;
           if (m_do_backscatter && !beta_att.empty()) {
             if (m_cnr_model == "physical") {
@@ -892,7 +902,7 @@ struct DopplerLidarSimulator
 
         auto& out = *m_vad_streams[vad_idx];
         for (int k = 0; k < nz; ++k) {
-          amrex::Real z_k = zlo + k * dz;
+          amrex::Real z_k = z_phys_col[k];
           amrex::Real uk = u_col[k], vk = v_col[k], wk = w_col[k];
 
           // Simulate N_az radial velocity observations
@@ -935,7 +945,7 @@ struct DopplerLidarSimulator
       if (m_do_backscatter) {
         auto& out = *m_beta_streams[beta_idx];
         for (int k = 0; k < nz; ++k) {
-          amrex::Real z_k = zlo + k * dz;
+          amrex::Real z_k = z_phys_col[k];
           out << std::scientific << std::setprecision(6) << std::setw(14) << t
               << std::setw(14) << loc.x << std::setw(14) << loc.y
               << std::setw(8) << iloc << std::setw(8) << jloc << std::setw(14)
@@ -1182,6 +1192,7 @@ struct MWRSimulator
     const amrex::MultiFab& cons_mf,
     const amrex::MultiFab& base_state_mf,
     const amrex::MultiFab& /*qmoist_mf*/,
+    const amrex::MultiFab& z_phys_cc,
     const amrex::Geometry& geom)
   {
     if ((istep % m_output_interval) != 0) {
@@ -1193,7 +1204,6 @@ struct MWRSimulator
     int khi = dom.bigEnd(2);
     int nz = khi - klo + 1;
     amrex::Real dz = geom.CellSize(2);
-    amrex::Real zlo = geom.ProbLo(2) + 0.5 * dz;
 
     // Physical constants
     constexpr amrex::Real Rd = 287.04; // J kg-1 K-1
@@ -1207,6 +1217,11 @@ struct MWRSimulator
         m_iloc[s], m_jloc[s], t, geom, m_move);
       int iloc = loc.i;
       int jloc = loc.j;
+
+      // Use the cell-centered physical height field, matching ERF's z_phys
+      // plot variable, rather than the computational coordinate height.
+      auto z_phys_col = InstrumentSimUtil::extract_column(
+        z_phys_cc, 0, iloc, jloc, klo, khi);
 
       // Extract state columns
       auto rho_col = InstrumentSimUtil::extract_column(
@@ -1261,7 +1276,7 @@ struct MWRSimulator
       {
         auto& out = *m_prof_streams[s];
         for (int k = 0; k < nz; ++k) {
-          amrex::Real z_k = zlo + k * dz;
+          amrex::Real z_k = z_phys_col[k];
           out << std::scientific << std::setprecision(6) << std::setw(14) << t
               << std::setw(14) << loc.x << std::setw(14) << loc.y
               << std::setw(8) << iloc << std::setw(8) << jloc << std::setw(14)
