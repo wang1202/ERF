@@ -1009,6 +1009,17 @@ struct SolverChoice {
         }
         pp.queryAdd("poisson_abstol", poisson_abstol);
         pp.queryAdd("poisson_reltol", poisson_reltol);
+        // Cache the geometry-only FFT preconditioner used by terrain GMRES
+        // projections.  Keep this opt-in while the legacy path is the
+        // validation reference.
+        pp.queryAdd("terrain_poisson_reuse", terrain_poisson_reuse);
+        if (terrain_poisson_reuse &&
+            (terrain_type != TerrainType::StaticFittedMesh ||
+             mesh_type != MeshType::VariableDz)) {
+            amrex::Warning("erf.terrain_poisson_reuse is only supported for "
+                           "static fitted terrain; disabling it for this configuration");
+            terrain_poisson_reuse = false;
+        }
 #ifdef AMREX_USE_FLOAT
         poisson_abstol = amrex::max(poisson_abstol,amrex::Real(1e-6));
         poisson_reltol = amrex::max(poisson_reltol,amrex::Real(1e-6));
@@ -2000,6 +2011,11 @@ struct SolverChoice {
     amrex::Real poisson_reltol      = amrex::Real(1e-8);
 #endif
 
+    // Reuse the geometry-only FFT setup for static fitted-terrain GMRES
+    // projections.  The default is false so the original per-solve path is
+    // retained as the validation reference.
+    bool        terrain_poisson_reuse = false;
+
     bool        test_mapfactor         = false;
 
     int         gradp_type             = 0;
@@ -2372,6 +2388,8 @@ struct SolverChoice {
  * @brief Absolute tolerance for the Poisson solve.
  * @var SolverChoice::poisson_reltol
  * @brief Relative tolerance for the Poisson solve.
+ * @var SolverChoice::terrain_poisson_reuse
+ * @brief Reuse static-terrain FFT preconditioner setup between projections.
  * @var SolverChoice::test_mapfactor
  * @brief Whether to use test map scale factors.
  * @var SolverChoice::gradp_type

@@ -583,7 +583,9 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
 
 #ifdef ERF_USE_FFT
     if ( ( (solverChoice.anelastic[lev] == 1)               || (solverChoice.project_initial_velocity[lev] == 1) ) &&
-         ( (solverChoice.mesh_type == MeshType::ConstantDz) || (solverChoice.mesh_type == MeshType::StretchedDz) ) ) {
+         ( (solverChoice.mesh_type == MeshType::ConstantDz) ||
+           (solverChoice.mesh_type == MeshType::StretchedDz) ||
+           (solverChoice.mesh_type == MeshType::VariableDz && solverChoice.terrain_poisson_reuse) ) ) {
         build_fft_solvers(lev);
     }
 #endif

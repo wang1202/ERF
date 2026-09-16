@@ -32,7 +32,8 @@ TerrainPoisson::TerrainPoisson (Geometry const& geom, Geometry const& lev_geom,
                                 const MultiFab& ax, const MultiFab& ay,
                                 const MultiFab& az, const MultiFab& dJ,
                                 MultiFab const* z_phys_nd,
-                                bool use_real_bcs)
+                                bool use_real_bcs,
+                                FFT::PoissonHybrid<MultiFab>* fft_precond)
     : m_geom(geom),
       m_grids(ba),
       m_dmap(dm),
@@ -44,10 +45,15 @@ TerrainPoisson::TerrainPoisson (Geometry const& geom, Geometry const& lev_geom,
       m_dJ(dJ),
       m_zphys(z_phys_nd)
 {
-    if (!m_2D_fft_precond) {
-        Box bounding_box = ba.minimalBox();
-        bc_fft = get_fft_bc(lev_geom,domain_bcs_type,bounding_box,use_real_bcs);
-        m_2D_fft_precond = std::make_unique<FFT::PoissonHybrid<MultiFab>>(geom,bc_fft);
+    BL_PROFILE("TerrainPoisson::construct");
+
+    Box bounding_box = ba.minimalBox();
+    bc_fft = get_fft_bc(lev_geom,domain_bcs_type,bounding_box,use_real_bcs);
+    if (fft_precond != nullptr) {
+        m_2D_fft_precond = fft_precond;
+    } else {
+        m_owned_2D_fft_precond = std::make_unique<FFT::PoissonHybrid<MultiFab>>(geom,bc_fft);
+        m_2D_fft_precond = m_owned_2D_fft_precond.get();
     }
 }
 
@@ -58,6 +64,8 @@ void TerrainPoisson::usePrecond (bool use_precond_in)
 
 void TerrainPoisson::apply (MultiFab& lhs, MultiFab const& rhs)
 {
+    BL_PROFILE("TerrainPoisson::apply");
+
     AMREX_ASSERT(rhs.nGrowVect().allGT(0));
 
     MultiFab& xx = const_cast<MultiFab&>(rhs);
@@ -192,6 +200,8 @@ void TerrainPoisson::apply_bcs (MultiFab& phi)
 void TerrainPoisson::getFluxes (MultiFab& phi,
                                 Array<MultiFab,AMREX_SPACEDIM>& fluxes)
 {
+    BL_PROFILE("TerrainPoisson::getFluxes");
+
     auto const& dxinv = m_geom.InvCellSizeArray();
 
     auto const& x   = phi.const_arrays();
@@ -265,10 +275,13 @@ void TerrainPoisson::precond (MultiFab& lhs, MultiFab const& rhs)
 #ifdef ERF_USE_FFT
     if (m_use_precond)
     {
+        BL_PROFILE("TerrainPoisson::precond");
+
         // Make a version that isn't constant
         MultiFab& rhs_tmp = const_cast<MultiFab&>(rhs);
 
         lhs.setVal(0.);
+        AMREX_ALWAYS_ASSERT(m_2D_fft_precond != nullptr);
         m_2D_fft_precond->solve(lhs, rhs_tmp, m_stretched_dz_d);
 
 #if 0

@@ -883,7 +883,9 @@ ERF::InitData_post ()
         for (int lev = 0; lev <= finest_level; lev++) {
             // rebuild fft solvers here in case mesh type was changed when reading the checkpoint file
             if ( ( (solverChoice.anelastic[lev] == 1)               || (solverChoice.project_initial_velocity[lev] == 1) ) &&
-                 ( (solverChoice.mesh_type == MeshType::ConstantDz) || (solverChoice.mesh_type == MeshType::StretchedDz) ) ) {
+                 ( (solverChoice.mesh_type == MeshType::ConstantDz) ||
+                   (solverChoice.mesh_type == MeshType::StretchedDz) ||
+                   (solverChoice.mesh_type == MeshType::VariableDz && solverChoice.terrain_poisson_reuse) ) ) {
                 build_fft_solvers(lev);
             }
         }

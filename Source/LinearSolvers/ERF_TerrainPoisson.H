@@ -45,7 +45,8 @@ public:
                     const amrex::MultiFab& ax, const amrex::MultiFab& ay,
                     const amrex::MultiFab& az, const amrex::MultiFab& dJ,
                     amrex::MultiFab const* z_phys_nd,
-                    bool use_real_bcs);
+                    bool use_real_bcs,
+                    amrex::FFT::PoissonHybrid<amrex::MultiFab>* fft_precond = nullptr);
 
     /**
      * Apply the terrain Poisson operator.
@@ -173,7 +174,11 @@ private:
     const amrex::MultiFab& m_dJ;
     const amrex::MultiFab* m_zphys;
 
-    std::unique_ptr<amrex::FFT::PoissonHybrid<amrex::MultiFab>> m_2D_fft_precond;
+    // A cached preconditioner is owned by ERF and is valid for the lifetime of
+    // this short-lived operator wrapper.  The owned object is used by the
+    // legacy path and keeps the constructor usable outside the cache.
+    std::unique_ptr<amrex::FFT::PoissonHybrid<amrex::MultiFab>> m_owned_2D_fft_precond;
+    amrex::FFT::PoissonHybrid<amrex::MultiFab>* m_2D_fft_precond = nullptr;
     amrex::Array<std::pair<amrex::FFT::Boundary,amrex::FFT::Boundary>,AMREX_SPACEDIM> bc_fft;
 };
 

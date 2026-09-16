@@ -28,8 +28,13 @@ void ERF::build_fft_solvers (int lev)
         }
     }
 
+    const bool cache_terrain_preconditioner =
+        solverChoice.terrain_poisson_reuse &&
+        solverChoice.mesh_type == MeshType::VariableDz;
+
     if ( (solverChoice.mesh_type == MeshType::ConstantDz )  ||
-         (solverChoice.mesh_type == MeshType::StretchedDz) )
+         (solverChoice.mesh_type == MeshType::StretchedDz) ||
+         cache_terrain_preconditioner )
     {
         bool will_solve_with_mlmg = (solverChoice.mesh_type == MeshType::ConstantDz);
         bool all_boxes_ok = true;
@@ -98,10 +103,15 @@ void ERF::build_fft_solvers (int lev)
                 m_3D_poisson[lev][isub] = std::make_unique<FFT::Poisson<MultiFab>>(my_geom,bc_fft);
 
             }
-            else if (solverChoice.mesh_type == MeshType::StretchedDz)
+            else if (solverChoice.mesh_type == MeshType::StretchedDz ||
+                     cache_terrain_preconditioner)
             {
                 if (mg_verbose > 0) {
-                    amrex::Print() << "Building the hybrid FFT solver to be used on domain " << my_geom.Domain() << std::endl;
+                    amrex::Print() << "Building the hybrid FFT solver to be used on domain "
+                                    << my_geom.Domain()
+                                    << (cache_terrain_preconditioner
+                                        ? " as the terrain preconditioner"
+                                        : "") << std::endl;
                 }
                 if (m_2D_poisson.size() <= lev) {
                     m_2D_poisson.resize(lev+1);

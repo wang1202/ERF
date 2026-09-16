@@ -14,6 +14,7 @@ using namespace amrex;
  *
  * @param lev Level index for the solve
  * @param subdomain Box over which the solve is performed
+ * @param isub Index of the level subdomain, used to select cached setup
  * @param rhs Right-hand side field for the Poisson solve
  * @param p Solution field to fill
  * @param fluxes Face-centered gradient fluxes to fill
@@ -25,7 +26,8 @@ using namespace amrex;
  * The unnamed metric argument in the class declaration is the cell-centered
  * Jacobian determinant.
  */
-void ERF::solve_with_gmres (int lev, const Box& subdomain, MultiFab& rhs, MultiFab& phi,
+void ERF::solve_with_gmres (int lev, const Box& subdomain, int isub,
+                            MultiFab& rhs, MultiFab& phi,
                             Array<MultiFab,AMREX_SPACEDIM>& fluxes,
                             MultiFab& ax_sub, MultiFab& ay_sub, MultiFab& az_sub,
                             MultiFab& dJ_sub, MultiFab& znd_sub)
@@ -66,17 +68,30 @@ void ERF::solve_with_gmres (int lev, const Box& subdomain, MultiFab& rhs, MultiF
         my_geom.define(subdomain, rb, coord_sys, is_per);
     }
 
-    amrex::GMRES<MultiFab, TerrainPoisson> gmsolver;
+    FFT::PoissonHybrid<MultiFab>* cached_fft_precond = nullptr;
+    if (solverChoice.terrain_poisson_reuse) {
+        if (lev >= m_2D_poisson.size() || isub >= m_2D_poisson[lev].size() ||
+            m_2D_poisson[lev][isub] == nullptr) {
+            amrex::Abort("Missing cached terrain FFT preconditioner for level/subdomain");
+        }
+        cached_fft_precond = m_2D_poisson[lev][isub].get();
+    }
+
+    BL_PROFILE_VAR("ERF::solve_with_gmres::TerrainPoissonSetup", terrain_poisson_setup);
 
     TerrainPoisson tp(my_geom, Geom(lev), rhs.boxArray(), rhs.DistributionMap(), domain_bc_type,
                       stretched_dz_d[lev], ax_sub, ay_sub, az_sub, dJ_sub, &znd_sub,
-                      solverChoice.use_real_bcs);
+                      solverChoice.use_real_bcs, cached_fft_precond);
+
+    amrex::GMRES<MultiFab, TerrainPoisson> gmsolver;
 
     gmsolver.define(tp);
 
     gmsolver.setVerbose(mg_verbose);
 
     gmsolver.setRestartLength(50);
+
+    BL_PROFILE_VAR_STOP(terrain_poisson_setup);
 
     tp.usePrecond(true);
 
