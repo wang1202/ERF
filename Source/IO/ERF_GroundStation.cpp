@@ -330,7 +330,8 @@ ERF::writeGroundStationData (GroundStationConfig& station, Real time, int nstep)
 
     sampleGroundStationColumn(lev, station, z_agl, column_samples, surface_pressure, accumulated_precip);
 
-    bool have_surface_layer = (m_SurfaceLayer != nullptr);
+    const auto& surface_layer = m_SurfaceLayer[Orientation::zlo()];
+    bool have_surface_layer = (surface_layer != nullptr);
     Real ustar = Real(0.0), tstar = Real(0.0), qstar = Real(0.0);
     Real olen = bogus_large_value, theta_surf = Real(0.0), qv_surf = Real(0.0), z0 = Real(0.1);
 
@@ -359,19 +360,19 @@ ERF::writeGroundStationData (GroundStationConfig& station, Real time, int nstep)
         Vector<Real> surface_pack(7, Real(0.0));
         int found_surface = 0;
 
-        for (MFIter mfi(*m_SurfaceLayer->get_u_star(mlev)); mfi.isValid(); ++mfi) {
+        for (MFIter mfi(*surface_layer->get_u_star(mlev)); mfi.isValid(); ++mfi) {
             const Box& bx = mfi.validbox();
             if (!bx.contains(IntVect(i2d, j2d, 0))) { continue; }
 
             found_surface = 1;
 
-            const auto ustar_arr = m_SurfaceLayer->get_u_star(mlev)->const_array(mfi);
-            const auto tstar_arr = m_SurfaceLayer->get_t_star(mlev)->const_array(mfi);
-            const auto qstar_arr = m_SurfaceLayer->get_q_star(mlev)->const_array(mfi);
-            const auto olen_arr  = m_SurfaceLayer->get_olen(mlev)->const_array(mfi);
-            const auto tsurf_arr = m_SurfaceLayer->get_t_surf(mlev)->const_array(mfi);
-            const auto qsurf_arr = m_SurfaceLayer->get_q_surf(mlev)->const_array(mfi);
-            const auto z0_arr    = m_SurfaceLayer->get_z0(mlev)->const_array(mfi);
+            const auto ustar_arr = surface_layer->get_u_star(mlev)->const_array(mfi);
+            const auto tstar_arr = surface_layer->get_t_star(mlev)->const_array(mfi);
+            const auto qstar_arr = surface_layer->get_q_star(mlev)->const_array(mfi);
+            const auto olen_arr  = surface_layer->get_olen(mlev)->const_array(mfi);
+            const auto tsurf_arr = surface_layer->get_t_surf(mlev)->const_array(mfi);
+            const auto qsurf_arr = surface_layer->get_q_surf(mlev)->const_array(mfi);
+            const auto z0_arr    = surface_layer->get_z0(mlev)->const_array(mfi);
             const auto t_sfc_arr = noahmp_t_sfc ? noahmp_t_sfc->const_array(mfi)
                                                  : Array4<const Real> {};
             const auto t_flux_arr = noahmp_t_flux ? noahmp_t_flux->const_array(mfi)
