@@ -1881,7 +1881,7 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
 
             update_sst_tsk(itime, geom[lev], ba2d[lev],
                            sst_lev[lev], tsk_lev[lev],
-                           m_SurfaceLayer, low_data_zlo,
+                           m_SurfaceLayer[Orientation(Direction::z, Orientation::low)], low_data_zlo,
                            lev_new[Vars::cons], *mf_PSFC[lev],
                            l_rdOcp, lmask_lev[lev][0], use_moist);
         }
@@ -2135,6 +2135,33 @@ init_base_state_from_wrfinput (const Box& subdomain,
                 }
             });
     } // mfi
+}
+
+/**
+ * Re-read the WRF reference-state parameters after a restart.
+ *
+ * wrf_bsp is filled by init_from_wrfinput at level 0, which only runs on a cold start.
+ * The six parameters it holds are not written to the checkpoint, so after a restart
+ * wrf_bsp still holds its constructed defaults with is_set == false.  Level 0 does not
+ * notice, because its base state is read back from the checkpoint -- but the first
+ * regrid that creates or remakes a refined level calls rebuild_base_state_from_wrfinput,
+ * and that aborts on the is_set assertion in init_base_state_from_wrfinput.
+ *
+ * The wrfinput file is still the authoritative source for these parameters and is still
+ * available, so simply read them again rather than carrying them in the checkpoint.
+ */
+void
+ERF::restore_base_state_params_on_restart ()
+{
+    if (solverChoice.init_type != InitType::WRFInput) { return; }
+    if (nc_init_file.empty() || nc_init_file[0].empty()) { return; }
+
+    // Same construction as the lev == 0 branch of init_from_wrfinput: read the level-0
+    // file's values on top of the defaults, then derive the layer interfaces from them.
+    read_base_state_params_from_wrfinput(nc_init_file[0][0], wrf_bsp);
+    wrf_bsp.set_layer_interfaces();
+
+    AMREX_ALWAYS_ASSERT(wrf_bsp.is_set);
 }
 
 /**
