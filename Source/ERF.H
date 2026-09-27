@@ -59,6 +59,7 @@
 #include <ERF_FillPatcher.H>
 #include <ERF_SampleData.H>
 #include <ERF_StationSampler.H>
+#include <ERF_ObsNudging.H>
 #include <ERF_ForestDrag.H>
 #include <ERF_IBFaceSet.H>
 #include <ERF_Provenance.H>
@@ -70,11 +71,13 @@
 #include "ERF_EulerianMicrophysics.H"
 #include "ERF_LagrangianMicrophysics.H"
 #include "ERF_LandSurface.H"
+#include "ERF_Urban.H"
 #include "ERF_TwoStreamRadiation.H"
 
 #ifdef ERF_USE_WINDFARM
 #include "ERF_WindFarm.H"
 #endif
+#include <ERF_SurfaceModel.H>
 
 #include <ERF_RadiationModels.H>
 
@@ -106,19 +109,13 @@ class MultiBlockContainer;
 // Describes one component of a 2D plotfile; defined in
 // IO/ERF_Plotfile2DSampledLevel.H, which ERF.H does not need to include.
 namespace plotfile2d { struct Plotfile2DOutputDescriptor; }
+namespace erf_sbm { class SBMStateManager; }
 
 /**
  * Enum of possible interpolation types between coarse/fine
 */
 AMREX_ENUM(StateInterpType,
     FullState, Perturbational
-);
-
-/**
- * Enum of possible plotfile types
-*/
-AMREX_ENUM(PlotFileType,
-    None, Amrex, Netcdf
 );
 
 /**
@@ -599,6 +596,15 @@ public:
                       const double& time,
                       const double& dt_advance);
 
+    void advance_urban (int lev,
+                        amrex::MultiFab& cons_in,
+                        amrex::MultiFab& u_in,
+                        amrex::MultiFab& v_in,
+                        const amrex::Real& dt_advance,
+                        const amrex::Geometry& geom,
+                        const amrex::MultiFab* z_phys_nd,
+                        amrex::MultiFab& eddyDiffs_in);
+
     void advance_radiation (int lev,
                             amrex::MultiFab& cons_in,
                             const double& dt_advance);
@@ -729,6 +735,12 @@ public:
     void resolve_station_stencils ();
     void sample_stations (amrex::Real time);
     void flush_stations () const;
+    // The nodes a station's terrain elevation is read from, at k = the bottom of
+    // the domain: z_phys_nd, or with immersed-forcing terrain the immersed surface
+    const amrex::MultiFab& station_ground (int lev);
+
+    // Nudging towards observations at stations
+    void init_obs_nudging ();
 
     void erf_enforce_hse (int lev,
                           amrex::MultiFab& dens, amrex::MultiFab& pres, amrex::MultiFab& pi,
@@ -1051,7 +1063,9 @@ private:
     void make_physbcs (int lev);
 
     // (Re)build the land surface model on this level's current grids
-    void make_lsm_at_level (int lev, bool from_regrid [[maybe_unused]] = false);
+    void make_lsm_at_level (int lev, bool from_regrid = false,
+                            int source_lev = -1, bool source_is_raw_input = false,
+                            bool initialize_now = false);
 
     // Initialize the microphysics object
     void initializeMicrophysics (const int&);
@@ -1320,9 +1334,11 @@ private:
     amrex::Vector<amrex::MultiFab> zmom_crse_rhs;
 
     std::unique_ptr<Microphysics> micro;
+    std::unique_ptr<erf_sbm::SBMStateManager> sbm_state_manager;
     std::unique_ptr<CloudChamberBudget> cloud_chamber_budget;
     erf_cloud_chamber::Config cloud_chamber_config;
     amrex::Vector<amrex::Vector<amrex::MultiFab*>> qmoist; // (lev,ncomp) rain_accum, snow_accum, graup_accum
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> precip; // SLM precipitation-rate scratch
 
     // Variables for wind farm parametrization models
 
@@ -1337,11 +1353,17 @@ private:
                                                    // velocity upstream of the turbine
 #endif
 
+    std::unique_ptr<SurfaceModel> m_SurfaceModel = nullptr;
+
     LandSurface lsm;
+    Urban urban;
     amrex::Vector<std::string> lsm_data_name;                // (ncomp) -- e.g., sw_dn_dir/dif_vis/nir, lw_dn, cos_zen
     amrex::Vector<amrex::Vector<amrex::MultiFab*>> lsm_data; // (lev,ncomp) Data for LSM coupling
     amrex::Vector<std::string> lsm_flux_name;                // (ncomp) -- e.g., hfx3, q1fx3, tau13, tau23
     amrex::Vector<amrex::Vector<amrex::MultiFab*>> lsm_flux; // (lev,ncomp) Fluxes from LSM needed by DYCORE
+    amrex::Vector<amrex::Vector<amrex::MultiFab*>> urban_data; // (lev,ncomp) Data for urban coupling
+    amrex::Vector<std::string> urban_data_name;                // (ncomp) Urban coupling field names
+    amrex::Vector<amrex::Vector<amrex::MultiFab*>> urban_flux; // (lev,ncomp) Fluxes from urban model
 
     LargeScaleForcingData lsf;
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> nudge_data; // holds nudging inputs: tnudge, qnudge, unudge, vnudge
@@ -1355,6 +1377,9 @@ private:
     // the z-ghost cell k = khi + 1, so the array has one ghost cell in z.
     // Both RRTMGP and the two-stream model fill all nz + 1 levels.
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> rad_fluxes;
+
+    amrex::Real solar_declin = 0.0;
+    amrex::Real calday = 0.0;
 
     // Two-stream radiation model (erf.radiation_model = TwoStream): owns its
     // surface and SEB state; every call from ERF is behind a test of
@@ -1594,6 +1619,7 @@ private:
     bool m_plot_face_terrain_blanking = false;
 
     bool plot_lsm = false;
+    bool plot_surfmodel = false;
 
     // other sampling output control
     int profile_int = -1;
@@ -2178,6 +2204,12 @@ private:
     // routines produce their components
     amrex::Vector<std::string> station_vars_3d;
     amrex::Vector<std::string> station_vars_2d;
+    // The immersed-forcing terrain surface under each level's grids, for the stations
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> station_ib_ground;
+
+    // Nudging towards observations at stations; built only when
+    // solverChoice.nudging_from_observations is true
+    std::unique_ptr<ObsNudging> obs_nudging = nullptr;
 
     amrex::Vector<std::unique_ptr<std::fstream> >       datalog;
     amrex::Vector<std::unique_ptr<std::fstream> >   der_datalog;
