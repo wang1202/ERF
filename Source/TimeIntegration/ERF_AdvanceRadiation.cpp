@@ -83,28 +83,11 @@ void ERF::advance_radiation (int lev,
     //       ERF_MakeNewArrays.cpp, zeroed there, and FillBoundary'd below.
     // Can no column model run on this level, so that its radiation fields must be
     // interpolated from the parent instead?
-    //
-    // RRTMGP records its own predicate at Init and it stays authoritative for that model.
-    // The two-stream model has no IRadiation object -- reading rad[] would dereference a
-    // null pointer -- so derive it from the grids.
-    //
-    // The test is per box, not on the level's bounding box. A column sweep needs a whole
-    // column inside ONE box, so the question is whether every box spans the domain in z,
-    // not whether the boxes together do. A bounding-box test gets three layouts right and
-    // one wrong: a level tagged at genuinely different heights in different horizontal
-    // regions -- surface convection near klo here, cloud tops near khi there -- has a
-    // bounding box that reaches both domain ends while no single box holds a column. That
-    // level is no more sweepable than a shallow nest, and this sends it down the same path.
+    // ERF::rad_level_needs_interpolation carries the reasoning; post_timestep needs the
+    // same answer, so it is a member rather than a lambda here.
     auto level_needs_interpolation = [&] (int l) -> bool
     {
-        if (l <= 0) { return false; }
-        if (solverChoice.rad_uses_interface() && rad[l]) { return rad[l]->is_nested_patch(); }
-        const Box& dom = geom[l].Domain();
-        for (int ibox = 0; ibox < grids[l].size(); ++ibox) {
-            const Box& b = grids[l][ibox];
-            if (b.smallEnd(2) != dom.smallEnd(2) || b.bigEnd(2) != dom.bigEnd(2)) { return true; }
-        }
-        return false;
+        return rad_level_needs_interpolation(l);
     };
 
     auto interp_rad_from_coarse = [&] ()
@@ -239,7 +222,7 @@ void ERF::advance_radiation (int lev,
             }
         }
 
-        if (m_SurfaceModel && solverChoice.rad_type == RadiationType::RRTMGP) {
+        if (m_SurfaceModel && solverChoice.rad_feeds_lsm()) {
             const auto fine_outputs = m_SurfaceModel->get_radiation_output_fields(lev);
             const auto coarse_outputs = m_SurfaceModel->get_radiation_output_fields(lev-1);
             const IntVect rr2d(refRatio(lev-1)[0], refRatio(lev-1)[1], 1);
@@ -333,7 +316,7 @@ void ERF::advance_radiation (int lev,
 
         if (m_SurfaceModel) {
             lsm_input_ptrs = m_SurfaceModel->get_radiation_fields(lev);
-            if (solverChoice.rad_type == RadiationType::RRTMGP) {
+            if (solverChoice.rad_feeds_lsm()) {
                 lsm_output_ptrs = m_SurfaceModel->get_radiation_output_fields(lev);
             }
         }

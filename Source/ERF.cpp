@@ -365,6 +365,100 @@ ERF::ResetIntervalMeans ()
     }
 }
 
+// True when a level takes its radiation fields from its parent instead of sweeping.
+//
+// The column sweep needs a whole column inside ONE box, so the question is whether every
+// box spans the domain in z, not whether the boxes together do. A bounding-box test gets
+// three layouts right and one wrong: a level tagged at genuinely different heights in
+// different horizontal regions has a bounding box reaching both domain ends while no single
+// box holds a column.
+//
+// RRTMGP records its own predicate at Init and it stays authoritative for that model. The
+// two-stream model has no IRadiation object -- reading rad[] would dereference a null
+// pointer -- so derive it from the grids.
+//
+// This lives here, rather than as a lambda in one caller, because three places have to
+// agree about it: advance_radiation (which routes such a level through
+// interp_rad_from_coarse), the two-stream solver's own early return, and post_timestep,
+// which must not average a surface state down off a level that never advanced it.
+bool
+ERF::rad_level_needs_interpolation (int lev) const
+{
+    if (lev <= 0) { return false; }
+    if (solverChoice.rad_uses_interface() && rad[lev]) { return rad[lev]->is_nested_patch(); }
+    const Box& dom = geom[lev].Domain();
+    for (int ibox = 0; ibox < grids[lev].size(); ++ibox) {
+        const Box& b = grids[lev][ibox];
+        if (b.smallEnd(2) != dom.smallEnd(2) || b.bigEnd(2) != dom.bigEnd(2)) { return true; }
+    }
+    return false;
+}
+
+// Give a newly built level its surface-energy-balance state.
+//
+// define_level allocates t_sfc and q_sfc filled with the erf.radiation.seb_* scalar
+// defaults. For a level that is about to evolve them, that is wrong twice over: the
+// defaults are not this column's surface, and the level would radiate at them for its
+// first step. Interpolate from the parent instead, as the radiation heating rates are.
+//
+// The parent's covered values are the average of this level's own from the previous
+// step (post_timestep averages them down), so on a regrid this recovers the fine field's
+// cell means and loses only the sub-coarse-cell variation. On a level that never
+// existed before there is nothing finer to lose.
+void
+ERF::fill_seb_from_coarse (int lev)
+{
+    if (lev == 0) { return; }
+    if (solverChoice.rad_type != RadiationType::TwoStream) { return; }
+    if (!two_stream_rad.seb_prognostic_active()) { return; }
+
+    const IntVect rr2d(refRatio(lev-1)[0], refRatio(lev-1)[1], 1);
+    const Box& crse_dom = geom[lev-1].Domain();
+    auto fill_one = [&] (MultiFab* fine, MultiFab* crse)
+    {
+        if (!fine || !crse) { return; }
+        // The coarse halo feeds the interpolation stencil, so fill it first. FillBoundary
+        // covers the interior and periodic ghosts only; the slope stencil
+        // (0.5*(u(i+1)-u(i-1)), evaluated for every BC type) also reaches outside the
+        // domain at a non-periodic face. define_level setVal'd the whole array, so those
+        // cells still hold erf.rad_t_sfc while the interior has evolved, and a fine level
+        // abutting such a face would get its edge column interpolated from a stencil
+        // biased toward the scalar. Extend the surface outward by clamping into the valid
+        // region first -- the same zeroth-order extension init_from_wrfinput gives the
+        // fields whose halos this interpolater is documented to require.
+        //
+        // Only across a NON-periodic face. Across a periodic one FillBoundary has already
+        // put the periodic image there, and InterpFromCoarseLevel's ParallelCopy reads
+        // that cell twice -- from this halo and from the periodic image of the valid cell
+        // it mirrors. Clamping it would make the two sources disagree, and ParallelCopy
+        // does not say which one wins: the answer then depended on the box layout, and a
+        // level created mid-run came out different on 1 and 2 ranks.
+        crse->FillBoundary(geom[lev-1].periodicity());
+        const bool clamp_x = !geom[lev-1].isPeriodic(0);
+        const bool clamp_y = !geom[lev-1].isPeriodic(1);
+        for (MFIter mfi(*crse, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            const Box& gbx = mfi.growntilebox();
+            const Array4<Real>& a = crse->array(mfi);
+            const auto dlo = lbound(crse_dom);
+            const auto dhi = ubound(crse_dom);
+            ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                const int ic = clamp_x ? amrex::max(dlo.x, amrex::min(dhi.x, i)) : i;
+                const int jc = clamp_y ? amrex::max(dlo.y, amrex::min(dhi.y, j)) : j;
+                if (ic != i || jc != j) { a(i,j,k) = a(ic,jc,k); }
+            });
+        }
+        InterpFromCoarseLevel(*fine, fine->nGrowVect(),
+                              IntVect(0,0,0),          // no ghosts outside the domain
+                              *crse, 0, 0, 1,
+                              geom[lev-1], geom[lev],
+                              rr2d, &cell_cons_interp,
+                              domain_bcs_type, BCVars::cons_bc);
+    };
+    fill_one(two_stream_rad.seb_t_sfc(lev), two_stream_rad.seb_t_sfc(lev-1));
+    fill_one(two_stream_rad.seb_q_sfc(lev), two_stream_rad.seb_q_sfc(lev-1));
+}
+
 // Called after every coarse timestep
 void
 ERF::post_timestep (int nstep, double time, double dt_lev0)
@@ -447,6 +541,44 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
             }
             int num_comp = ncomp - src_comp;
             AverageDownTo(lev,src_comp,num_comp);
+
+            // The two-stream surface energy balance's prognostic state, for the same
+            // reason and at the same moment as the state above: level lev+1 has just
+            // finished its subcycles, and every level evolves its own copy of t_sfc
+            // and q_sfc. Left alone those two estimates of one surface drift apart,
+            // and since that surface temperature IS the longwave boundary condition,
+            // the ground would radiate at two temperatures depending on which level
+            // asked.
+            //
+            // Inside the TwoWay block deliberately: under OneWay ERF does not correct
+            // a coarse level with its fine solution at all, and the surface should not
+            // be the one exception. The levels then keep independent surfaces, which
+            // is what OneWay means.
+            //
+            // The ratio is horizontal only -- these are 2D fields collapsed to a single
+            // z index. Note the force-restore ODE is nonlinear in T_s, so the mean of
+            // the fine temperatures is not the temperature the coarse column would have
+            // reached on its own; defining the coarse value as that mean is the ordinary
+            // AMR compromise.
+            // ... but only off a level that actually advanced it. A level no box of which
+            // spans the domain in z never sweeps: TwoStreamRadiation::advance returns at
+            // its top and advance_radiation interpolates that level's fields from its
+            // parent instead. Its t_sfc and q_sfc therefore sit frozen at whatever
+            // fill_seb_from_coarse wrote when the level was built, and averaging that down
+            // would overwrite the coarse level's own evolving surface underneath the nest
+            // -- pinning the longwave boundary condition there at its level-creation value.
+            if (solverChoice.rad_type == RadiationType::TwoStream &&
+                two_stream_rad.seb_prognostic_active() &&
+                !rad_level_needs_interpolation(lev+1))
+            {
+                const IntVect rr2d(refRatio(lev)[0], refRatio(lev)[1], 1);
+                MultiFab* t_crse = two_stream_rad.seb_t_sfc(lev);
+                MultiFab* t_fine = two_stream_rad.seb_t_sfc(lev+1);
+                if (t_crse && t_fine) { average_down(*t_fine, *t_crse, 0, 1, rr2d); }
+                MultiFab* q_crse = two_stream_rad.seb_q_sfc(lev);
+                MultiFab* q_fine = two_stream_rad.seb_q_sfc(lev+1);
+                if (q_crse && q_fine) { average_down(*q_fine, *q_crse, 0, 1, rr2d); }
+            }
         }
     }
 
@@ -1297,6 +1429,10 @@ ERF::InitData_post ()
             }
         }
 
+        if (phys_bc_type[Orientation::zlo()] == ERF_BC::surface_layer) {
+            m_SurfaceModel->request_surface_layer_outputs();
+        }
+
         if (solverChoice.lsm_type == LandSurfaceType::SLM) {
             m_SurfaceModel->register_radiation_input("tskin", {lsm.Get_DataIdx(0, "tsurf"), -1});
             m_SurfaceModel->register_radiation_input("emiss", {lsm.Get_DataIdx(0, "emis_sfc"), -1});
@@ -1304,7 +1440,7 @@ ERF::InitData_post ()
             m_SurfaceModel->register_radiation_input("albedo_nir", {lsm.Get_DataIdx(0, "alb_nir_sfc"), -1});
             m_SurfaceModel->register_radiation_input("albedo_vis_diff", {lsm.Get_DataIdx(0, "alb_vis_sfc_diff"), -1});
             m_SurfaceModel->register_radiation_input("albedo_nir_diff", {lsm.Get_DataIdx(0, "alb_nir_sfc_diff"), -1});
-            if (solverChoice.rad_type == RadiationType::RRTMGP) {
+            if (solverChoice.rad_feeds_lsm()) {
                 const amrex::Vector<std::string> rad_output_names = {
                     "cos_zenith_angle", "sw_flux_dn", "sw_flux_dn_dir_vis",
                     "sw_flux_dn_dir_nir", "sw_flux_dn_dif_vis", "sw_flux_dn_dif_nir",
@@ -1327,7 +1463,7 @@ ERF::InitData_post ()
                 const int idx = lsm.Get_DataIdx(0, input.second);
                 if (idx >= 0) { m_SurfaceModel->register_radiation_input(input.first, {idx, -1}); }
             }
-            if (solverChoice.rad_type == RadiationType::RRTMGP) {
+            if (solverChoice.rad_feeds_lsm()) {
                 const amrex::Vector<std::string> rad_output_names = {
                     "cos_zenith_angle", "sw_flux_dn", "sw_flux_dn_dir_vis",
                     "sw_flux_dn_dir_nir", "sw_flux_dn_dif_vis", "sw_flux_dn_dif_nir",
@@ -1371,10 +1507,16 @@ ERF::InitData_post ()
                 m_SurfaceModel->register_field_map("olen", olen_ptrs_slm, olen_ptrs_urb, true);
             } else {
             */
+            // Flux-based models do not consume these MOST mappings.  Keep them
+            // registered for regridding and the non-flux path; their storage remains
+            // lazy until a consumer activates them.
             m_SurfaceModel->register_field_map("ustar", {lsm.Get_DataIdx(0, "ustar"), -1}, true);
             m_SurfaceModel->register_field_map("tstar", {lsm.Get_DataIdx(0, "tstar"), -1}, true);
             m_SurfaceModel->register_field_map("qstar", {lsm.Get_DataIdx(0, "qstar"), -1}, true);
             m_SurfaceModel->register_field_map("olen", olen_ptrs_slm, olen_ptrs_urb, true);
+            if (!m_SurfaceModel->are_fluxes()) {
+                m_SurfaceModel->activate_all_field_maps();
+            }
             //}
             for (int lev = 0; lev <= finest_level; ++lev) {
                 // Seed olen to > 0 so that a surface model which exports u*/t*/q* directly
@@ -1387,7 +1529,9 @@ ERF::InitData_post ()
                 // maps never runs.  This setVal, and the four register_field_map calls above,
                 // therefore have no effect on any current configuration; they are kept for the
                 // non-flux path.  The intended wiring needs confirming before that path is used.
-                m_SurfaceModel->get_field("olen", lev)->setVal(1.0E3);
+                if (!m_SurfaceModel->are_fluxes()) {
+                    m_SurfaceModel->get_field("olen", lev)->setVal(1.0E3);
+                }
             }
         }
 
@@ -1448,14 +1592,19 @@ ERF::InitData_post ()
         }
     }
 
+    bool any_surface_layer = false;
     for (OrientationIter oit; oit; ++oit) {
         Orientation ori = oit();
         if (phys_bc_type[ori] == ERF_BC::surface_layer) {
+            any_surface_layer = true;
             bool has_diff = ( (solverChoice.diffChoice.molec_diff_type != MolecDiffType::None) ||
                               (solverChoice.turbChoice[0].les_type  != LESType::None)          ||
                               (solverChoice.turbChoice[0].rans_type != RANSType::None)         ||
                               (solverChoice.turbChoice[0].pbl_type  != PBLType::None) );
-            AMREX_ALWAYS_ASSERT(has_diff);
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(has_diff,
+                "A surface_layer boundary applies its fluxes through the diffusion operator, so it "
+                "needs a diffusive closure: set erf.molec_diff_type, erf.les_type, erf.rans_type "
+                "or erf.pbl_type.");
 
             bool rotate = solverChoice.use_rotate_surface_flux;
             if (rotate) {
@@ -1597,6 +1746,19 @@ ERF::InitData_post ()
             m_SurfaceLayer[ori] = nullptr;
         }
     } // end if (phys_bc_type[Orientation(Direction::z,Orientation::low)] == ERF_BC::surface_layer)
+
+    // A land-surface model hands its fluxes to the atmosphere only through the surface
+    // layer (make_SurfaceLayer_at_level is the one consumer of lsm_flux). Without a
+    // surface_layer boundary the land model still runs and still computes fluxes, but
+    // nothing applies them: the atmosphere never sees the land surface.
+    if (solverChoice.lsm_type != LandSurfaceType::None && !any_surface_layer) {
+        amrex::Print() << "WARNING: erf.land_surface_model = "
+                       << amrex::getEnumNameString(solverChoice.lsm_type)
+                       << " but no boundary is a surface_layer. The land model's heat, "
+                          "moisture and momentum fluxes reach the atmosphere only through "
+                          "the surface layer, so they will not be applied; set "
+                          "zlo.type = \"surface_layer\".\n";
+    }
 
     if (!restart_chkfile.empty()) {
         // All active faces now exist, so restore every surface-layer field once.
@@ -3145,9 +3307,7 @@ ERF::ReadParameters ()
         pp.queryAdd("destag_profiles", destag_profiles);
 
         pp.queryAdd("plot_lsm", plot_lsm);
-        if (plot_lsm) { // || plot_urban) {
-            plot_surfmodel = true;
-        }
+
 #ifdef ERF_USE_RRTMGP
         pp.queryAdd("plot_rad", plot_rad);
 #endif
@@ -3263,6 +3423,18 @@ ERF::ReadParameters ()
 
     solverChoice.init_params(max_level,pp_prefix);
 
+    // SurfaceModel output is opt-in for single-provider runs.  When both
+    // providers are active, retain the useful combined diagnostic output
+    // by default, while allowing an explicit false to disable it.
+    bool urban_active = false;
+    for (const int enabled : solverChoice.urban_enabled_lev) {
+        urban_active = urban_active || (enabled != 0);
+    }
+    plot_surfmodel = solverChoice.lsm_type != LandSurfaceType::None &&
+                     solverChoice.urban_type != UrbanType::None &&
+                     urban_active;
+    pp.queryAdd("plot_surfmodel", plot_surfmodel);
+
     // Implicit acoustic substepping inverts one tridiagonal system per column, so it is
     // only well posed if no column is chopped between boxes.  That does not require one
     // box per column: a level may have several boxes over the same (i,j) -- as it does
@@ -3332,9 +3504,8 @@ ERF::ReadParameters ()
                 start_datetime += ":00"; // add seconds
             }
             if (start_datetime.length() != 19) {
-                Print() << "Got start_datetime = \"" << start_datetime
-                    << "\", format should be " << datetime_format << std::endl;
-                exit(0);
+                Abort("Got start_datetime = \"" + start_datetime +
+                      "\", format should be " + datetime_format);
             }
             start_time = static_cast<double>(getEpochTime(start_datetime, datetime_format));
 
@@ -3397,13 +3568,12 @@ ERF::ReadParameters ()
                 stop_datetime += ":00"; // add seconds
             }
             if (stop_datetime.length() != 19) {
-                Print() << "Got stop_datetime = \"" << stop_datetime
-                    << "\", format should be " << datetime_format << std::endl;
-                exit(0);
+                Abort("Got stop_datetime = \"" + stop_datetime +
+                      "\", format should be " + datetime_format);
             }
 
             stop_time = static_cast<double>(getEpochTime(stop_datetime, datetime_format));
-            Print() << "Stop  datetime : " << start_datetime << std::endl;
+            Print() << "Stop  datetime : " << stop_datetime << std::endl;
 
         } else {
 
@@ -3983,24 +4153,12 @@ ERF::check_vels_for_nans(MultiFab const& xvel, MultiFab const& yvel, MultiFab co
     //
     // Test at the end of every full timestep whether the solution data contains NaNs
     //
-    bool any_have_nans = false;
-    if (xvel.contains_nan(0,1,0))
-    {
-        amrex::Print() << "x-velocity contains NaNs " << '\n';
-        any_have_nans = true;
-    }
-    if (yvel.contains_nan(0,1,0))
-    {
-        amrex::Print() << "y-velocity contains NaNs" << '\n';
-        any_have_nans = true;
-    }
-    if (zvel.contains_nan(0,1,0))
-    {
-        amrex::Print() << "z-velocity contains NaNs" << '\n';
-        any_have_nans = true;
-    }
-    if (any_have_nans) {
-        exit(0);
+    std::string have_nans;
+    if (xvel.contains_nan(0,1,0)) { have_nans += " x-velocity"; }
+    if (yvel.contains_nan(0,1,0)) { have_nans += " y-velocity"; }
+    if (zvel.contains_nan(0,1,0)) { have_nans += " z-velocity"; }
+    if (!have_nans.empty()) {
+        amrex::Abort("NaNs found in" + have_nans);
     }
 }
 

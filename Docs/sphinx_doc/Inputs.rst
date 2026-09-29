@@ -1230,6 +1230,10 @@ List of Parameters
 +-------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.plot_lsm**                    | write the land-surface-model fields to the plotfile      | Boolean            | false            |
 +-------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.plot_surfmodel**              | write SurfaceModel fields to ``plt_surf_*`` files;       | Boolean            | both LSM+Urban   |
+|                                     | independent of ``erf.plot_lsm``                          |                    | active by default|
+|                                     |                                                          |                    | false otherwise  |
++-------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.plot_rad**                    | write the radiation fields to the plotfile; read only in | Boolean            | false            |
 |                                     | an RRTMGP build                                          |                    |                  |
 +-------------------------------------+----------------------------------------------------------+--------------------+------------------+
@@ -1446,7 +1450,7 @@ that cuts through static refinement patches retains the finer in-plane resolutio
 By default all intersecting levels are written; ``erf.plane_sampling_max_level = <int>``
 caps the finest level (``0`` forces level-0-only output). The slice-normal direction is
 resolved natively on each level by replicating the sampled plane across the level's cells,
-so the resulting dataset has an isotropic refinement ratio and loads cleanly in yt/amrvis.
+so the resulting dataset has an isotropic refinement ratio and loads cleanly in amrvis.
 
 Line and plane samples will be default be written to plotfiles, one plotfile per output
 snapshot, with all output variables in the same file. Alternatively, line sampling has
@@ -2890,11 +2894,15 @@ List of Parameters
 +---------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.bndry_output_box_hi**           | Upper-right (x,y) of output box                          | 2 Reals            | None             |
 +---------------------------------------+----------------------------------------------------------+--------------------+------------------+
-| **erf.bndry_output_var_names**        | Variables to write                                       | List of strings    | All              |
+| **erf.bndry_output_var_names**        | Variables to write; any of velocity, density,            | List of strings    | None (no         |
+|                                       | temperature, theta, scalar, qv, qc and ke. An unknown    |                    | variables)       |
+|                                       | name aborts at the first write                           |                    |                  |
 +---------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.bndry_file**                    | Input boundary-plane directory                           | String             | None             |
 +---------------------------------------+----------------------------------------------------------+--------------------+------------------+
-| **erf.bndry_input_var_names**         | Variables to read                                        | List of strings    | All              |
+| **erf.bndry_input_var_names**         | Variables to read; any of velocity, density,             | List of strings    | None (no         |
+|                                       | temperature, theta, scalar, qv, qc and ke. An unknown    |                    | variables)       |
+|                                       | name aborts at start-up                                  |                    |                  |
 +---------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.in_rad**                        | width, in cells, of the region inside the domain         | Integer >= 0       | 1                |
 |                                       | boundary from which the boundary planes are written and  |                    |                  |
@@ -3310,8 +3318,6 @@ interfaces.
     with the (x,y) values we have just read in.  Note that the z-values are in the
     order z(x1,y1), z(x1,y2), z(x1,y3), ... which is contrary to standard Fortran ordering
 
-.. _inputs-land-surface-model:
-
 .. _sec:ImmersedForcingInputs:
 
 Immersed Forcing
@@ -3710,6 +3716,8 @@ the ones marked **Required** abort the run if they are not given.
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
 | **erf.most.include_subgrid_vel**      | add a subgrid contribution to the mean surface velocity  | Boolean             | false            |
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
+
+.. _inputs-land-surface-model:
 
 Land Surface Model
 ==================
@@ -4110,10 +4118,15 @@ be solved on its own. The requirement is per box -- the sweep needs a whole colu
 -- so a level tagged at different heights in different horizontal regions is interpolated too,
 not just one that stops below the domain top. The only refusal is on level 0, which has no parent
 to interpolate from: a box there that does not span :math:`z` means grids decomposed in the
-vertical, which ERF's default ``amr.no_box_split_dir = 2`` already prevents. The surface energy balance remains a level-0 feature, so
-``erf.radiation.seb_prognostic_enable`` -- which evolves the surface temperature that the longwave
-boundary condition reads -- cannot be combined with ``amr.max_level > 0``; that combination is
-refused when the inputs are read, whether or not a fine level is ever built.
+vertical, which ERF's default ``amr.no_box_split_dir = 2`` already prevents. The surface energy balance runs on every level. ``erf.radiation.seb_prognostic_enable`` -- which
+evolves the surface temperature that the longwave boundary condition reads -- may be combined
+with ``amr.max_level > 0``: a new level's surface state is interpolated from its parent, the
+fine levels' state is averaged down after they advance (under ``erf.coupling_type = TwoWay``),
+and a regrid keeps what the surface had reached. The average-down is skipped for a level
+whose boxes do not span the domain in :math:`z`, since such a level takes its radiation
+from its parent and never evolves a surface of its own. A fine level therefore starts from its parent's
+surface rather than resolving more surface structure than the coarse grid did. The fields are
+written with the 2D plotfile variables ``seb_t_sfc`` and ``seb_q_sfc``.
 
 
 
@@ -4639,6 +4652,8 @@ List of Parameters
 | Parameter                   | Definition                | Acceptable Values | Default    |
 +=============================+===========================+===================+============+
 | **erf.check_for_nans**      | Test solution for NaNs    |  int              | 0          |
+|                             | and abort if any are      |                   |            |
+|                             | found                     |                   |            |
 +-----------------------------+---------------------------+-------------------+------------+
 | **amrex.fpe_trap_invalid**  | Raise errors for NaNs     |  0 / 1            | 0          |
 +-----------------------------+---------------------------+-------------------+------------+

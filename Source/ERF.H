@@ -86,6 +86,7 @@
 #endif
 
 #include "ERF_ShocDriver.H"
+#include "AuxiliaryState/ERF_AuxiliaryInertTracer.H"
 
 #ifdef ERF_USE_P3
 #include "ERF_P3Interface.H"
@@ -433,6 +434,13 @@ public:
     // Note that "cur_time" is always in double precision
     bool writeNow (double cur_time, const int nstep, const int plot_int,
                    const double plot_per, const double dt_0, double& last_file_time);
+
+    //! True when a level cannot sweep radiation itself -- no box on it holds a whole
+    //! column -- and so takes its radiation fields by interpolation from its parent.
+    [[nodiscard]] bool rad_level_needs_interpolation (int lev) const;
+
+    //! Fill a newly built level's two-stream SEB state from its parent
+    void fill_seb_from_coarse (int lev);
 
     // Called after every level 0 timestep
     void post_timestep (int nstep, double time, double dt_lev);
@@ -1335,6 +1343,7 @@ private:
 
     std::unique_ptr<Microphysics> micro;
     std::unique_ptr<erf_sbm::SBMStateManager> sbm_state_manager;
+    std::unique_ptr<erf_auxiliary::AuxiliaryInertTracer> auxiliary_inert_tracer;
     std::unique_ptr<CloudChamberBudget> cloud_chamber_budget;
     erf_cloud_chamber::Config cloud_chamber_config;
     amrex::Vector<amrex::Vector<amrex::MultiFab*>> qmoist; // (lev,ncomp) rain_accum, snow_accum, graup_accum

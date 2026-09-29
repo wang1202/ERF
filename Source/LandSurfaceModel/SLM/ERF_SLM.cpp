@@ -710,7 +710,7 @@ void SLM::init_from_inputs()
 
         amrex::Print() << " Read radiation forcing file '" << rad_input_file << "'" << std::endl;
         amrex::Print() << "   rad forcing file has " << num_rad_times << " time values, x = " << rad_x.len() << " y = " << rad_y.len() << std::endl;
-        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_lsm_geom.Domain().length(0) == rad_x.len() && m_lsm_geom.Domain().length(1) == rad_y.len(), "Radiation input file must have same X and Y dimensions!");
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_lsm_geom.Domain().length(0) == static_cast<int>(rad_x.len()) && m_lsm_geom.Domain().length(1) == static_cast<int>(rad_y.len()), "Radiation input file must have same X and Y dimensions!");
 
         BoxList bl_rad = ba_lsm_2d.boxList();
         for (auto& b : bl_rad) {
@@ -2638,7 +2638,7 @@ void SLM::init_from_params()
             if (landmask_arr(i, j, 0) == 1) {
 
                 const int ltype = landtype_arr(i,j,0) - 1; // shift by one to match table index (i.e, types 1-20 -> index 0-19)
-                const int stype = soiltype_arr(i,j,d_khi_lsm) - 1;
+                const int stype = static_cast<int>(soiltype_arr(i,j,d_khi_lsm)) - 1;
 
                 // Set soil parameters from parameter file
                 for (int k = d_khi_lsm; k >= d_klo_lsm; k--) {
@@ -2719,7 +2719,7 @@ void SLM::UpdateLAI(const amrex::MFIter &mfi)
 
         auto landmask_arr = landmask.const_array(mfi);
         auto landtype_arr = landtype.const_array(mfi);
-        auto vegetype_arr = vegetype.const_array(mfi);
+        // auto vegetype_arr = vegetype.const_array(mfi);
         auto LAI_arr = LAI.array(mfi);
         auto SAI_arr = SAI.array(mfi);
 
@@ -3121,7 +3121,7 @@ SLM::AdvanceSLM ()
                 return;
             }
 
-            amrex::Real q_gr;
+            amrex::Real q_gr_loc;
 
             // SAM rhow[nz] = air density at vertical velocity levels, kg/m^3
             amrex::Real rhow = dref_arr(i, j, 0); // TODO: double check this
@@ -3167,8 +3167,8 @@ SLM::AdvanceSLM ()
                 erf_qsati(t_canop_arr(i, j, 0), pref_arr(i, j, 0), qsat_canop);
             }
 
-            q_gr = q_gr_arr(i, j, 0);
-            q_cas_arr(i, j, 0) = qref_arr(i, j, 0) * cond_vref + qsat_canop*cond_vcnp + q_gr*cond_vundercnp;
+            q_gr_loc = q_gr_arr(i, j, 0);
+            q_cas_arr(i, j, 0) = qref_arr(i, j, 0) * cond_vref + qsat_canop*cond_vcnp + q_gr_loc*cond_vundercnp;
 
             // Output variables
             tveg_arr(i, j, 0) = t_canop_arr(i, j, 0);
@@ -3782,7 +3782,7 @@ void SLM::fluxes_canopy(const amrex::MFIter &mfi)
         if (landmask_arr(i, j, 0) != 1) {
             return;
         }
-        amrex::Real evapo_wet;
+        amrex::Real evapo_wet_loc;
 
         if (vegetype_arr(i, j, 0) == 1)
         {
@@ -3809,10 +3809,10 @@ void SLM::fluxes_canopy(const amrex::MFIter &mfi)
 
                 // direct evaporation from the water held on canopy
                 // evaporation/dew only possible if canopy temperature is above freezing
-                evapo_wet = std::min(mw_arr(i, j, 0)/dt_iter, ((qsat_canop - q_sfc_arr(i, j, 0)) * rhow * LAI_arr(i, j, 0) / (r_b_arr(i, j, 0))*vege_YES_arr(i, j, 0)));
+                evapo_wet_loc = std::min(mw_arr(i, j, 0)/dt_iter, ((qsat_canop - q_sfc_arr(i, j, 0)) * rhow * LAI_arr(i, j, 0) / (r_b_arr(i, j, 0))*vege_YES_arr(i, j, 0)));
 
                 // increment/decrement of the water amount held on leaves following the direct evaporation/dew formation
-                const amrex::Real mw_evap_inc = -dt_iter * evapo_wet; // evapo_wet [kg/m2s=mm/s]
+                const amrex::Real mw_evap_inc = -dt_iter * evapo_wet_loc; // evapo_wet_loc [kg/m2s=mm/s]
                 mw_inc_arr(i, j, 0) += mw_evap_inc;
                 mw_arr(i, j, 0) += mw_evap_inc;
                 wet_canop_arr(i, j, 0) = std::min(amrex::Real(one), mw_arr(i, j, 0)/mw_mx_arr(i, j, 0));
@@ -3840,11 +3840,11 @@ void SLM::fluxes_canopy(const amrex::MFIter &mfi)
                 }
 
                 // Convert evaporation (kg/m2/s) to latent heat flux (W/m2)
-                lhf_canop_arr(i, j, 0) = lcond*(evapo_wet+evapo_dry_arr(i, j, 0));
-                evp_canop_arr(i, j, 0) = evapo_wet + evapo_dry_arr(i, j, 0);
+                lhf_canop_arr(i, j, 0) = lcond*(evapo_wet_loc+evapo_dry_arr(i, j, 0));
+                evp_canop_arr(i, j, 0) = evapo_wet_loc + evapo_dry_arr(i, j, 0);
                 lhf0 += lhf_canop_arr(i, j, 0);
                 evp0 += evp_canop_arr(i, j, 0);
-                evapo_wet0 += evapo_wet;
+                evapo_wet0 += evapo_wet_loc;
 
                 // Update vegetation moisture storage
                 if (mw_arr(i, j, 0) > mw_mx_arr(i, j, 0))
@@ -3875,7 +3875,7 @@ void SLM::fluxes_canopy(const amrex::MFIter &mfi)
             evp_canop_arr(i, j, 0) = zero;
             wet_canop_arr(i, j, 0) = zero;
             mw_arr(i, j, 0) = zero;
-            evapo_wet = zero;
+            evapo_wet_loc = zero;
             evapo_dry_arr(i, j, 0) = zero;
             t_canop_arr(i, j, 0) = tr_arr(i, j, 0);
         }
@@ -4214,7 +4214,7 @@ void SLM::soil_water(const amrex::MFIter &mfi)
 
         amrex::Real aa, bb, cc, dd;
             amrex::Real precip_in = zero;
-        amrex::Real precip_sfc = prsfc_arr(i, j, 0);
+        amrex::Real precip_sfc_loc = prsfc_arr(i, j, 0);
 
         if (landtype_arr(i, j, 0) == 15) {
             // ice
@@ -4247,7 +4247,7 @@ void SLM::soil_water(const amrex::MFIter &mfi)
             }
             if (any_less_than_one && soilt_arr(i, j, d_khi_lsm) >= tfriz)
             {
-                precip_in = (1.-IMPERV_arr(i, j, 0))*std::min(precip_sfc + mws_arr(i, j, 0)/dt, ks_arr(i, j, d_khi_lsm));
+                precip_in = (1.-IMPERV_arr(i, j, 0))*std::min(precip_sfc_loc + mws_arr(i, j, 0)/dt, ks_arr(i, j, d_khi_lsm));
             } else {
                 precip_in = zero;
             }
@@ -4427,7 +4427,7 @@ void SLM::soil_water(const amrex::MFIter &mfi)
                 precip_in -= excess_water/dt;
             }
             slm_diag_arr(i, j, 0, SLM_Diag::precip_in) = precip_in;
-            mws_arr(i, j, 0) = std::max(amrex::Real(zero), mws_arr(i, j, 0) + (precip_sfc - precip_in)*dt);
+            mws_arr(i, j, 0) = std::max(amrex::Real(zero), mws_arr(i, j, 0) + (precip_sfc_loc - precip_in)*dt);
 
             amrex::Real drain = zero;
             if(mws_arr(i, j, 0) > mws_mx_arr(i, j, 0))
@@ -4930,10 +4930,10 @@ void SLM::Copy_Lsm_to_State(MultiFab& cons_in)
     cons_in.FillBoundary(m_geom.periodicity());
 }
 
-void SLM::writeSLM_Data(const PlotFileType plotfile_type, const amrex::Real time, const std::string plot_prefix, const int level_step, const int /*lev*/, const int /*finest_lev*/, amrex::MultiFab &fab, amrex::Geometry &geom, amrex::Vector<std::string> &varnames)
+void SLM::writeSLM_Data(const PlotFileType plotfile_type, const amrex::Real cur_time, const std::string plot_prefix, const int level_step, const int /*lev*/, const int /*finest_lev*/, amrex::MultiFab &fab, amrex::Geometry &geom, amrex::Vector<std::string> &varnames)
 {
 #ifndef ERF_USE_NETCDF
-    amrex::ignore_unused(time, plot_prefix, level_step);
+    amrex::ignore_unused(cur_time, plot_prefix, level_step);
 #endif
     geom.define(amrex::makeSlab(m_lsm_geom.Domain(), 2, 0), m_lsm_geom.ProbDomain(), m_lsm_geom.Coord(), m_lsm_geom.isPeriodic());
 
@@ -5074,14 +5074,14 @@ void SLM::writeSLM_Data(const PlotFileType plotfile_type, const amrex::Real time
     AMREX_ALWAYS_ASSERT(static_cast<int>(varnames.size()) == output_size);
 
     if (plotfile_type == PlotFileType::Amrex) {
-        //amrex::WriteSingleLevelPlotfile(plotfilename, fab, varnames, lsm_2d_geom, time, level_step);
+        //amrex::WriteSingleLevelPlotfile(plotfilename, fab, varnames, lsm_2d_geom, cur_time, level_step);
 #ifdef ERF_USE_NETCDF
         // Temporarily write NetCDF always
-        //writeSLM_NetCDF(fab, varnames, time, plot_prefix, level_step);
+        //writeSLM_NetCDF(fab, varnames, cur_time, plot_prefix, level_step);
 #endif
 #ifdef ERF_USE_NETCDF
     } else if (plotfile_type == PlotFileType::Netcdf) {
-        writeSLM_NetCDF(fab, varnames, time, plot_prefix, level_step);
+        writeSLM_NetCDF(fab, varnames, cur_time, plot_prefix, level_step);
 #endif
     } else {
         Abort("Dont know this plot_filetype");
@@ -5321,7 +5321,7 @@ void SLM::twostream_noahmp(int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amr
     amrex::Real tmp0,tmp1,tmp2,tmp3,tmp4,tmp5,tmp6,tmp7,tmp8,tmp9;
     amrex::Real p1,p2,p3,p4,s1,s2,u1,u2,u3;
     amrex::Real b,c,d,d1,d2,f,h,h1,h2,h3,h4,h5,h6,h7,h8,h9,h10;
-    amrex::Real phi1,phi2,sigma;
+    amrex::Real phi1,phi2,sigma_ts;
     amrex::Real ftds,ftis,fres;
     amrex::Real denfveg;
     //jref:start
@@ -5337,8 +5337,10 @@ void SLM::twostream_noahmp(int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amr
     amrex::Real thetap;   //angle conversion from SZA
     amrex::Real fa;       //foliage volume density (m-1)
     amrex::Real newvai;   //effective LSAI (-)
-    amrex::Real kopen;    //gap fraction for diffue light (-)
-    amrex::Real gap;      //total gap fraction for beam ( <=1-shafac )
+    // Set below for opt_rad = 1, 2 or 3 (the only values); initialised so that no
+    // path reads them unset.
+    amrex::Real kopen = one; //gap fraction for diffue light (-)
+    amrex::Real gap   = one; //total gap fraction for beam ( <=1-shafac )
 
     // -----------------------------------------------------------------
     // compute within and between gaps
@@ -5426,8 +5428,8 @@ void SLM::twostream_noahmp(int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amr
     f = tmp0 * omega*(1.0-betad);
     tmp1 = b*b - c*c;
     h = std::sqrt(tmp1) / avmu;
-    sigma = tmp0*tmp0 - tmp1;
-        if ( std::abs(sigma) < 1.0e-6 ) sigma = (sigma >= zero) ? 1.0e-6 : -1.0e-6;
+    sigma_ts = tmp0*tmp0 - tmp1;
+        if ( std::abs(sigma_ts) < 1.0e-6 ) sigma_ts = (sigma_ts >= zero) ? 1.0e-6 : -1.0e-6;
     p1 = b + avmu*h;
     p2 = b - avmu*h;
     p3 = b + tmp0;
@@ -5450,12 +5452,12 @@ void SLM::twostream_noahmp(int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amr
     tmp5 = u2 - avmu*h;
     d2 = tmp4/s1 - tmp5*s1;
     h1 = -d*p4 - c*f;
-    tmp6 = d - h1*p3/sigma;
-    tmp7 = ( d - c - h1/sigma*(u1+tmp0) ) * s2;
+    tmp6 = d - h1*p3/sigma_ts;
+    tmp7 = ( d - c - h1/sigma_ts*(u1+tmp0) ) * s2;
     h2 = ( tmp6*tmp2/s1 - p2*tmp7 ) / d1;
     h3 = - ( tmp6*tmp3*s1 - p1*tmp7 ) / d1;
     h4 = -f*p3 - c*d;
-    tmp8 = h4/sigma;
+    tmp8 = h4/sigma_ts;
     tmp9 = ( u3 - tmp8*(u2-tmp0) ) * s2;
     h5 = - ( tmp8*tmp4/s1 + tmp9 ) / d2;
     h6 = ( tmp8*tmp5*s1 + tmp9 ) / d2;
@@ -5469,7 +5471,7 @@ void SLM::twostream_noahmp(int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amr
 
     if (ic == 0) {
         ftds = s2                           *(1.0-gap) + gap;
-        ftis = (h4*s2/sigma + h5*s1 + h6/s1)*(1.0-gap);
+        ftis = (h4*s2/sigma_ts + h5*s1 + h6/s1)*(1.0-gap);
     } else {
         ftds = zero;
         ftis = (h9*s1 + h10/s1)*(1.0-kopen) + kopen;
@@ -5480,8 +5482,8 @@ void SLM::twostream_noahmp(int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amr
     // flux reflected by the surface (veg. and ground)
 
     if (ic == 0) {
-        fres   = (h1/sigma + h2 + h3)*(1.0-gap  ) + albgrd[ib]*gap;
-        freveg = (h1/sigma + h2 + h3)*(1.0-gap  );
+        fres   = (h1/sigma_ts + h2 + h3)*(1.0-gap  ) + albgrd[ib]*gap;
+        freveg = (h1/sigma_ts + h2 + h3)*(1.0-gap  );
         frebar = albgrd[ib]*gap;                   //jref - separate veg. and ground reflection
     } else {
         fres   = (h7 + h8) *(1.0-kopen) + albgri[ib]*kopen;

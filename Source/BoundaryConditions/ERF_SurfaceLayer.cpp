@@ -1047,27 +1047,28 @@ SurfaceLayer::compute_SurfaceLayer_bcs (const int& lev,
         // Get LSM fluxes
         auto lmask_arr      = (m_lmask_lev[lev][0]) ? m_lmask_lev[lev][0]->array(mfi) :
                                                       Array4<int> {};
-        auto lsm_t_flux_arr  = Array4<Real> {};
+        auto lsm_t_flux_arr  = Array4<const Real> {};
         auto soil_t_flux_arr = Array4<Real> {};
-        auto lsm_q_flux_arr = Array4<Real> {};
-        auto lsm_tau13_arr  = Array4<Real> {};
-        auto lsm_tau23_arr  = Array4<Real> {};
+        auto lsm_q_flux_arr = Array4<const Real> {};
+        auto lsm_tau13_arr  = Array4<const Real> {};
+        auto lsm_tau23_arr  = Array4<const Real> {};
         // LSM tau fields are cell-centered kinematic stresses [m2 s-2].
         // Tau_lev tau13/tau23 are face-centered conservative stresses [N m-2].
         for (int n(0); n<m_lsm_flux_lev[lev].size(); ++n) {
-            if (toLower(m_lsm_flux_name[n]) == "t_flux")      { lsm_t_flux_arr  = m_lsm_flux_lev[lev][n]->array(mfi); }
+            if (toLower(m_lsm_flux_name[n]) == "t_flux")      { lsm_t_flux_arr  = m_lsm_flux_lev[lev][n]->const_array(mfi); }
             if (toLower(m_lsm_flux_name[n]) == "soil_t_flux") { soil_t_flux_arr = m_lsm_flux_lev[lev][n]->array(mfi); }
-            if (toLower(m_lsm_flux_name[n]) == "q_flux")      { lsm_q_flux_arr  = m_lsm_flux_lev[lev][n]->array(mfi); }
-            if (toLower(m_lsm_flux_name[n]) == "tau13")       { lsm_tau13_arr   = m_lsm_flux_lev[lev][n]->array(mfi); }
-            if (toLower(m_lsm_flux_name[n]) == "tau23")       { lsm_tau23_arr   = m_lsm_flux_lev[lev][n]->array(mfi); }
+            if (toLower(m_lsm_flux_name[n]) == "q_flux")      { lsm_q_flux_arr  = m_lsm_flux_lev[lev][n]->const_array(mfi); }
+            if (toLower(m_lsm_flux_name[n]) == "tau13")       { lsm_tau13_arr   = m_lsm_flux_lev[lev][n]->const_array(mfi); }
+            if (toLower(m_lsm_flux_name[n]) == "tau23")       { lsm_tau23_arr   = m_lsm_flux_lev[lev][n]->const_array(mfi); }
         }
 
-        // Get weight averaged LSM+Urban fluxes
-        // If the LSM+Urban export u*,t*,q*, then these values are already copied and MOST is used to compute the flux
-        const auto surf_tflux_arr = (use_surface_model && surf_model_fluxes) ? m_surf_model->get_tstar(lev)->array(mfi) : Array4<Real> {};
-        const auto surf_qflux_arr = (use_surface_model && surf_model_fluxes) ? m_surf_model->get_qstar(lev)->array(mfi) : Array4<Real> {};
-        const auto surf_uflux_arr = (use_surface_model && surf_model_fluxes) ? m_surf_model->get_ustar(lev)->array(mfi,0) : Array4<Real> {};
-        const auto surf_vflux_arr = (use_surface_model && surf_model_fluxes) ? m_surf_model->get_ustar(lev)->array(mfi,1) : Array4<Real> {};
+        // Get provider or weight-averaged LSM+Urban fluxes through SurfaceModel.
+        const SurfaceFluxView surf_flux = (use_surface_model && surf_model_fluxes)
+            ? m_surf_model->get_surface_flux_view(lev, mfi) : SurfaceFluxView{};
+        const auto surf_tflux_arr = surf_flux.t_flux;
+        const auto surf_qflux_arr = surf_flux.q_flux;
+        const auto surf_uflux_arr = surf_flux.tau13;
+        const auto surf_vflux_arr = surf_flux.tau23;
         const bool use_surface_model_fluxes = use_surface_model && surf_model_fluxes;
         const auto t_flux_arr = use_surface_model_fluxes ? surf_tflux_arr : lsm_t_flux_arr;
         const auto q_flux_arr = use_surface_model_fluxes ? surf_qflux_arr : lsm_q_flux_arr;
@@ -1690,23 +1691,24 @@ SurfaceLayer::compute_sfc_params_from_lsm_fluxes (const int& lev,
         // Get LSM fluxes
         auto lmask_arr      = (m_lmask_lev[lev][0]) ? m_lmask_lev[lev][0]->array(mfi) :
                                                       Array4<int> {};
-        auto lsm_t_flux_arr = Array4<Real> {};
-        auto lsm_q_flux_arr = Array4<Real> {};
-        auto lsm_tau13_arr  = Array4<Real> {};
-        auto lsm_tau23_arr  = Array4<Real> {};
+        auto lsm_t_flux_arr = Array4<const Real> {};
+        auto lsm_q_flux_arr = Array4<const Real> {};
+        auto lsm_tau13_arr  = Array4<const Real> {};
+        auto lsm_tau23_arr  = Array4<const Real> {};
         // compute_sfc_params_from_lsm_fluxes consumes signed kinematic stress
         // components; their vector magnitude determines u_star^2.
         if (use_surface_model_fluxes) {
-            lsm_t_flux_arr = m_surf_model->get_tstar(lev)->array(mfi);
-            lsm_q_flux_arr = m_surf_model->get_qstar(lev)->array(mfi);
-            lsm_tau13_arr  = m_surf_model->get_ustar(lev)->array(mfi, 0);
-            lsm_tau23_arr  = m_surf_model->get_ustar(lev)->array(mfi, 1);
+            const SurfaceFluxView surf_flux = m_surf_model->get_surface_flux_view(lev, mfi);
+            lsm_t_flux_arr = surf_flux.t_flux;
+            lsm_q_flux_arr = surf_flux.q_flux;
+            lsm_tau13_arr  = surf_flux.tau13;
+            lsm_tau23_arr  = surf_flux.tau23;
         } else {
             for (int n(0); n<m_lsm_flux_lev[lev].size(); ++n) {
-                if (toLower(m_lsm_flux_name[n]) == "t_flux") { lsm_t_flux_arr = m_lsm_flux_lev[lev][n]->array(mfi); }
-                if (toLower(m_lsm_flux_name[n]) == "q_flux") { lsm_q_flux_arr = m_lsm_flux_lev[lev][n]->array(mfi); }
-                if (toLower(m_lsm_flux_name[n]) == "tau13")  { lsm_tau13_arr  = m_lsm_flux_lev[lev][n]->array(mfi); }
-                if (toLower(m_lsm_flux_name[n]) == "tau23")  { lsm_tau23_arr  = m_lsm_flux_lev[lev][n]->array(mfi); }
+                if (toLower(m_lsm_flux_name[n]) == "t_flux") { lsm_t_flux_arr = m_lsm_flux_lev[lev][n]->const_array(mfi); }
+                if (toLower(m_lsm_flux_name[n]) == "q_flux") { lsm_q_flux_arr = m_lsm_flux_lev[lev][n]->const_array(mfi); }
+                if (toLower(m_lsm_flux_name[n]) == "tau13")  { lsm_tau13_arr  = m_lsm_flux_lev[lev][n]->const_array(mfi); }
+                if (toLower(m_lsm_flux_name[n]) == "tau23")  { lsm_tau23_arr  = m_lsm_flux_lev[lev][n]->const_array(mfi); }
             }
         }
 
@@ -1955,7 +1957,6 @@ SurfaceLayer::fill_qsurf_with_qsat (const int& lev,
                                     const MultiFab& cons_in,
                                     const std::unique_ptr<MultiFab>& z_phys_nd)
 {
-    // NOTE: We have already tested a moisture model exists
     const int dir = m_face.coordDir();
     int sm_index;
     if (m_face.isLow()) {
@@ -1972,6 +1973,7 @@ SurfaceLayer::fill_qsurf_with_qsat (const int& lev,
                                 amrex::min(t_surf[lev]->nGrowVect()[2],
                                            q_surf[lev]->nGrowVect()[2]));
     const bool moist = use_moisture;
+    const bool have_rho_qv = cons_in.nComp() > RhoQ1_comp;
     const Real rdOcp = m_rdOcp;
     amrex::Gpu::DeviceScalar<int> d_conversion_failed(0);
     int* conversion_failed = d_conversion_failed.dataPtr();
@@ -2048,20 +2050,35 @@ SurfaceLayer::fill_qsurf_with_qsat (const int& lev,
                                            k >= src_k_lo && k <= src_k_hi;
                 const Real rho = cons_arr(i,j,k,Rho_comp);
                 const Real rho_theta = cons_arr(i,j,k,RhoTheta_comp);
-                const Real rho_qv = cons_arr(i,j,k,RhoQ1_comp);
                 if (!amrex::Math::isfinite(rho) || rho <= Real(0.0) ||
-                    !amrex::Math::isfinite(rho_theta) || !amrex::Math::isfinite(rho_qv)) {
+                    !amrex::Math::isfinite(rho_theta)) {
                     if (authoritative) {
                         amrex::Gpu::Atomic::Max(conversion_failed, 1);
                     }
                     return;
                 }
-                const Real qv = moist ? rho_qv / rho : Real(0.0);
-                if (!amrex::Math::isfinite(qv)) {
-                    if (authoritative) {
-                        amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                Real qv = Real(0.0);
+                if (moist) {
+                    if (!have_rho_qv) {
+                        if (authoritative) {
+                            amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                        }
+                        return;
                     }
-                    return;
+                    const Real rho_qv = cons_arr(i,j,k,RhoQ1_comp);
+                    if (!amrex::Math::isfinite(rho_qv)) {
+                        if (authoritative) {
+                            amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                        }
+                        return;
+                    }
+                    qv = rho_qv / rho;
+                    if (!amrex::Math::isfinite(qv)) {
+                        if (authoritative) {
+                            amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                        }
+                        return;
+                    }
                 }
                 Real delta_z = Real(0.0);
                 if (z_face) {

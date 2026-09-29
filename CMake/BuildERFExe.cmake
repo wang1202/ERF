@@ -332,6 +332,13 @@ function(build_erf_lib erf_lib_name)
     target_sources(${erf_lib_name} PRIVATE ${ERF_SHARED_FORT_SOURCES})
   endif()
 
+  # Any Fortran in the build: the exit trap in main.cpp flushes the Fortran units
+  # before it ends the process (ERF_FlushFortranUnits.F90).
+  if(ERF_ENABLE_MORR_FORT OR ERF_ENABLE_WSM6_FORT OR ERF_ENABLE_WDM6_FORT OR ERF_ENABLE_NOAHMP)
+    target_sources(${erf_lib_name} PRIVATE ${SRC_DIR}/Utils/ERF_FlushFortranUnits.F90)
+    target_compile_definitions(${erf_lib_name} PUBLIC ERF_HAS_FORTRAN)
+  endif()
+
   if(ERF_ENABLE_MORR_FORT)
   target_sources(${erf_lib_name}
      PRIVATE
@@ -524,6 +531,9 @@ function(build_erf_lib erf_lib_name)
        ${SRC_DIR}/Microphysics/SatAdj/ERF_SatAdj.cpp
        ${SRC_DIR}/Microphysics/SatAdj/ERF_UpdateSatAdj.cpp
        ${SRC_DIR}/AuxiliaryState/ERF_AuxiliaryProjection.cpp
+       ${SRC_DIR}/AuxiliaryState/ERF_AuxiliaryMappedTransport.cpp
+       ${SRC_DIR}/AuxiliaryState/ERF_AuxiliaryStage.cpp
+       ${SRC_DIR}/AuxiliaryState/ERF_AuxiliaryInertTracer.cpp
        ${SRC_DIR}/Microphysics/SBM/ERF_SpectralGrid.cpp
        ${SRC_DIR}/Microphysics/SBM/ERF_SBMLayout.cpp
        ${SRC_DIR}/Microphysics/SBM/ERF_SBMConstraintGroups.cpp

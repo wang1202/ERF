@@ -27,6 +27,16 @@ using namespace amrex;
 void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
                                    const DistributionMapping& dm_in)
 {
+    if (auxiliary_inert_tracer) {
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(restart_chkfile.empty(),
+            "M2 auxiliary inert tracer fixture does not support checkpoint/restart");
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(lev == 0,
+            "M2 auxiliary inert tracer fixture supports level 0 only");
+        for (int dir = 0; dir < AMREX_SPACEDIM; ++dir) {
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(geom[lev].isPeriodic(dir),
+                "M2 auxiliary inert tracer fixture requires triply periodic geometry");
+        }
+    }
     if (sbm_state_manager) {
         for (int dir = 0; dir < AMREX_SPACEDIM; ++dir) {
             AMREX_ALWAYS_ASSERT_WITH_MESSAGE(geom[lev].isPeriodic(dir),
@@ -121,6 +131,14 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
     //      terrain arrays, metric terms and base state.
     // *******************************************************************************************
     init_stuff(lev, ba, dm, lev_new, lev_old, base_state[lev], z_phys_nd[lev]);
+    if (auxiliary_inert_tracer) {
+        AMREX_ALWAYS_ASSERT(detJ_cc[lev] != nullptr);
+        AMREX_ALWAYS_ASSERT(mapfac[lev][MapFacType::m_x] != nullptr);
+        AMREX_ALWAYS_ASSERT(mapfac[lev][MapFacType::m_y] != nullptr);
+        auxiliary_inert_tracer->define(lev, ba, dm, *detJ_cc[lev],
+                                       *mapfac[lev][MapFacType::m_x],
+                                       *mapfac[lev][MapFacType::m_y]);
+    }
     if (sbm_state_manager) {
         sbm_state_manager->define(lev, ba, dm);
         for (int comp = 0; comp < static_cast<int>(solverChoice.sbm_fixture_initial_state.size()); ++comp) {
@@ -128,6 +146,11 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
                 solverChoice.sbm_fixture_initial_state[static_cast<std::size_t>(comp)], comp, 1, 0);
         }
     }
+
+    // define_level (inside init_stuff) filled the two-stream SEB state with the scalar
+    // defaults; a level that evolves it needs its parent's values instead, or it
+    // radiates at erf.rad_t_sfc for its first step.
+    fill_seb_from_coarse(lev);
 
     //********************************************************************************************
     // Land Surface Model
@@ -282,6 +305,12 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
         }
     }
 
+    // Initialize the non-cons auxiliary tracer only after the host atmospheric
+    // density has been initialized from the selected problem configuration.
+    if (auxiliary_inert_tracer) {
+        auxiliary_inert_tracer->initialize(lev, lev_new[Vars::cons], geom[lev]);
+    }
+
      // Read in tables needed for windfarm simulations
     // fill in Nturb multifab - number of turbines in each mesh cell
     // write out the vtk files for wind turbine location and/or
@@ -363,6 +392,8 @@ void
 ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
                              const DistributionMapping& dm)
 {
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!auxiliary_inert_tracer,
+        "M2 auxiliary inert tracer fixture does not support coarse-to-fine initialization");
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!sbm_state_manager,
         "SBM M1 zero-transport fixture does not support coarse-to-fine auxiliary initialization");
     //
@@ -407,6 +438,11 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
     //      terrain arrays, ba2d, metric terms and base state.
     // *******************************************************************************************
     init_stuff(lev, ba, dm, vars_new[lev], vars_old[lev], base_state[lev], z_phys_nd[lev]);
+
+    // define_level (inside init_stuff) filled the two-stream SEB state with the scalar
+    // defaults; a level that evolves it needs its parent's values instead, or it
+    // radiates at erf.rad_t_sfc for its first step.
+    fill_seb_from_coarse(lev);
 
     //
     // Note that t_new = time here is elapsed time
@@ -763,6 +799,8 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
 void
 ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapping& dm)
 {
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!auxiliary_inert_tracer,
+        "M2 auxiliary inert tracer fixture does not support regrid/remake");
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!sbm_state_manager,
         "SBM M1 zero-transport fixture does not support regridding or auxiliary remap");
     //
@@ -844,6 +882,30 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
     std::unique_ptr<iMultiFab> old_soil_type = retain(soil_type_lev,lev);
     std::unique_ptr<MultiFab>  old_precip    = std::move(precip[lev]);
 
+    //
+    // The two-stream prognostic surface energy balance is in the same position again, and
+    // it is genuinely prognostic: define_level (inside init_stuff) reallocates t_sfc/q_sfc
+    // on the new grids and setVal()s them back to the scalar erf.rad_t_sfc, and nothing
+    // downstream recomputes them, so a regrid that changes the fine grids would throw away
+    // however far the surface had evolved.  Copy the pre-regrid fields out here.  (This
+    // path only became reachable when the single-level restriction on the prognostic SEB
+    // was lifted -- before that a level carrying this state could never be regridded.)
+    //
+    std::unique_ptr<MultiFab> old_seb_t_sfc, old_seb_q_sfc;
+    if (solverChoice.rad_type == RadiationType::TwoStream &&
+        two_stream_rad.seb_prognostic_active())
+    {
+        auto keep = [] (MultiFab* src) -> std::unique_ptr<MultiFab> {
+            if (!src) { return nullptr; }
+            auto dst = std::make_unique<MultiFab>(src->boxArray(), src->DistributionMap(),
+                                                  1, src->nGrowVect());
+            MultiFab::Copy(*dst, *src, 0, 0, 1, src->nGrowVect());
+            return dst;
+        };
+        old_seb_t_sfc = keep(two_stream_rad.seb_t_sfc(lev));
+        old_seb_q_sfc = keep(two_stream_rad.seb_q_sfc(lev));
+    }
+
     //********************************************************************************************
     // This allocates all kinds of things, including but not limited to: solution arrays,
     //      terrain arrays and metrics, and base state.
@@ -893,6 +955,41 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
             IntVect ngv = new_land[i]->nGrowVect(); ngv[2] = 0;
             new_land[i]->ParallelCopy(*old_land[i], 0, 0, 1, ngv, ngv, geom[lev].periodicity());
             new_land[i]->FillBoundary(geom[lev].periodicity());
+        }
+    }
+
+    //
+    // Restore the prognostic surface state the same way the arrays above are restored:
+    // interpolate from the parent first, so cells the new grids added -- which the
+    // pre-regrid fields never covered -- start from the coarse surface rather than from
+    // the scalar default, then copy the retained values on top wherever we still have them.
+    //
+    if (solverChoice.rad_type == RadiationType::TwoStream &&
+        two_stream_rad.seb_prognostic_active())
+    {
+        if (lev > 0) { fill_seb_from_coarse(lev); }
+
+        MultiFab* new_seb[] = {two_stream_rad.seb_t_sfc(lev), two_stream_rad.seb_q_sfc(lev)};
+        MultiFab* old_seb[] = {old_seb_t_sfc.get(), old_seb_q_sfc.get()};
+        for (int i = 0; i < 2; i++) {
+            if (!new_seb[i] || !old_seb[i]) { continue; }
+            IntVect ngv = new_seb[i]->nGrowVect(); ngv[2] = 0;
+            //
+            // Valid cells only as the SOURCE. Nothing refreshes these fields' halos away
+            // from level creation -- the prognostic update writes mfi.validbox() -- so the
+            // retained halo still holds the define_level setVal(erf.rad_t_sfc) while the
+            // valid cells have evolved. Offering those cells as a copy source would let a
+            // one-cell band of the regridded surface revert to the scalar wherever an old
+            // box's halo overlaps a new box's valid region, and ParallelCopy gives no
+            // ordering guarantee between overlapping sources. The destination halo is
+            // filled by fill_seb_from_coarse above and the FillBoundary below.
+            //
+            // (This is where the mapfac/PSFC idiom does not carry over: those halos are
+            // consistent with their valid data, and these are not.)
+            //
+            new_seb[i]->ParallelCopy(*old_seb[i], 0, 0, 1, IntVect(0), ngv,
+                                     geom[lev].periodicity());
+            new_seb[i]->FillBoundary(geom[lev].periodicity());
         }
     }
 
@@ -1336,6 +1433,9 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
 void
 ERF::ClearLevel (int lev)
 {
+    if (auxiliary_inert_tracer && auxiliary_inert_tracer->is_defined(lev)) {
+        auxiliary_inert_tracer->destroy(lev);
+    }
     if (sbm_state_manager && sbm_state_manager->is_defined(lev)) {
         sbm_state_manager->destroy(lev);
     }
@@ -1479,7 +1579,8 @@ ERF::make_lsm_at_level (int lev, bool from_regrid,
         for (int l = 0; l < lev; ++l) { RefRatio *= refRatio(l); }
         lsm.Init(lev, vars_new[lev][Vars::cons], vars_new[lev][Vars::xvel],
                  vars_new[lev][Vars::yvel], Geom(lev), Geom(0),
-                 domain_bcs_type, RefRatio, zero, z_phys_nd[lev], nc_init_file); // dummy dt value
+                 domain_bcs_type, RefRatio, zero, z_phys_nd[lev],
+                 nc_init_file); // dummy dt value
     }
 
     // Access LSM data pointers only after initialization.
