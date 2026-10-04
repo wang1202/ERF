@@ -3362,6 +3362,7 @@ ERF::ReadParameters ()
     ParmParse pp(pp_prefix);
     ParmParse pp_amr("amr");
     {
+        pp_amr.queryAdd("no_box_split_dir", no_box_split_dir);
         pp.queryAdd("regrid_level_0_on_restart", regrid_level_0_on_restart);
         pp.queryAdd("regrid_int", regrid_int);
         pp.queryAdd("check_file", check_file);

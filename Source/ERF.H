@@ -1607,6 +1607,10 @@ private:
     //    max_grid_size has changed?
     bool regrid_level_0_on_restart = false;
 
+    // Direction that AMReX must not split boxes in; -1 allows splitting in all
+    // directions.  ERF defaults to keeping vertical columns intact.
+    int no_box_split_dir = 2;
+
     // plotfile prefix and frequency
     std::string plot3d_file_1 {"plt_1_"};
     std::string plot3d_file_2 {"plt_2_"};
