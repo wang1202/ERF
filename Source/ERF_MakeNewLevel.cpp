@@ -15,6 +15,7 @@
 #include "ERF.H"
 #include "ERF_Utils.H"
 #include "ERF_ProbCommon.H"
+#include "ERF_SBMStateManager.H"
 
 using namespace amrex;
 
@@ -26,9 +27,38 @@ using namespace amrex;
 void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
                                    const DistributionMapping& dm_in)
 {
+    if (auxiliary_inert_tracer) {
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(restart_chkfile.empty(),
+            "M2 auxiliary inert tracer fixture does not support checkpoint/restart");
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(lev == 0,
+            "M2 auxiliary inert tracer fixture supports level 0 only");
+        for (int dir = 0; dir < AMREX_SPACEDIM; ++dir) {
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(geom[lev].isPeriodic(dir),
+                "M2 auxiliary inert tracer fixture requires triply periodic geometry");
+        }
+    }
+    if (sbm_state_manager) {
+        for (int dir = 0; dir < AMREX_SPACEDIM; ++dir) {
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(geom[lev].isPeriodic(dir),
+                "SBM zero-transport fixture requires triply periodic geometry; "
+                "spectral physical boundary filling is not implemented at M1");
+        }
+    }
     //
     // Note that "time" here is elapsed time
     //
+
+    // A level built here gets its atmospheric state from its own initialization -- an input
+    // file, a problem setup or a restart -- rather than from FillCoarsePatch, so radiation
+    // has a consistent state to work with and nothing is pending for it.  Clearing this
+    // explicitly matters because the entry may be left over from an earlier life of this
+    // level: erf.interp_atmos_from_coarse is ignored on this path (see the warning below),
+    // so a stale flag would skip a step of radiation for no reason.
+    if (static_cast<int>(rad_interp_from_coarse_pending.size()) <= lev) {
+        rad_interp_from_coarse_pending.resize(lev+1, 0);
+    }
+    rad_interp_from_coarse_pending[lev] = 0;
+
     BoxArray ba;
     DistributionMapping dm;
     Box domain(Geom(0).Domain());
@@ -37,8 +67,11 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
         (max_grid_size[0][1] >= domain.length(1)) &&
         ba_in.size() != ParallelDescriptor::NProcs())
     {
-        // We only decompose in z if max_grid_size_z indicates we should
-        bool decompose_in_z = (max_grid_size[0][2] < domain.length(2));
+        // We only decompose in z if max_grid_size_z indicates we should,
+        //    and if we are allowed to split boxes in z at all
+        // (amr.no_box_split_dir = 2, the ERF default, forbids that)
+        bool decompose_in_z = (max_grid_size[0][2] < domain.length(2)) &&
+                              (no_box_split_dir != 2);
 
         ba = ERFPostProcessBaseGrids(Geom(0).Domain(),decompose_in_z);
         dm = DistributionMapping(ba);
@@ -98,11 +131,49 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
     //      terrain arrays, metric terms and base state.
     // *******************************************************************************************
     init_stuff(lev, ba, dm, lev_new, lev_old, base_state[lev], z_phys_nd[lev]);
+    if (auxiliary_inert_tracer) {
+        auxiliary_inert_tracer->define(lev, ba, dm);
+    }
+    if (sbm_state_manager) {
+        sbm_state_manager->define(lev, ba, dm);
+        for (int comp = 0; comp < static_cast<int>(solverChoice.sbm_fixture_initial_state.size()); ++comp) {
+            sbm_state_manager->state(lev).setVal(
+                solverChoice.sbm_fixture_initial_state[static_cast<std::size_t>(comp)], comp, 1, 0);
+        }
+    }
+
+    // define_level (inside init_stuff) filled the two-stream SEB state with the scalar
+    // defaults; a level that evolves it needs its parent's values instead, or it
+    // radiates at erf.rad_t_sfc for its first step.
+    fill_seb_from_coarse(lev);
 
     //********************************************************************************************
     // Land Surface Model
     // *******************************************************************************************
-    make_lsm_at_level(lev);
+    // In MakeNewLevelFromScratch, atmospheric data is available before the LSM is built, so
+    // prevent the surface-only initialization path from being selected.
+    make_lsm_at_level(lev, true, -1, solverChoice.init_type == InitType::WRFInput);
+
+    // *******************************************************************************************
+    // Urban Model
+    // *******************************************************************************************
+    const int urban_size = urban.Get_Data_Size();
+    urban_data[lev].resize(urban_size);
+    urban_flux[lev].resize(urban_size);
+    if (solverChoice.urban_enabled_lev[lev] == 1) {
+        urban_data_name.resize(urban_size);
+        urban.Define(lev, solverChoice);
+        if (solverChoice.urban_type != UrbanType::None) {
+            urban.Init(lev, vars_new[lev][Vars::cons], vars_new[lev][Vars::xvel],
+                       vars_new[lev][Vars::yvel], Geom(lev), zero, *z_phys_nd[lev],
+                       *land_type_lev[lev][0], *urb_frac_lev[lev][0]);
+        }
+        for (int mvar = 0; mvar < urban_size; ++mvar) {
+            urban_data[lev][mvar] = urban.Get_Data_Ptr(lev, mvar);
+            urban_data_name[mvar] = urban.Get_DataName(mvar);
+            urban_flux[lev][mvar] = urban.Get_Flux_Ptr(lev, mvar);
+        }
+    }
 
     // ********************************************************************************************
     // Build the data structures for calculating diffusive/turbulent terms
@@ -157,6 +228,19 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
                 // A level that does have a file reads its terrain and its data in the same
                 // pass, so init_only must come first here.
                 //
+                // Check if user requested interp_atmos_from_coarse but we're in MakeNewLevelFromScratch.
+                // In this case, both levels are starting at the same time, so the atmospheric states
+                // in the files should already be consistent. We ignore the flag and read from the file.
+                if (solverChoice.interp_atmos_from_coarse && lev > 0 &&
+                    solverChoice.init_type == InitType::WRFInput) {
+                    if (ParallelDescriptor::IOProcessor()) {
+                        amrex::Warning("erf.interp_atmos_from_coarse = true is set, but both levels are starting "
+                                       "from scratch at the same time. The atmospheric state at level " + std::to_string(lev) +
+                                       " will be read from the wrfinput file instead of interpolated from coarse. "
+                                       "This option is intended for time-mismatched WRF input files or regridding, "
+                                       "not for initial startup with consistent files.");
+                    }
+                }
                 init_only(lev, time);
                 init_zphys(lev, time);
                 update_terrain_arrays(lev);
@@ -214,6 +298,21 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
             MultiFab::Subtract(*terrain_blanking[lev], EBFactory(lev).getVolFrac(), 0, 0, 1, ngrow);
             terrain_blanking[lev]->FillBoundary(geom[lev].periodicity());
         }
+    }
+
+    // Initialize the non-cons auxiliary tracer only after the host atmospheric
+    // density has been initialized from the selected problem configuration.
+    if (auxiliary_inert_tracer) {
+        AMREX_ALWAYS_ASSERT(detJ_cc[lev] != nullptr);
+        AMREX_ALWAYS_ASSERT(mapfac[lev][MapFacType::m_x] != nullptr);
+        AMREX_ALWAYS_ASSERT(mapfac[lev][MapFacType::m_y] != nullptr);
+        std::string measure_diagnostic;
+        if (!auxiliary_inert_tracer->rebuild_static_measure(
+                lev, *detJ_cc[lev], *mapfac[lev][MapFacType::m_x],
+                *mapfac[lev][MapFacType::m_y], measure_diagnostic)) {
+            amrex::Abort("M2 auxiliary inert tracer static measure: " + measure_diagnostic);
+        }
+        auxiliary_inert_tracer->initialize(lev, lev_new[Vars::cons], geom[lev]);
     }
 
      // Read in tables needed for windfarm simulations
@@ -281,6 +380,12 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
         // regrid() completes, not here inside MakeNewLevelFromCoarse.
     }
 #endif
+
+    if (sbm_state_manager) {
+        sbm_state_manager->project_to_core(lev, vars_new[lev][Vars::cons],
+                                           solverChoice.moisture_indices.qc,
+                                           solverChoice.moisture_indices.qr);
+    }
 }
 
 // Make a new level using provided BoxArray and DistributionMapping and
@@ -291,10 +396,18 @@ void
 ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
                              const DistributionMapping& dm)
 {
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!auxiliary_inert_tracer,
+        "M2 auxiliary inert tracer fixture does not support coarse-to-fine initialization");
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!sbm_state_manager,
+        "SBM M1 zero-transport fixture does not support coarse-to-fine auxiliary initialization");
     //
     // Note that "time" here is elapsed time
     //
     AMREX_ALWAYS_ASSERT(lev > 0);
+    bool lsm_initialized = false;
+#ifdef ERF_USE_NETCDF
+    [[maybe_unused]] bool use_surface_only = false;
+#endif
 
     if (verbose) {
         amrex::Print() <<" NEW BA FROM COARSE AT LEVEL " << lev << " " << ba << std::endl;
@@ -329,6 +442,11 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
     //      terrain arrays, ba2d, metric terms and base state.
     // *******************************************************************************************
     init_stuff(lev, ba, dm, vars_new[lev], vars_old[lev], base_state[lev], z_phys_nd[lev]);
+
+    // define_level (inside init_stuff) filled the two-stream SEB state with the scalar
+    // defaults; a level that evolves it needs its parent's values instead, or it
+    // radiates at erf.rad_t_sfc for its first step.
+    fill_seb_from_coarse(lev);
 
     //
     // Note that t_new = time here is elapsed time
@@ -467,16 +585,85 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
         vars_new[lev][Vars::zvel].setVal(0.0); vars_old[lev][Vars::zvel].setVal(0.0);
 
         AMREX_ALWAYS_ASSERT(solverChoice.terrain_type == TerrainType::StaticFittedMesh);
+
+        //
+        // CHOOSE INITIALIZATION PATH:
+        // If interp_atmos_from_coarse is enabled for a finer level with WRFInput,
+        // read only surface fields from wrfinput and interpolate atmospheric state from coarse.
+        // Metgrid files only contain surface data anyway, so use_surface_only doesn't apply.
+        //
+        use_surface_only = solverChoice.interp_atmos_from_coarse && (lev > 0) &&
+                           (solverChoice.init_type == InitType::WRFInput);
+
+        // Tell advance_radiation whether this level's atmospheric state is about to come from
+        // FillCoarsePatch, in which case it must interpolate the radiation fields from the
+        // parent for one step rather than run RRTMGP on a state that is not yet consistent.
+        if (static_cast<int>(rad_interp_from_coarse_pending.size()) <= lev) {
+            rad_interp_from_coarse_pending.resize(lev+1, 0);
+        }
+        rad_interp_from_coarse_pending[lev] = use_surface_only ? 1 : 0;
+
+        // SLM must allocate its exposed fields before ERF reads the WRF
+        // surface fields into them. NoahMP initialization remains deferred
+        // until the atmospheric state has been filled from coarse.
+        if (use_surface_only && solverChoice.lsm_type == LandSurfaceType::SLM) {
+            make_lsm_at_level(lev, false, lev-1, false, true);
+            lsm_initialized = true;
+        }
+
         if (solverChoice.init_type == InitType::Metgrid) {
             init_from_metgrid(lev);
         } else if (solverChoice.init_type == InitType::WRFInput) {
-            init_from_wrfinput(lev, *mf_PSFC[lev]);
+            if (use_surface_only) {
+                amrex::Print() << "Using interp_atmos_from_coarse mode at level " << lev << ":\n";
+                amrex::Print() << "  - Reading surface fields from wrfinput\n";
+                amrex::Print() << "  - Atmospheric state will be interpolated from level " << lev-1 << "\n";
+                init_from_wrfinput(lev, *mf_PSFC[lev], /*read_atmos_state*/ false);
+            } else {
+                init_from_wrfinput(lev, *mf_PSFC[lev]);
+            }
         }
         init_zphys(lev, time);
         update_terrain_arrays(lev);
+
+        // The telescoping detJ average-down above (after the first
+        // init_zphys/update_terrain_arrays call) ran before this level's terrain was
+        // read from its file, when detJ_cc[lev] still held the init_stuff placeholder
+        // of one -- so it stamped 1.0 into the coarse detJ under this level's
+        // footprint. Repeat it now that the real fine detJ exists: AverageDownTo
+        // weights (rho S) by detJ_cc before averaging and divides by the coarse detJ
+        // afterwards, so a coarse detJ that is not the average of the fine one
+        // (let alone a placeholder ~9x too large) scales every covered coarse cell
+        // wrongly on the first two-level step.
+        if ( (SolverChoice::mesh_type != MeshType::ConstantDz) &&
+             (solverChoice.coupling_type == CouplingType::TwoWay) ) {
+            for (int crse_lev = lev-1; crse_lev >= 0; crse_lev--) {
+                average_down(*detJ_cc[crse_lev+1], *detJ_cc[crse_lev], 0, 1, refRatio(crse_lev));
+            }
+        }
+
         make_physbcs(lev);
 
         dz_min[lev] = (*detJ_cc[lev]).min(0) * geom[lev].CellSize(2);
+
+        //
+        // If we used surface-only init, we need to rebuild the base state and
+        // interpolate the atmospheric state from coarse (just like a level with no init file)
+        //
+        if (use_surface_only) {
+            // Rebuild base state from wrfinput on top of the fine terrain (must happen before
+            // FillCoarsePatch, which interpolates perturbational quantities relative to base state)
+            rebuild_base_state_from_wrfinput(lev, base_state[lev]);
+            (*physbcs_base[lev])(base_state[lev],0,base_state[lev].nComp(),base_state[lev].nGrowVect());
+
+            // Interpolate atmospheric state from coarse level.
+            // NOTE: This creates thermodynamically inconsistent data because ρ, θ, qv are
+            // interpolated independently. We rely on:
+            // 1. Skipping radiation on the first timestep (see ERF_AdvanceRadiation.cpp)
+            // 2. Letting dynamics equilibrate the state on the first timestep
+            FillCoarsePatch(lev, time);
+
+        }
 
     } else {
 #endif
@@ -543,9 +730,60 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
     }
 
     //********************************************************************************************
-    // Land Surface Model
+    // Land Surface Model - setup data structures
     // *******************************************************************************************
-    make_lsm_at_level(lev);
+    if (!lsm_initialized) {
+        bool initialize_now = false;
+#ifdef ERF_USE_NETCDF
+        // NoahMP needs the atmospheric state supplied by FillCoarsePatch above,
+        // but must not be deferred a second time after that state is available.
+        initialize_now = use_surface_only &&
+                         solverChoice.lsm_type == LandSurfaceType::NOAHMP;
+#endif
+        make_lsm_at_level(lev, false, lev-1, false, initialize_now);
+    }
+
+    // *******************************************************************************************
+    // Urban Model
+    // *******************************************************************************************
+    const int urban_size = urban.Get_Data_Size();
+    urban_data[lev].resize(urban_size);
+    urban_flux[lev].resize(urban_size);
+    if (solverChoice.urban_enabled_lev[lev] == 1) {
+        urban_data_name.resize(urban_size);
+        urban.Define(lev, solverChoice);
+        if (solverChoice.urban_type != UrbanType::None) {
+            urban.Init(lev, vars_new[lev][Vars::cons], vars_new[lev][Vars::xvel],
+                       vars_new[lev][Vars::yvel], Geom(lev), zero, *z_phys_nd[lev],
+                       *land_type_lev[lev][0], *urb_frac_lev[lev][0]);
+        }
+        for (int mvar = 0; mvar < urban_size; ++mvar) {
+            urban_data[lev][mvar] = urban.Get_Data_Ptr(lev, mvar);
+            urban_data_name[mvar] = urban.Get_DataName(mvar);
+            urban_flux[lev][mvar] = urban.Get_Flux_Ptr(lev, mvar);
+        }
+    }
+
+    // Update Surface Model arrays for this new level
+    if (solverChoice.lsm_type != LandSurfaceType::None ||
+        (solverChoice.urban_type != UrbanType::None && solverChoice.urban_enabled_lev[lev] == 1)) {
+        m_SurfaceModel->initialize_for_level(lev, grids[lev], geom[lev], dmap[lev], lmask_lev[lev], domain_bcs_type, refRatio());
+
+        if (solverChoice.lsm_type != LandSurfaceType::None) {
+            m_SurfaceModel->set_model_data(lev, lsm_data[lev], lsm_data_name, SurfaceModelType::LAND);
+            m_SurfaceModel->set_model_fluxes(lev, lsm_flux[lev], lsm_flux_name, SurfaceModelType::LAND);
+            if (solverChoice.lsm_type == LandSurfaceType::SLM) {
+                m_SurfaceModel->set_field_map_pointers("olen", lev,
+                                                       lsm_flux[lev][lsm.Get_FluxIdx(lev, "olen")], nullptr);
+            }
+        }
+
+        if (solverChoice.urban_type != UrbanType::None && solverChoice.urban_enabled_lev[lev] == 1) {
+            m_SurfaceModel->set_model_data(lev, urban_data[lev], urban_data_name, SurfaceModelType::URBAN);
+        }
+
+        m_SurfaceModel->calculate_weight_average(lev, urb_frac_lev[lev][0].get());
+    }
 
     // ********************************************************************************************
     // Create the SurfaceLayer arrays at this (new) level
@@ -582,6 +820,10 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
 void
 ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapping& dm)
 {
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!auxiliary_inert_tracer,
+        "M2 auxiliary inert tracer fixture does not support regrid/remake");
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!sbm_state_manager,
+        "SBM M1 zero-transport fixture does not support regridding or auxiliary remap");
     //
     // Note that "time" here is elapsed time
     //
@@ -659,6 +901,31 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
     std::unique_ptr<iMultiFab> old_lmask     = retain(    lmask_lev,lev);
     std::unique_ptr<iMultiFab> old_land_type = retain(land_type_lev,lev);
     std::unique_ptr<iMultiFab> old_soil_type = retain(soil_type_lev,lev);
+    std::unique_ptr<MultiFab>  old_precip    = std::move(precip[lev]);
+
+    //
+    // The two-stream prognostic surface energy balance is in the same position again, and
+    // it is genuinely prognostic: define_level (inside init_stuff) reallocates t_sfc/q_sfc
+    // on the new grids and setVal()s them back to the scalar erf.rad_t_sfc, and nothing
+    // downstream recomputes them, so a regrid that changes the fine grids would throw away
+    // however far the surface had evolved.  Copy the pre-regrid fields out here.  (This
+    // path only became reachable when the single-level restriction on the prognostic SEB
+    // was lifted -- before that a level carrying this state could never be regridded.)
+    //
+    std::unique_ptr<MultiFab> old_seb_t_sfc, old_seb_q_sfc;
+    if (solverChoice.rad_type == RadiationType::TwoStream &&
+        two_stream_rad.seb_prognostic_active())
+    {
+        auto keep = [] (MultiFab* src) -> std::unique_ptr<MultiFab> {
+            if (!src) { return nullptr; }
+            auto dst = std::make_unique<MultiFab>(src->boxArray(), src->DistributionMap(),
+                                                  1, src->nGrowVect());
+            MultiFab::Copy(*dst, *src, 0, 0, 1, src->nGrowVect());
+            return dst;
+        };
+        old_seb_t_sfc = keep(two_stream_rad.seb_t_sfc(lev));
+        old_seb_q_sfc = keep(two_stream_rad.seb_q_sfc(lev));
+    }
 
     //********************************************************************************************
     // This allocates all kinds of things, including but not limited to: solution arrays,
@@ -709,6 +976,41 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
             IntVect ngv = new_land[i]->nGrowVect(); ngv[2] = 0;
             new_land[i]->ParallelCopy(*old_land[i], 0, 0, 1, ngv, ngv, geom[lev].periodicity());
             new_land[i]->FillBoundary(geom[lev].periodicity());
+        }
+    }
+
+    //
+    // Restore the prognostic surface state the same way the arrays above are restored:
+    // interpolate from the parent first, so cells the new grids added -- which the
+    // pre-regrid fields never covered -- start from the coarse surface rather than from
+    // the scalar default, then copy the retained values on top wherever we still have them.
+    //
+    if (solverChoice.rad_type == RadiationType::TwoStream &&
+        two_stream_rad.seb_prognostic_active())
+    {
+        if (lev > 0) { fill_seb_from_coarse(lev); }
+
+        MultiFab* new_seb[] = {two_stream_rad.seb_t_sfc(lev), two_stream_rad.seb_q_sfc(lev)};
+        MultiFab* old_seb[] = {old_seb_t_sfc.get(), old_seb_q_sfc.get()};
+        for (int i = 0; i < 2; i++) {
+            if (!new_seb[i] || !old_seb[i]) { continue; }
+            IntVect ngv = new_seb[i]->nGrowVect(); ngv[2] = 0;
+            //
+            // Valid cells only as the SOURCE. Nothing refreshes these fields' halos away
+            // from level creation -- the prognostic update writes mfi.validbox() -- so the
+            // retained halo still holds the define_level setVal(erf.rad_t_sfc) while the
+            // valid cells have evolved. Offering those cells as a copy source would let a
+            // one-cell band of the regridded surface revert to the scalar wherever an old
+            // box's halo overlaps a new box's valid region, and ParallelCopy gives no
+            // ordering guarantee between overlapping sources. The destination halo is
+            // filled by fill_seb_from_coarse above and the FillBoundary below.
+            //
+            // (This is where the mapfac/PSFC idiom does not carry over: those halos are
+            // consistent with their valid data, and these are not.)
+            //
+            new_seb[i]->ParallelCopy(*old_seb[i], 0, 0, 1, IntVect(0), ngv,
+                                     geom[lev].periodicity());
+            new_seb[i]->FillBoundary(geom[lev].periodicity());
         }
     }
 
@@ -988,6 +1290,47 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
     //     so we must explicitly pass dm.
     Interp2DArrays(lev,ba2d[lev],dm);
 
+    if (precip[lev] && old_precip) {
+        IntVect ngv = precip[lev]->nGrowVect(); ngv[2] = 0;
+        precip[lev]->ParallelCopy(*old_precip, 0, 0, 1, ngv, ngv,
+                                  geom[lev].periodicity());
+        precip[lev]->FillBoundary(geom[lev].periodicity());
+    }
+
+    // *******************************************************************************************
+    // Urban Model
+    // *******************************************************************************************
+    const int urban_size = urban.Get_Data_Size();
+    urban_data[lev].resize(urban_size);
+    urban_flux[lev].resize(urban_size);
+    if (solverChoice.urban_enabled_lev[lev] == 1) {
+        urban_data_name.resize(urban_size);
+        urban.Define(lev, solverChoice);
+        if (solverChoice.urban_type != UrbanType::None) {
+            urban.Init(lev, vars_new[lev][Vars::cons], vars_new[lev][Vars::xvel],
+                       vars_new[lev][Vars::yvel], Geom(lev), zero, *z_phys_nd[lev],
+                       *land_type_lev[lev][0], *urb_frac_lev[lev][0]);
+        }
+        for (int mvar = 0; mvar < urban_size; ++mvar) {
+            urban_data[lev][mvar] = urban.Get_Data_Ptr(lev, mvar);
+            urban_data_name[mvar] = urban.Get_DataName(mvar);
+            urban_flux[lev][mvar] = urban.Get_Flux_Ptr(lev, mvar);
+        }
+    }
+
+    // Update Surface Model arrays for this new level
+    //
+    // m_SurfaceModel is null while we are inside restart(): ReadCheckpointFile runs first, then
+    // restart() regrids level 0 (which lands here) whenever there are more ranks than boxes, and
+    // only after restart() returns does InitData_post construct the surface model.  In that case
+    // InitData_post initializes every level against the post-regrid (ba,dm), so there is nothing
+    // for us to update yet.
+    if (m_SurfaceModel &&
+        (solverChoice.lsm_type != LandSurfaceType::None ||
+         (solverChoice.urban_type != UrbanType::None && solverChoice.urban_enabled_lev[lev] == 1))) {
+        m_SurfaceModel->initialize_for_level(lev, grids[lev], geom[lev], dmap[lev], lmask_lev[lev], domain_bcs_type, refRatio());
+    }
+
     // ********************************************************************************************
     // Land Surface Model
     //
@@ -996,19 +1339,51 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
     // then indexed with an MFIter over the new grids -- an out-of-bounds device read on the
     // level's first step after the regrid.
     //
-    // At lev > 0 this is cheap and lossless: NOAHMP::Advance calls interp_from_lev0 every
-    // step, so a fine level carries no prognostic state of its own.  At level 0 the state
-    // lives in the per-box Fortran NoahmpIO_type objects, which Init() rebuilds from the land
-    // file and for which no redistribution onto a new decomposition exists -- so refuse
-    // rather than silently cold-start the soil column.  (Level 0 is only ever remade from
-    // ERF::restart, not from regrid, which starts at lbase+1.)
+    // At lev > 0 this is cheap and lossless when the level takes its land state from level 0:
+    // NOAHMP::Advance calls interp_from_lev0 every step, so such a level carries no
+    // prognostic state of its own.  A level that runs the driver on a land setup file of its
+    // own (level 0 always; a finer level with erf.nc_init_file_<lev>, or in an idealized run
+    // with ERF_SETUP_FILE_0<lev+1> in namelist.erf) keeps its state in the per-box Fortran
+    // NoahmpIO_type objects, for which no redistribution onto a new decomposition exists.
+    // At level 0 Init() would rebuild them from the land file, silently cold-starting the
+    // soil column.  At a finer level the driver's block array cannot even be reallocated
+    // (NoahmpIO_vector::resize stops with the generic "Noah-MP fatal error", its reason on
+    // standard error).  Refuse in both cases, naming the cause.  (Level 0 is only ever
+    // remade from ERF::restart, not from regrid, which starts at lbase+1.)
     // ********************************************************************************************
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
         !((lev == 0) && (solverChoice.lsm_type == LandSurfaceType::NOAHMP)),
         "RemakeLevel at level 0 would cold-start the Noah-MP soil state: "
         "NoahmpIO_type redistribution onto a new DistributionMapping is not implemented");
+    if (lev > 0 && solverChoice.lsm_type == LandSurfaceType::NOAHMP && lsm.Runs_Own_Land_Driver(lev)) {
+        Abort("Regridding level " + std::to_string(lev) + " would rebuild its Noah-MP land "
+              "state: the level runs the land model on a setup file of its own, and "
+              "NoahmpIO_type redistribution onto new grids is not implemented. Keep that "
+              "level's grids fixed (a refinement box that does not move, or erf.regrid_int "
+              "< 0), or drop its setup file so it takes its land state from level 0.");
+    }
 
-    make_lsm_at_level(lev);
+    // Rebuild SLM arrays after the atmospheric arrays have been remade. The SLM transfer
+    // path preserves its existing state while rebuilding fields on the new grids; ERF's
+    // WRFInput initialization is not reread by SLM during this operation.
+    if (solverChoice.lsm_type == LandSurfaceType::SLM) {
+        IntVect lsm_ref_ratio(1);
+        if (lev > 0) {
+            lsm_ref_ratio = refRatio(lev-1);
+        }
+        lsm.Remake_Level(lev, vars_new[lev][Vars::cons], vars_new[lev][Vars::xvel],
+                         vars_new[lev][Vars::yvel], Geom(lev), Geom(0),
+                         domain_bcs_type, lsm_ref_ratio, zero,
+                         z_phys_nd[lev], nc_init_file, lev-1, lsm_ref_ratio);
+        for (int mvar = 0; mvar < lsm_data[lev].size(); ++mvar) {
+            lsm_data[lev][mvar] = lsm.Get_Data_Ptr(lev, mvar);
+        }
+        for (int mvar = 0; mvar < lsm_flux[lev].size(); ++mvar) {
+            lsm_flux[lev][mvar] = lsm.Get_Flux_Ptr(lev, mvar);
+        }
+    } else {
+        make_lsm_at_level(lev, true);
+    }
 
     //
     // A level-0 remake replaces the MultiFabs that every finer level's model caches for
@@ -1016,8 +1391,38 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
     //
     if (lev == 0) {
         for (int k = 1; k <= finest_level; ++k) {
-            lsm.Set_Lev0_Data_Ptr(k);
-            lsm.Set_Lev0_Flux_Ptr(k);
+            if (solverChoice.lsm_type == LandSurfaceType::SLM) {
+                lsm.Set_Source_Ptrs(k, 0);
+            } else {
+                lsm.Set_Lev0_Data_Ptr(k);
+                lsm.Set_Lev0_Flux_Ptr(k);
+            }
+        }
+    } else if (solverChoice.lsm_type == LandSurfaceType::SLM) {
+        lsm.Set_Source_Ptrs(lev, lev-1);
+    }
+
+    const bool urban_enabled = solverChoice.urban_type != UrbanType::None &&
+                               solverChoice.urban_enabled_lev[lev] == 1;
+    // As above, m_SurfaceModel does not exist yet when restart() regrids level 0.
+    if (m_SurfaceModel && (solverChoice.lsm_type != LandSurfaceType::None || urban_enabled)) {
+        const int first_lev = (lev == 0) ? 0 : lev;
+        const int last_lev = (lev == 0) ? finest_level : lev;
+
+        if (urban_enabled) {
+            m_SurfaceModel->set_model_data(lev, urban_data[lev], urban_data_name,
+                                           SurfaceModelType::URBAN);
+        }
+        for (int k = first_lev; k <= last_lev; ++k) {
+            if (solverChoice.lsm_type != LandSurfaceType::None) {
+                m_SurfaceModel->set_model_data(k, lsm_data[k], lsm_data_name, SurfaceModelType::LAND);
+                m_SurfaceModel->set_model_fluxes(k, lsm_flux[k], lsm_flux_name, SurfaceModelType::LAND);
+                if (solverChoice.lsm_type == LandSurfaceType::SLM) {
+                    m_SurfaceModel->set_field_map_pointers("olen", k,
+                                                           lsm_flux[k][lsm.Get_FluxIdx(k, "olen")], nullptr);
+                }
+            }
+            m_SurfaceModel->calculate_weight_average(k, urb_frac_lev[k][0].get());
         }
     }
 
@@ -1061,6 +1466,12 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
 void
 ERF::ClearLevel (int lev)
 {
+    if (auxiliary_inert_tracer && auxiliary_inert_tracer->is_defined(lev)) {
+        auxiliary_inert_tracer->destroy(lev);
+    }
+    if (sbm_state_manager && sbm_state_manager->is_defined(lev)) {
+        sbm_state_manager->destroy(lev);
+    }
     for (int var_idx = 0; var_idx < Vars::NumTypes; ++var_idx) {
         vars_new[lev][var_idx].clear();
         vars_old[lev][var_idx].clear();
@@ -1144,6 +1555,12 @@ ERF::ClearLevel (int lev)
         }
     }
 #endif
+
+    // This level is going away, so nothing is pending for its radiation.  Whichever routine
+    // builds the level next is responsible for setting this again.
+    if (lev < static_cast<int>(rad_interp_from_coarse_pending.size())) {
+        rad_interp_from_coarse_pending[lev] = 0;
+    }
 }
 
 //
@@ -1152,8 +1569,13 @@ ERF::ClearLevel (int lev)
 // This must be called after vars_new[lev][Vars::cons] has been (re)defined on the new grids.
 //
 void
-ERF::make_lsm_at_level (int lev)
+ERF::make_lsm_at_level (int lev, bool from_regrid,
+                        int source_lev, bool source_is_raw_input,
+                        bool initialize_now)
 {
+#ifndef ERF_USE_NETCDF
+    amrex::ignore_unused(from_regrid, initialize_now);
+#endif
     int lsm_data_size  = lsm.Get_Data_Size();
     int lsm_flux_size  = lsm.Get_Flux_Size();
     lsm_data[lev].resize(lsm_data_size);
@@ -1161,30 +1583,79 @@ ERF::make_lsm_at_level (int lev)
     lsm_flux[lev].resize(lsm_flux_size);
     lsm_flux_name.resize(lsm_flux_size);
     lsm.Define(lev, solverChoice);
-    if (solverChoice.lsm_type != LandSurfaceType::None) {
+
+    // Check if we'll be using surface-only init (atmospheric state comes later from FillCoarsePatch)
+    // Only applies to fine levels (lev > 0) with WRFInput during initial level creation.
+    // Metgrid files only contain surface data anyway, so this doesn't apply to Metgrid.
+    // initialize_now is used when WRF surface fields must be read into the LSM before
+    // the atmospheric state is interpolated from coarse.
+    bool will_use_surface_only = false;
+#ifdef ERF_USE_NETCDF
+    if (!initialize_now && !from_regrid && lev > 0 && !nc_init_file[lev].empty() &&
+        solverChoice.init_type == InitType::WRFInput) {
+        will_use_surface_only = solverChoice.interp_atmos_from_coarse;
+    }
+#endif
+
+    // Defer initialization only when surface-only initialization has not requested it yet.
+    if (solverChoice.lsm_type != LandSurfaceType::None && !will_use_surface_only) {
         //
         // A level with no land file of its own takes its LSM state from level 0 rather
-        // than from its parent (see NOAHMP::interp_from_lev0, which is handed Geom(0)
-        // just below), so this must be the ratio between level 0 and this level -- the
-        // product across every interface beneath it, not just the ratio across the last
-        // one.
+        // than from its parent.
+        // For NoahMP: see NOAHMP::interp_from_lev0, which is handed Geom(0) just below).
+        // For SLM: SLM instead uses the selected source level: level 0 for scratch
+        // initialization and the parent for a level created from coarse. For a level-0
+        // source, use the cumulative ratio across every interface beneath the destination;
+        // for an explicit parent source, use the ratio across that parent interface.
         //
         IntVect RefRatio(1);
         for (int l = 0; l < lev; ++l) { RefRatio *= refRatio(l); }
-        lsm.Init(lev, vars_new[lev][Vars::cons], Geom(lev), Geom(0),
-                 domain_bcs_type, RefRatio, zero, nc_init_file); // dummy dt value
+        lsm.Init(lev, vars_new[lev][Vars::cons], vars_new[lev][Vars::xvel],
+                 vars_new[lev][Vars::yvel], Geom(lev), Geom(0),
+                 domain_bcs_type, RefRatio, zero, z_phys_nd[lev],
+                 nc_init_file); // dummy dt value
     }
-    for (int mvar(0); mvar<lsm_data[lev].size(); ++mvar) {
-        lsm_data[lev][mvar] = lsm.Get_Data_Ptr(lev,mvar);
-        lsm_data_name[mvar] = lsm.Get_DataName(mvar);
-    }
-    for (int mvar(0); mvar<lsm_flux[lev].size(); ++mvar) {
-        lsm_flux[lev][mvar] = lsm.Get_Flux_Ptr(lev,mvar);
-        lsm_flux_name[mvar] = lsm.Get_FluxName(mvar);
-    }
-    if (lev>0) {
-        lsm.Set_Lev0_Data_Ptr(lev);
-        lsm.Set_Lev0_Flux_Ptr(lev);
+
+    // Access LSM data pointers only after initialization.
+    if (solverChoice.lsm_type != LandSurfaceType::None && !will_use_surface_only) {
+        for (int mvar(0); mvar<lsm_data[lev].size(); ++mvar) {
+            lsm_data[lev][mvar] = lsm.Get_Data_Ptr(lev,mvar);
+            lsm_data_name[mvar] = lsm.Get_DataName(mvar);
+        }
+        for (int mvar(0); mvar<lsm_flux[lev].size(); ++mvar) {
+            lsm_flux[lev][mvar] = lsm.Get_Flux_Ptr(lev,mvar);
+            lsm_flux_name[mvar] = lsm.Get_FluxName(mvar);
+        }
+        if (lev > 0) {
+            if (solverChoice.lsm_type == LandSurfaceType::SLM) {
+                const int source = (source_lev >= 0) ? source_lev : 0;
+                lsm.Set_Source_Ptrs(lev, source);
+
+                // A file-less finer level inherits SLM state from level 0 or its parent.
+                // ERF-populated WRFInput fields are transferred raw so SLM performs its
+                // conversions once; idealized fields use the already-processed state.
+                if ((restart_chkfile.empty() || source_lev >= 0) &&
+                    nc_init_file[lev].empty() &&
+                    solverChoice.init_type != InitType::Metgrid) {
+                    IntVect source_ref_ratio(1);
+                    if (source_lev < 0) {
+                        for (int l = 0; l < lev; ++l) {
+                            source_ref_ratio *= refRatio(l);
+                        }
+                    } else {
+                        source_ref_ratio = refRatio(source_lev);
+                    }
+
+                    const LSMTransferMode mode =
+                        source_is_raw_input ? LSMTransferMode::RawInput
+                                            : LSMTransferMode::ProcessedState;
+                    lsm.Initialize_From_Source(lev, source, source_ref_ratio, mode);
+                }
+            } else {
+                lsm.Set_Lev0_Data_Ptr(lev);
+                lsm.Set_Lev0_Flux_Ptr(lev);
+            }
+        }
     }
 }
 

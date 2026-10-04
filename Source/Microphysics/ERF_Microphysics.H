@@ -84,7 +84,7 @@ public:
     virtual int Get_Qstate_NonMoist_Size () = 0;
 
     /*! \brief get total number of conserved state variables */
-    inline int Get_Qstate_Size()
+    inline int Get_Qstate_Size ()
     {
         return Get_Qstate_Moist_Size() + Get_Qstate_NonMoist_Size();
     }
@@ -131,6 +131,7 @@ public:
              || (a_moisture_type == MoistureType::Kessler_NoRain)
              || (a_moisture_type == MoistureType::SatAdj)
              || (a_moisture_type == MoistureType::MoistNoCondensation)
+             || (a_moisture_type == MoistureType::SBM)
              || (a_moisture_type == MoistureType::None) ) {
             return MoistureModelType::Eulerian;
         } else if ( (a_moisture_type == MoistureType::SuperDroplets) ) {

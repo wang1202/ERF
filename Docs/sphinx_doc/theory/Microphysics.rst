@@ -10,8 +10,17 @@
 Microphysics model
 ====================
 
-Model overview and transported quantities in ERF
-(note: ``Q1`` and ``Q2`` are the mixing ratios of water vapor and cloud water for bulk models. For the Super-Droplet Method, ``Q1`` is water vapor and ``Q2`` is liquid cloud water)
+Model overview and moisture-state quantities in ERF.
+
+For the Eulerian bulk schemes, ``Q1`` is water vapor and ``Q2`` is generally
+cloud liquid water. Additional ``Q`` components depend on the selected
+microphysics scheme. The Super-Droplet Method retains Eulerian moisture fields
+for coupling while representing its particle population separately.
+
+For ``SBM``, ``Q1`` is water vapor, while ``Q2`` and ``Q3`` are cloud- and
+rain-water compatibility fields projected from the authoritative spectral
+liquid-water distribution. They are not independent condensed-water
+prognostic variables. See :ref:`sec:SpectralBinMicrophysics`.
 
 +--------------------+-------------------------+-------------+-------------+-----------------+-------------+
 | Model              | Name in ERF             | ``Q3``      | ``Q4``      | ``Q5``          | ``Q6``      |
@@ -47,12 +56,23 @@ Model overview and transported quantities in ERF
 | WRF Double Moment  | ``WDM6``                | :math:`q_i` | :math:`q_r` | :math:`q_s`     | :math:`q_g` |
 | 6-class            |                         |             |             |                 |             |
 +--------------------+-------------------------+-------------+-------------+-----------------+-------------+
-| Predicted Particle | ``P3``                  | :math:`q_i` | :math:`q_r` | :math:`q_{rim}` | --          |
-| Properties         |                         |             |             |                 |             |
+| Spectral-bin       | ``SBM``                 | :math:`q_r` | --          | --              | --          |
+| infrastructure     |                         |             |             |                 |             |
+| fixture            |                         |             |             |                 |             |
 +--------------------+-------------------------+-------------+-------------+-----------------+-------------+
 | Super-Droplet      | ``SuperDroplets``       | :math:`q_i` | :math:`q_r` | :math:`q_s`     | :math:`q_g` |
 | Method (SDM)       |                         |             |             |                 |             |
 +--------------------+-------------------------+-------------+-------------+-----------------+-------------+
+
+
+.. warning::
+
+   ``SBM`` is currently a bounded zero-transport infrastructure fixture, not
+   yet a production spectral-bin cloud-microphysics option. It stores and
+   validates a liquid spectral distribution and projects that distribution to
+   bulk ``qc`` and ``qr``, but spectral transport and cloud microphysical
+   processes are not yet enabled. See
+   :ref:`sec:SpectralBinMicrophysics` for the current supported configuration.
 
 .. note::
 
@@ -715,25 +735,6 @@ that water vapor, :math:`q_{v}`, will impact pressure, through the EOS, and
 buoyancy but will not introduce thermal sources due to conversion to and from
 cloud water. Consequently, this moisture model only transports :math:`q_{v}`.
 
-
-Predicted Particle Properties (P3) Microphysics Model
-------------------------------------------------------
-
-The P3 microphysics scheme uses a fundamentally different approach than traditional bulk schemes.
-Rather than using fixed hydrometeor categories (ice, snow, graupel), P3 predicts evolving ice particle
-properties, allowing continuous transitions from unrimed ice to heavily rimed particles.
-
-P3 transports water vapor (:math:`q_v`), cloud water (:math:`q_c`), rain (:math:`q_r`), total ice mass
-(:math:`q_i`), and rime mass (:math:`q_{rim}`). Additional prognostic variables include ice number
-concentration and rime volume.
-
-The scheme represents physical processes including vapor deposition/sublimation, riming, aggregation,
-melting, and sedimentation. Particle properties evolve continuously based on environmental conditions
-and microphysical processes.
-
-.. P3 requires ``USE_P3=TRUE`` at build time and interfaces with E3SM's P3 implementation.
-
-For details, see Morrison and Milbrandt (2015, *J. Atmos. Sci.*, 72, 287–311).
 
 Super-Droplet Method (SDM) Microphysics Model
 ----------------------------------------------

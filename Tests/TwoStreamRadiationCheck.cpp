@@ -1,4 +1,6 @@
 #include <AMReX.H>
+#include <AMReX_Arena.H>
+#include <AMReX_GpuDevice.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_PlotFileUtil.H>
 #include <AMReX_ParallelDescriptor.H>
@@ -7,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -48,9 +51,21 @@ bool has_variable (const PlotFileData& plotfile, const std::string& name)
     return std::find(names.begin(), names.end(), name) != names.end();
 }
 
-// Horizontal mean of a field at each k of the level-0 domain.
-std::vector<Real> horizontal_mean_profile (const MultiFab& mf, const amrex::Box& domain)
+// PlotFileData::get() hands back a MultiFab in The_Arena, which is device
+// memory in a GPU build, so the host scans below cannot read it directly.
+MultiFab to_host (const MultiFab& mf)
 {
+    MultiFab host_mf(mf.boxArray(), mf.DistributionMap(), mf.nComp(), 0,
+                     amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
+    amrex::Copy(host_mf, mf, 0, 0, mf.nComp(), 0);
+    amrex::Gpu::streamSynchronize();
+    return host_mf;
+}
+
+// Horizontal mean of a field at each k of the level-0 domain.
+std::vector<Real> horizontal_mean_profile (const MultiFab& mf_in, const amrex::Box& domain)
+{
+    const MultiFab mf = to_host(mf_in);
     const int kmin = domain.smallEnd(2);
     const int kmax = domain.bigEnd(2);
     const int nz = kmax - kmin + 1;
@@ -82,8 +97,16 @@ std::vector<Real> horizontal_mean_profile (const MultiFab& mf, const amrex::Box&
 // Returns an empty string when every valid cell is finite, and otherwise a
 // description of the first offending cell. CI only sees this message, so it
 // has to say where the bad value is, not just that one exists.
-std::string first_nonfinite (const MultiFab& mf)
+std::string first_nonfinite (const MultiFab& mf_in)
 {
+    // Device-side test first, if inf/nan found pull the field to the host to
+    // locate the culprit.
+    if (!mf_in.contains_nan(0, mf_in.nComp(), 0) &&
+        !mf_in.contains_inf(0, mf_in.nComp(), 0)) {
+        return std::string();
+    }
+
+    const MultiFab mf = to_host(mf_in);
     for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
         const amrex::Box& bx = mfi.validbox();
         const auto& arr = mf.const_array(mfi);
@@ -105,9 +128,14 @@ std::string first_nonfinite (const MultiFab& mf)
     return std::string();
 }
 
-int run_checks (const std::string& plotfile_path)
+int run_checks (const std::string& plotfile_path, int lev)
 {
     PlotFileData plotfile(plotfile_path);
+    if (lev < 0 || lev > plotfile.finestLevel()) {
+        return fail("plotfile has no level " + std::to_string(lev) +
+                    " (finest level is " + std::to_string(plotfile.finestLevel()) +
+                    "); the run did not refine as the deck asked");
+    }
     if (!has_variable(plotfile, "qsrc_sw")) {
         return fail("plotfile has no qsrc_sw (TwoStream heating not written)");
     }
@@ -115,20 +143,47 @@ int run_checks (const std::string& plotfile_path)
         return fail("plotfile has no qsrc_lw (TwoStream heating not written)");
     }
 
-    MultiFab qsrc_sw = plotfile.get(0, "qsrc_sw");
-    MultiFab qsrc_lw = plotfile.get(0, "qsrc_lw");
+    MultiFab qsrc_sw = plotfile.get(lev, "qsrc_sw");
+    MultiFab qsrc_lw = plotfile.get(lev, "qsrc_lw");
     const std::string sw_bad = first_nonfinite(qsrc_sw);
     if (!sw_bad.empty()) { return fail("qsrc_sw is not finite: " + sw_bad); }
     const std::string lw_bad = first_nonfinite(qsrc_lw);
     if (!lw_bad.empty()) { return fail("qsrc_lw is not finite: " + lw_bad); }
 
-    const amrex::Box domain = plotfile.probDomain(0);
+    const amrex::Box domain = plotfile.probDomain(lev);
+
+    // A level on which no box holds a whole column is interpolated from its parent rather
+    // than swept. The structural assertions below are about where a *column* puts its
+    // strongest heating and cooling, and such a level has no such layer to point at, so
+    // assert only what stays meaningful there: finite, non-negative shortwave, and not
+    // identically zero -- exactly what fails if the interpolation never happened and the
+    // arrays keep the zeros they were allocated with.
+    //
+    // Per box, matching ERF::advance_radiation's level_needs_interpolation and the guard in
+    // TwoStreamRadiation::advance. A bounding-box test would disagree with the model on a
+    // level tagged at different heights in different horizontal regions: its bounding box
+    // reaches both domain ends, so the box test calls it a full column while the model
+    // interpolates it. horizontal_mean_profile leaves a mean of zero at every k the level
+    // does not cover, so checks 3-5 would then fail on a layout the model handles correctly.
+    const amrex::BoxArray& lev_ba = plotfile.boxArray(lev);
+    bool nested_patch = false;
+    for (int ibox = 0; ibox < lev_ba.size(); ++ibox) {
+        const amrex::Box& b = lev_ba[ibox];
+        if (b.smallEnd(2) != domain.smallEnd(2) || b.bigEnd(2) != domain.bigEnd(2)) {
+            nested_patch = true;
+            break;
+        }
+    }
+
     const std::vector<Real> sw = horizontal_mean_profile(qsrc_sw, domain);
     const std::vector<Real> lw = horizontal_mean_profile(qsrc_lw, domain);
     const int nz = static_cast<int>(sw.size());
     if (nz < 3) { return fail("need at least 3 vertical levels"); }
 
     if (amrex::ParallelDescriptor::IOProcessor()) {
+        std::cout << "level " << lev << " of " << plotfile.finestLevel()
+                  << (nested_patch ? "  (nested patch: interpolated from the parent,"
+                                     " column-structure checks skipped)" : "") << "\n";
         std::cout << "k  <qsrc_sw> [K/s]  <qsrc_lw> [K/s]\n";
         for (int k = 0; k < nz; ++k) {
             std::cout << k << "  " << sw[k] << "  " << lw[k] << "\n";
@@ -143,6 +198,16 @@ int run_checks (const std::string& plotfile_path)
     }
     if (!(sw_max > Real(0.0))) {
         return fail("qsrc_sw is zero everywhere; radiation heating was not applied");
+    }
+
+    if (nested_patch) {
+        // Everything below this point asks where the column's top is. Done.
+        if (amrex::ParallelDescriptor::IOProcessor()) {
+            std::cout << "TwoStreamRadiationCheck: level " << lev
+                      << " is a nested patch; finite, non-negative and non-zero heating"
+                         " verified, column-structure checks skipped\n";
+        }
+        return 0;
     }
 
     // 3. Orientation: SW heating at the top layer exceeds the bottom layer.
@@ -181,10 +246,25 @@ int run_checks (const std::string& plotfile_path)
 int main (int argc, char** argv)
 {
     if (argc < 2) {
-        std::cerr << "usage: " << argv[0] << " <plotfile>\n";
+        std::cerr << "usage: " << argv[0] << " <plotfile> [level]\n";
         return 2;
     }
     const std::string plotfile_path(argv[1]);
+
+    // Optional AMR level to check; default 0. The same vertical-structure
+    // assertions hold on every level, because every level runs its own column
+    // sweep -- so a fine level whose heating was never written (left at the
+    // allocation's zeros) fails the "zero everywhere" assertion below.
+    int lev = 0;
+    if (argc >= 3) {
+        try {
+            lev = std::stoi(argv[2]);
+        } catch (const std::exception&) {
+            std::cerr << "usage: " << argv[0] << " <plotfile> [level]"
+                      << "  (level must be an integer, got \"" << argv[2] << "\")\n";
+            return 2;
+        }
+    }
 
     // build_parm_parse = false: the plotfile path is a directory, and letting
     // AMReX treat argv[1] as an inputs file makes it read that directory as
@@ -196,7 +276,7 @@ int main (int argc, char** argv)
             result = fail("no plotfile at " + plotfile_path +
                           " (the simulation did not write one)");
         } else {
-            result = run_checks(plotfile_path);
+            result = run_checks(plotfile_path, lev);
         }
     }
     amrex::Finalize();

@@ -96,7 +96,7 @@ Problem::init_custom_pert (
     Array4<Real      > const& state_pert,
     Array4<Real      > const& r_hse,
     Array4<Real      > const& p_hse,
-    Array4<Real const> const& /*z_nd*/,
+    Array4<Real const> const& z_nd,
     Array4<Real const> const& z_cc,
     GeometryData const& geomdata,
     Array4<Real const> const&   mf_m,
@@ -166,6 +166,9 @@ Problem::init_custom_pert (
     else if  (my_prob_name_ci == "bomex") {
 #include "Prob/ERF_InitCustomPert_Bomex.H"
     }
+    else if (my_prob_name_ci == "slm") {
+#include "Prob/ERF_InitCustomPert_SLM.H"
+    }
     else if  (   my_prob_name_ci == "rico"
               || my_prob_name_ci == "dycoms2rf01"
               || my_prob_name_ci == "dycoms2rf02") {
@@ -194,6 +197,10 @@ Problem::init_custom_pert (
     }
     else if (my_prob_name_ci == "bellforest") {
         // No state perturbation; uniform flow is set in init_custom_pert_vels
+    }
+    else if (my_prob_name_ci == "wps"   ||
+             my_prob_name_ci == "metgrid") {
+#include "Prob/ERF_InitCustomPert_KE.H"
     }
     else {
         Print() << "Problem name" << " \"" <<  my_prob_name_ci << "\" "
@@ -276,6 +283,9 @@ Problem::init_custom_pert_vels (
     else if  (my_prob_name_ci == "bomex") {
 #include "Prob/ERF_InitCustomPertVels_Bomex.H"
     }
+    else if (my_prob_name_ci == "slm") {
+#include "Prob/ERF_InitCustomPertVels_Bomex.H"
+    }
     else if  (   my_prob_name_ci == "rico"
               || my_prob_name_ci == "dycoms2rf01"
               || my_prob_name_ci == "dycoms2rf02") {
@@ -318,7 +328,8 @@ void
 Problem::update_rhotheta_sources (const double& time,
                                   amrex::MultiFab* src,
                                   const Geometry& geom,
-                                  std::unique_ptr<MultiFab>& z_phys_cc)
+                                  std::unique_ptr<MultiFab>& z_phys_cc,
+                                  const Vector<Real>& zlevels_stag)
 {
     if (src->empty()) return;
 
@@ -335,7 +346,7 @@ Problem::update_rhotheta_sources (const double& time,
     d_zlevels.resize(khi+1);
 
     if (z_phys_cc) {
-        reduce_to_max_per_height(zlevels, z_phys_cc);
+        reduce_to_max_per_height(zlevels, z_phys_cc, zlevels_stag);
         amrex::Gpu::copy(amrex::Gpu::hostToDevice, zlevels.begin(), zlevels.end(), d_zlevels.begin());
     }
 
@@ -366,7 +377,8 @@ void
 Problem::update_rhoqt_sources (const double& time,
                                amrex::MultiFab* qsrc,
                                const Geometry& geom,
-                               std::unique_ptr<MultiFab>& z_phys_cc)
+                               std::unique_ptr<MultiFab>& z_phys_cc,
+                               const Vector<Real>& zlevels_stag)
 {
     if (qsrc->empty()) return;
 
@@ -383,7 +395,7 @@ Problem::update_rhoqt_sources (const double& time,
     d_zlevels.resize(khi+1);
 
     if (z_phys_cc) {
-        reduce_to_max_per_height(zlevels, z_phys_cc);
+        reduce_to_max_per_height(zlevels, z_phys_cc, zlevels_stag);
         amrex::Gpu::copy(amrex::Gpu::hostToDevice, zlevels.begin(), zlevels.end(), d_zlevels.begin());
     }
 
@@ -417,7 +429,8 @@ Problem::update_w_subsidence (const double& time,
                               Gpu::DeviceVector<Real>& d_wbar,
                               const amrex::MultiFab& state,
                               const Geometry& geom,
-                              std::unique_ptr<MultiFab>& z_phys_nd)
+                              std::unique_ptr<MultiFab>& z_phys_nd,
+                              const Vector<Real>& zlevels_stag)
 {
     if (wbar.empty()) return;
 
@@ -429,7 +442,7 @@ Problem::update_w_subsidence (const double& time,
     Vector<Real> zlevels;
     zlevels.resize(khi+2);
     if (z_phys_nd) {
-        reduce_to_max_per_height(zlevels, z_phys_nd);
+        reduce_to_max_per_height(zlevels, z_phys_nd, zlevels_stag);
     }
 
     ParmParse pp_erf("erf");
@@ -460,7 +473,8 @@ Problem::update_geostrophic_profile (const double& /*time*/,
                                      Vector<Real>& v_geos,
                                      Gpu::DeviceVector<Real>& d_v_geos,
                                      const Geometry& geom,
-                                     std::unique_ptr<MultiFab>& z_phys_cc)
+                                     std::unique_ptr<MultiFab>& z_phys_cc,
+                                     const Vector<Real>& zlevels_stag)
 {
     if (u_geos.empty()) return;
 
@@ -472,7 +486,7 @@ Problem::update_geostrophic_profile (const double& /*time*/,
     Vector<Real> zlevels;
     zlevels.resize(khi+1);
     if (z_phys_cc) {
-        reduce_to_max_per_height(zlevels, z_phys_cc);
+        reduce_to_max_per_height(zlevels, z_phys_cc, zlevels_stag);
     }
 
     ParmParse pp_erf("erf");

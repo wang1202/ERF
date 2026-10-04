@@ -20,7 +20,8 @@ using namespace amrex;
  *   shortwave and longwave model that computes heating rates from the
  *   old-state atmosphere (t^n) with clear-sky and cloudy column algorithms.
  *   The heating rates go into qheating_rates[lev], a 2-component MultiFab
- *   holding shortwave and longwave.
+ *   holding shortwave and longwave. With Noah-MP it also writes the land
+ *   model's radiative forcing (SWDOWN, GLW, COSZEN), as RRTMGP does.
  *
  * **Source-term application**
  *
@@ -57,8 +58,261 @@ void ERF::advance_radiation (int lev,
 {
     BL_PROFILE("ERF::advance_radiation()");
 
+    // Fill this level's radiation fields by interpolation from its parent.
+    //
+    // Two situations need this and need exactly the same work done:
+    //
+    //   * a nested patch -- a fine level that does not span the full column, for which
+    //     RRTMGP cannot be run at all because it needs complete atmospheric columns; and
+    //   * the first step of a level built by interp_atmos_from_coarse, whose atmospheric
+    //     state came from FillCoarsePatch and is not yet thermodynamically consistent.
+    //
+    // NOTE: the coarse MultiFabs are handed to InterpFromCoarseLevel directly, with no
+    //       intermediate ghosted temporary.  That is only correct because each of them
+    //       carries -- and has filled -- the ghost cells this overload reads.  It builds a
+    //       PhysBCFunctUseCoarseGhost, whose constructor derives the coarse halo the
+    //       interpolation stencil needs and then asserts
+    //
+    //           cghost = min(cmf.nGrowVect(), src_ghost);
+    //           AMREX_ALWAYS_ASSERT(cghost.allGE(src_ghost_outside_domain));
+    //
+    //       and the ParallelCopy that fills the coarse patch runs with send_ghost = cghost,
+    //       i.e. it reads the coarse source's GHOST region, not only its valid region.  A
+    //       coarse source with too few ghost cells therefore aborts on that assert, and one
+    //       whose halo was never filled silently feeds garbage to the interpolation.  This
+    //       is why qheating_rates and rad_fluxes are both defined with a (1,1,1) halo in
+    //       ERF_MakeNewArrays.cpp, zeroed there, and FillBoundary'd below.
+    // Can no column model run on this level, so that its radiation fields must be
+    // interpolated from the parent instead?
+    // ERF::rad_level_needs_interpolation carries the reasoning; post_timestep needs the
+    // same answer, so it is a member rather than a lambda here.
+    auto level_needs_interpolation = [&] (int l) -> bool
+    {
+        return rad_level_needs_interpolation(l);
+    };
+
+    auto interp_rad_from_coarse = [&] ()
+    {
+        // Ensure the parent level's ghost cells are filled before interpolation.  This is
+        // needed even when radiation did not run this step, especially with two-way coupling
+        // where the grid structure may have changed.  A nested patch is exempt: it never
+        // runs radiation itself, so its halo is already whatever its own pass through this
+        // lambda interpolated into it.
+        if (!level_needs_interpolation(lev-1)) {
+            qheating_rates[lev-1]->FillBoundary(geom[lev-1].periodicity());
+            if (rad_fluxes[lev-1]) {
+                // The whole halo, as for qheating_rates -- the z ghosts matter too, since
+                // grids split in z (amr.no_box_split_dir = -1) put interior z interfaces in
+                // them -- but with z forced non-periodic.  The z-ghost at khi+1 holds the
+                // top-of-atmosphere interface, physical data rather than a halo (see below);
+                // it lies outside the domain, so no ordinary exchange reaches it, but a
+                // z-periodic one would overwrite it with the bottom of the column.
+                const IntVect per = geom[lev-1].periodicity().intVect();
+                rad_fluxes[lev-1]->FillBoundary(Periodicity(IntVect(per[0],per[1],0)));
+            }
+        }
+
+        InterpFromCoarseLevel(*qheating_rates[lev], qheating_rates[lev]->nGrowVect(),
+                              IntVect(0,0,0),
+                              *qheating_rates[lev-1], 0, 0, 2,
+                              geom[lev-1], geom[lev],
+                              refRatio(lev-1), &cell_cons_interp,
+                              domain_bcs_type, BCVars::cons_bc);
+
+        // Radiation fluxes (needed for plotfiles and diagnostics)
+        if (rad_fluxes[lev] && rad_fluxes[lev-1]) {
+            const int nc = rad_fluxes[lev]->nComp();
+
+            InterpFromCoarseLevel(*rad_fluxes[lev], rad_fluxes[lev]->nGrowVect(),
+                                  IntVect(0,0,0),
+                                  *rad_fluxes[lev-1], 0, 0, nc,
+                                  geom[lev-1], geom[lev],
+                                  refRatio(lev-1), &cell_cons_interp,
+                                  domain_bcs_type, BCVars::cons_bc);
+
+            // The interpolation above cannot carry the top-of-atmosphere interface.
+            // RRTMGP's layout puts the TOA fluxes in the z-ghost cell at k = khi+1 (see
+            // ERF_MakeNewArrays.cpp), which is physical data rather than a halo.  On the
+            // coarse side that cell does now fall inside the ghost region the ParallelCopy
+            // reads, so it serves as the stencil's neighbor above the top layer -- the right
+            // value for that role, being the next interface up in the same sequence -- but
+            // it is only ever read there.  On the fine side, a level that spans the full
+            // column has its TOA outside the fine domain, and the call above is asked for no
+            // ghost cells outside the domain, so nothing is written there at all.  A nested
+            // patch does not reach the model top, so its top plane is an ordinary interior
+            // interface that the call above has already filled.
+            //
+            // Move both planes into valid index space -- a single layer at the coarse domain
+            // top -- so the ordinary machinery can interpolate them horizontally, then put
+            // the result back in the fine level's ghost cell.
+            if (!level_needs_interpolation(lev)) {
+                const int khi_c = geom[lev-1].Domain().bigEnd(2);
+                const int khi_f = geom[lev  ].Domain().bigEnd(2);
+
+                // Flatten a level's grids onto the single layer at k = khi_c, keeping only
+                // the boxes that reach the top of their own domain.  A box that stops short
+                // of it carries no TOA plane at all: flattening it would put a duplicate box
+                // in the BoxArray, for which FillBoundary is ill-defined, and would ask the
+                // copy below to read a z index outside the fab.  Every box spans the column
+                // under the default amr.no_box_split_dir = 2, so this filter keeps all of
+                // them there; it matters only for amr.no_box_split_dir = -1.  idx_out maps a
+                // slab box back to the box it came from, since dropping boxes breaks the
+                // one-to-one correspondence an MFIter would otherwise rely on.
+                auto top_slab = [&] (const MultiFab& mf_in, int khi_in, BoxArray& ba_out,
+                                     DistributionMapping& dm_out, Vector<int>& idx_out)
+                {
+                    const BoxArray&            ba_in = mf_in.boxArray();
+                    const DistributionMapping& dm_in = mf_in.DistributionMap();
+                    BoxList bl;
+                    Vector<int> pmap;
+                    for (int i = 0, n = int(ba_in.size()); i < n; ++i) {
+                        if (ba_in[i].bigEnd(2) != khi_in) { continue; }
+                        Box b = ba_in[i];
+                        b.setSmall(2, khi_c); b.setBig(2, khi_c);
+                        bl.push_back(b);
+                        pmap.push_back(dm_in[i]);
+                        idx_out.push_back(i);
+                    }
+                    ba_out = BoxArray(std::move(bl));
+                    dm_out = DistributionMapping(std::move(pmap));
+                };
+
+                BoxArray            ba_toa_c, ba_toa_f;
+                DistributionMapping dm_toa_c, dm_toa_f;
+                Vector<int>         idx_toa_c, idx_toa_f;
+                top_slab(*rad_fluxes[lev-1], khi_c, ba_toa_c, dm_toa_c, idx_toa_c);
+                top_slab(*rad_fluxes[lev  ], khi_f, ba_toa_f, dm_toa_f, idx_toa_f);
+
+                // toa_crse is the coarse source of an InterpFromCoarseLevel, so it must carry
+                // the halo that stencil reads -- (1,1,0), the z ratio being one -- and that
+                // halo must be defined.  Unlike rad_fluxes it is freshly allocated here and
+                // the loop below writes valid boxes only, so zero it first: FillBoundary can
+                // define only the ghosts backed by another box's valid data, and the ones
+                // outside the domain are left to the setVal.
+                MultiFab toa_crse(ba_toa_c, dm_toa_c, nc, IntVect(1,1,0));
+                MultiFab toa_fine(ba_toa_f, dm_toa_f, nc, 0);
+                toa_crse.setVal(zero);
+
+                for (MFIter mfi(toa_crse); mfi.isValid(); ++mfi) {
+                    const Box& dbx = mfi.validbox();
+                    Box sbx(dbx); sbx.shift(2, 1);   // the coarse TOA, one above the top layer
+                    toa_crse[mfi].template copy<RunOn::Device>(
+                        (*rad_fluxes[lev-1])[idx_toa_c[mfi.index()]], sbx, 0, dbx, 0, nc);
+                }
+                // Unconditional, unlike the exchange at the top of this lambda: toa_crse is a
+                // new MultiFab every step, so its halo is undefined here whatever the parent
+                // level is -- being a nested patch says nothing about it.
+                toa_crse.FillBoundary(geom[lev-1].periodicity());
+
+                // Both planes live at the same z index, so the ratio in z is one and the
+                // interpolation is purely horizontal.
+                IntVect rr2d(refRatio(lev-1)[0], refRatio(lev-1)[1], 1);
+                InterpFromCoarseLevel(toa_fine, IntVect(0,0,0),
+                                      IntVect(0,0,0),
+                                      toa_crse, 0, 0, nc,
+                                      geom[lev-1], geom[lev],
+                                      rr2d, &cell_cons_interp,
+                                      domain_bcs_type, BCVars::cons_bc);
+
+                for (MFIter mfi(toa_fine); mfi.isValid(); ++mfi) {
+                    const Box& sbx = mfi.validbox();
+                    Box dbx(sbx); dbx.shift(2, khi_f + 1 - khi_c);
+                    (*rad_fluxes[lev])[idx_toa_f[mfi.index()]].template copy<RunOn::Device>(
+                        toa_fine[mfi], sbx, 0, dbx, 0, nc);
+                }
+            }
+        }
+
+        if (m_SurfaceModel && solverChoice.rad_feeds_lsm()) {
+            const auto fine_outputs = m_SurfaceModel->get_radiation_output_fields(lev);
+            const auto coarse_outputs = m_SurfaceModel->get_radiation_output_fields(lev-1);
+            const IntVect rr2d(refRatio(lev-1)[0], refRatio(lev-1)[1], 1);
+            for (int i = 0; i < fine_outputs.size(); ++i) {
+                if (fine_outputs[i] && coarse_outputs[i]) {
+                    BoxList coarse_boxes = coarse_outputs[i]->boxArray().boxList();
+                    BoxList fine_boxes = fine_outputs[i]->boxArray().boxList();
+                    for (Box& box : coarse_boxes) { box.setRange(2, 0); }
+                    for (Box& box : fine_boxes) { box.setRange(2, 0); }
+                    MultiFab coarse_surface(BoxArray(std::move(coarse_boxes)),
+                                            coarse_outputs[i]->DistributionMap(), 1, 0);
+                    MultiFab fine_surface(BoxArray(std::move(fine_boxes)),
+                                          fine_outputs[i]->DistributionMap(), 1, 0);
+
+                    // Radiation output fields are surface-slab fields even when stored in 3-D,
+                    // and the surface plane k = 0 may sit in the field's z GHOST region (SLM
+                    // stores soil layers at k < 0 and exchanges surface values at k = 0; see
+                    // SurfaceModel::validate_radiation_output_layout). The copies must pair
+                    // regions of identical size: the surface MultiFabs' valid boxes are the
+                    // output fields' VALID boxes flattened to k = 0 (above), so take the i,j
+                    // extent from the valid box -- a slab of the fab's own box also carries
+                    // the ghost cells in x and y and is larger than the paired valid box.
+                    for (MFIter mfi(coarse_surface); mfi.isValid(); ++mfi) {
+                        const Box source_valid = coarse_outputs[i]->boxArray()[mfi.index()];
+                        const Box& source_fab_box = (*coarse_outputs[i])[mfi.index()].box();
+                        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                            source_fab_box.smallEnd(2) <= 0 && source_fab_box.bigEnd(2) >= 0,
+                            "Radiation output source must contain the k=0 surface plane in "
+                            "its valid or ghost region");
+                        const Box source_slab = makeSlab(source_valid, 2, 0);
+                        coarse_surface[mfi].template copy<RunOn::Device>(
+                            (*coarse_outputs[i])[mfi.index()], source_slab, 0, mfi.validbox(), 0, 1);
+                    }
+
+                    InterpFromCoarseLevel(fine_surface, IntVect(0,0,0),
+                                          IntVect(0,0,0), coarse_surface, 0, 0, 1,
+                                          geom[lev-1], geom[lev], rr2d, &pc_interp,
+                                          domain_bcs_type, BCVars::cons_bc);
+
+                    for (MFIter mfi(fine_surface); mfi.isValid(); ++mfi) {
+                        const Box destination_valid = fine_outputs[i]->boxArray()[mfi.index()];
+                        const Box& destination_fab_box = (*fine_outputs[i])[mfi.index()].box();
+                        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                            destination_fab_box.smallEnd(2) <= 0 && destination_fab_box.bigEnd(2) >= 0,
+                            "Radiation output destination must contain the k=0 surface plane in "
+                            "its valid or ghost region");
+                        const Box destination_slab = makeSlab(destination_valid, 2, 0);
+                        (*fine_outputs[i])[mfi.index()].template copy<RunOn::Device>(
+                            fine_surface[mfi], mfi.validbox(), 0, destination_slab, 0, 1);
+                    }
+                    m_SurfaceModel->distribute_radiation_output(lev, i);
+                }
+            }
+        }
+    };
+
+    // On the first step of a level that has just been built by interp_atmos_from_coarse,
+    // interpolate the heating rates and radiation fluxes from the parent instead of
+    // computing them.  That level's atmospheric state came from FillCoarsePatch, which
+    // interpolates rho, theta and qv independently and so leaves them thermodynamically
+    // inconsistent; running RRTMGP on it produces NaNs (see MakeNewLevelFromCoarse), and the
+    // two-stream column sweep, which takes its optical properties from the same rho, theta
+    // and qv, has no more claim on that state than RRTMGP does.  Interpolating also gives
+    // the LSM the radiation fields it needs for that step.
+    //
+    // This sits ahead of the model dispatch because the flag is set for whichever model is
+    // running (ERF_MakeNewLevel.cpp) and the reason for honouring it is a property of the
+    // state, not of the model.  For the two-stream model, the post-dycore call that still
+    // follows holds back the prognostic surface energy balance on such a level until its
+    // first sweep (TwoStreamRadiation::advance), since the balance takes its surface
+    // radiation from the sweep.
+    //
+    // The flag is set by whichever routine built the level and is cleared here as soon as
+    // it has been acted on, so exactly one step is skipped per level creation.  Levels
+    // that read a full state of their own never have it set.
+    if (lev > 0 &&
+        (solverChoice.rad_uses_interface() || solverChoice.rad_type == RadiationType::TwoStream) &&
+        lev < static_cast<int>(rad_interp_from_coarse_pending.size()) &&
+        rad_interp_from_coarse_pending[lev]) {
+        amrex::Print() << "Interpolating radiation heating rates and fluxes from level " << lev-1
+                       << " to level " << lev << " on the first step after that level was built\n";
+        interp_rad_from_coarse();
+        rad_interp_from_coarse_pending[lev] = 0;
+        return;
+    }
+
     if (solverChoice.rad_uses_interface()) {
         BL_PROFILE_VAR("ERF::advance_radiation():RRTMGP", rrtmgp_region);
+
 #ifdef ERF_USE_NETCDF
         MultiFab *lat_ptr = lat_m[lev].get();
         MultiFab *lon_ptr = lon_m[lev].get();
@@ -70,19 +324,14 @@ void ERF::advance_radiation (int lev,
         MultiFab* t_surf = (m_SurfaceLayer[Orientation(Direction::z, Orientation::low)]) ? m_SurfaceLayer[Orientation(Direction::z, Orientation::low)]->get_t_surf(lev) : nullptr;
 
         // RRTMGP inputs names and pointers
-        Vector<std::string> lsm_input_names = rad[lev]->get_lsm_input_varnames();
-        Vector<MultiFab*> lsm_input_ptrs(lsm_input_names.size(),nullptr);
-        for (int i(0); i<lsm_input_ptrs.size(); ++i) {
-            int varIdx = lsm.Get_DataIdx(lev,lsm_input_names[i]);
-            if (varIdx >= 0) { lsm_input_ptrs[i] = lsm.Get_Data_Ptr(lev,varIdx); }
-        }
+        Vector<const MultiFab*> lsm_input_ptrs(6, nullptr);
+        Vector<MultiFab*> lsm_output_ptrs;
 
-        // RRTMGP output names and pointers
-        Vector<std::string> lsm_output_names = rad[lev]->get_lsm_output_varnames();
-        Vector<MultiFab*> lsm_output_ptrs(lsm_output_names.size(),nullptr);
-        for (int i(0); i<lsm_output_ptrs.size(); ++i) {
-            int varIdx = lsm.Get_DataIdx(lev,lsm_output_names[i]);
-            if (varIdx >= 0) { lsm_output_ptrs[i] = lsm.Get_Data_Ptr(lev,varIdx); }
+        if (m_SurfaceModel) {
+            lsm_input_ptrs = m_SurfaceModel->get_radiation_fields(lev);
+            if (solverChoice.rad_feeds_lsm()) {
+                lsm_output_ptrs = m_SurfaceModel->get_radiation_output_fields(lev);
+            }
         }
 
         // Force radiation update to sync with lsm?
@@ -96,7 +345,23 @@ void ERF::advance_radiation (int lev,
                       lsm_input_ptrs, lsm_output_ptrs,
                       qheating_rates[lev].get(), rad_fluxes[lev].get(),
                       z_phys_nd[lev].get()     , lat_ptr, lon_ptr,
-                      lsm_updated);
+                      lsm_updated, solar_declin, calday);
+
+        if (m_SurfaceModel && rad[lev]->radiation_updated()) {
+            m_SurfaceModel->distribute_radiation_outputs(lev);
+        }
+
+        // Fill ghost cells after radiation computes (needed for interpolation to finer levels)
+        // This should be fast since it only fills this level's own ghost cells
+        if (solverChoice.rad_type != RadiationType::None && !level_needs_interpolation(lev)) {
+            qheating_rates[lev]->FillBoundary(geom[lev].periodicity());
+        }
+
+        // For nested patches (fine levels that don't reach model top), radiation
+        // was skipped. Interpolate the radiation fields from the parent level.
+        if (lev > 0 && level_needs_interpolation(lev)) {
+            interp_rad_from_coarse();
+        }
     }
     // Two-stream radiation driver, a separate path from the IRadiation
     // models above; erf.radiation_model selects exactly one of them.
@@ -112,6 +377,14 @@ void ERF::advance_radiation (int lev,
     //   sources RRTMGP uses: start_time + t for the calendar, the lat_m/lon_m
     //   fields of a WRF or metgrid grid, and the surface layer's temperature.
     else if (solverChoice.rad_type == RadiationType::TwoStream) {
+        // A nested patch has no complete column, so the sweep cannot run on it. Take the
+        // same route RRTMGP takes: interpolate this level's heating rates and fluxes from
+        // the parent rather than refusing the configuration. The two models now differ only
+        // in how a level that *does* span the column is solved.
+        if (lev > 0 && level_needs_interpolation(lev)) {
+            interp_rad_from_coarse();
+            return;
+        }
 #ifdef ERF_USE_NETCDF
         const MultiFab* lat_ptr = lat_m[lev].get();
         const MultiFab* lon_ptr = lon_m[lev].get();
@@ -122,10 +395,45 @@ void ERF::advance_radiation (int lev,
         const MultiFab* t_surf = (m_SurfaceLayer[Orientation::zlo()])
                                ? m_SurfaceLayer[Orientation::zlo()]->get_t_surf(lev)
                                : nullptr;
+        const MultiFab* sfc_sens_flux = nullptr;
+        const MultiFab* sfc_laten_flux = nullptr;
+        seb_surface_layer_fluxes(lev, sfc_sens_flux, sfc_laten_flux);
+        Vector<const MultiFab*> radiation_inputs(6, nullptr);
+        bool noahmp_active = solverChoice.lsm_type == LandSurfaceType::NOAHMP;
+        if (m_SurfaceModel) {
+            radiation_inputs = m_SurfaceModel->get_radiation_fields(lev);
+        }
         two_stream_rad.advance(lev, istep[lev], t_old[lev], dt_advance, "pre_dycore",
                                vars_old[lev][Vars::cons], z_phys_nd[lev].get(), geom[lev],
-                               lsm, qheating_rates[lev].get(), rad_fluxes[lev].get(),
-                               t_surf, lat_ptr, lon_ptr,
+                               lsm, radiation_inputs, noahmp_active,
+                               qheating_rates[lev].get(), rad_fluxes[lev].get(),
+                               t_surf, sfc_sens_flux, sfc_laten_flux, lat_ptr, lon_ptr,
                                t_old[lev] + start_time, use_datetime);
+
+        // Hand the land-surface model the surface forcing of this sweep, as RRTMGP does
+        // through lsm_output_ptrs. The two-stream model sweeps on every step, so this is
+        // every step, and the land model -- which runs after the dycore -- always sees this
+        // step's radiation. The destinations are LSM data, which the LSM checkpoints; a
+        // restarted run refills them here before its first land step.
+        // supplies_land_forcing(lev) is what init_stuff set from rad_feeds_lsm(): one test.
+        if (m_SurfaceModel && two_stream_rad.supplies_land_forcing(lev)) {
+            two_stream_rad.write_land_forcing(lev,
+                m_SurfaceModel->get_radiation_output_field(lev, "sw_flux_dn"),
+                m_SurfaceModel->get_radiation_output_field(lev, "lw_flux_dn"),
+                m_SurfaceModel->get_radiation_output_field(lev, "cos_zenith_angle"));
+            m_SurfaceModel->distribute_radiation_outputs(lev);
+        }
+
+        // Fill this level's halo so a finer level can interpolate from it. The
+        // InterpFromCoarseLevel overload above reads the coarse source's ghost cells, not
+        // only its valid region (see the note on interp_rad_from_coarse), so an unfilled
+        // halo here would feed garbage to a nested child.
+        qheating_rates[lev]->FillBoundary(geom[lev].periodicity());
+        if (rad_fluxes[lev]) {
+            // z left non-periodic: the ghost at khi+1 holds the top-of-atmosphere
+            // interface, which is physical data rather than a halo.
+            const IntVect per = geom[lev].periodicity().intVect();
+            rad_fluxes[lev]->FillBoundary(Periodicity(IntVect(per[0],per[1],0)));
+        }
     }
 }

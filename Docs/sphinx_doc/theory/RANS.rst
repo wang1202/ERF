@@ -74,6 +74,22 @@ the plotfile ``diss`` holds :math:`\rho \varepsilon` from the start of the
 last step. A floor ``erf.tke_floor`` (default: machine epsilon on
 :math:`\rho k`) bounds :math:`k` from below.
 
+The heat flux in :math:`P_b` at the cell centre is the average of the
+fluxes of the :math:`\theta` diffusion at the two vertical faces of the
+cell, in every cell; at the bottom of the domain the face flux is the
+surface-layer flux when a surface layer is used. These are the full face
+fluxes, including the stretched-mesh spacing, whether the vertical
+diffusion of :math:`\theta` is explicit or implicit
+(``erf.vert_implicit``), so the source does not depend on that choice.
+On a terrain-fitted mesh the stored face flux is the component along the
+:math:`\zeta` coordinate only: the slope corrections and the Jacobian
+are applied later, when the fluxes enter the right-hand side, so over
+sloping terrain both :math:`P_b` and the ``hfx3`` output omit those
+terms. The Deardorff closure shares this source term. The k-eqn closure
+cannot be combined with a PBL scheme that also transports the turbulent
+kinetic energy (``MYJ``, ``MYNN25``, ``MYNNEDMF``, the SHOC schemes);
+the Deardorff closure cannot be combined with any PBL scheme.
+
 Length scale
 ------------
 
@@ -94,7 +110,12 @@ length of the surface layer. ERF caps it harmonically at
 or, with :cpp:`erf.rans_lscale_from_pblh = true`, at
 :math:`\kappa \times 0.1 z_i` from the surface layer's boundary-layer height
 diagnostic (``erf.most.pblh_calc = MYNN25``), clamped between
-``erf.rans_lscale_min`` and ``erf.max_geom_lscale``.
+``erf.rans_lscale_min`` and ``erf.max_geom_lscale``. On a refined region
+that does not run from the ground to the top of the domain, :math:`z_i` is
+the height diagnosed on the next coarser level, so the cap does not depend on
+the extent of the refined region; each fine column takes the height of the
+coarse column that holds it, so the cap is constant over each block of
+refinement-ratio fine columns, as it is over each column of the coarse level.
 
 Stratification shortens or lengthens :math:`l` through the buoyancy
 frequency :math:`N^2 = (g/\theta_0) \, \partial \theta / \partial z`. In stable

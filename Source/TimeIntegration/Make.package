@@ -4,6 +4,7 @@ CEXE_sources += ERF_TimeStep.cpp
 CEXE_sources += ERF_AdvanceDycore.cpp
 CEXE_sources += ERF_AdvanceMicrophysics.cpp
 CEXE_sources += ERF_AdvanceLSM.cpp
+CEXE_sources += ERF_AdvanceUrban.cpp
 CEXE_sources += ERF_AdvanceRadiation.cpp
 CEXE_sources += ERF_MakeFastCoeffs.cpp
 CEXE_sources += ERF_MakeTauTerms.cpp
@@ -15,6 +16,7 @@ CEXE_sources += ERF_Substep_MT.cpp
 
 CEXE_headers += ERF_ImplicitPre.H
 CEXE_headers += ERF_ImplicitPost.H
+CEXE_headers += ERF_ScalarLimitPost.H
 
 CEXE_headers += ERF_TI_slow_rhs_pre.H
 CEXE_headers += ERF_TI_slow_rhs_post.H

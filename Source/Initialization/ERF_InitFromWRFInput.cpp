@@ -8,6 +8,8 @@
 #include "ERF_Utils.H"
 #include "ERF_ProbCommon.H"
 #include "ERF_DataStruct.H"
+#include "ERF_TerrainMetrics.H"
+#include "ERF_GridUtils.H"
 
 #include "ERF_ReadFromWRFInput.H"
 #include "ERF_ReadFromWRFBdy.H"
@@ -72,9 +74,9 @@ bool CheckForDensity (const std::string& fname)
  * @return Box specifying the subdomain index space.
  */
 Box
-read_subdomain_from_wrfinput(int /*lev*/,
-                             const std::string& fname,
-                             int& ratio);
+read_subdomain_from_wrfinput (int /*lev*/,
+                              const std::string& fname,
+                              int& ratio);
 
 /**
  * Compute the top height of the domain from WRF geopotential data.
@@ -305,48 +307,154 @@ read_base_state_params_from_wrfinput (const std::string& fname,
     ParallelDescriptor::Bcast(&P_STRAT,1,ParallelDescriptor::IOProcessorNumber());
 }
 
+namespace {
+
+/**
+ * @brief Domain-mean layer thickness of the file's vertical grid, level by level.
+ *
+ * The returned profile is what the ERF vertical grid is built from.  Averaging over the
+ * horizontal is the point, not an approximation: a wrfinput column's layer thicknesses vary by
+ * tens of percent from column to column aloft -- 63% at k = 100 on the WPS test case -- because
+ * the coordinate is pressure-based, and that horizontal raggedness is exactly what ERF does not
+ * want in its mesh.  The mean over the domain is smooth in k, so taking it keeps the file's
+ * vertical *distribution* while discarding its horizontal *raggedness*.
+ *
+ * The average is over the columns this level actually has, not over the columns the domain
+ * would have.  A level whose grids cover only part of the domain -- a nest, which is exactly
+ * the lev > 0 wrfinput case -- would otherwise have every thickness scaled down by the
+ * fraction of the domain it covers, which is not a vertical grid at all.  Averaging over the
+ * nest's own columns instead gives the nest's own vertical distribution, which is the right
+ * profile for the nest's own mesh.
+ *
+ * ncol_min is how many columns the thinnest-sampled layer saw.  A nest that stops below the
+ * domain top leaves the layers above it with no columns whatsoever, and ncol_min is zero:
+ * there is no profile to be had there and the caller has to build the grid another way.
+ *
+ * mf_PH and mf_PHB are z-face MultiFabs whose valid boxes share faces with their vertical
+ * neighbors, so the sum is accumulated over the cells each box bounds rather than over its
+ * faces, which tile the domain exactly.
+ *
+ * @param[in]  mf_PH    perturbation geopotential on z-faces
+ * @param[in]  mf_PHB   base-state geopotential on z-faces
+ * @param[in]  geom     geometry of the level
+ * @param[out] ncol_min fewest columns any one layer was averaged over
+ * @return mean thickness of each of the domain's layers, length Domain().length(2)
+ */
+amrex::Vector<amrex::Real>
+wrf_mean_layer_thickness (const MultiFab& mf_PH,
+                          const MultiFab& mf_PHB,
+                          const Geometry& geom,
+                          Long& ncol_min)
+{
+    const Box& domain = geom.Domain();
+    const int  klo    = domain.smallEnd(2);
+    const int  nlay   = domain.length(2);
+
+    Gpu::DeviceVector<Real> d_sum(nlay, zero);
+    Real* dptr = d_sum.dataPtr();
+
+    Vector<Long> ncol(nlay, 0);
+
+    for (MFIter mfi(mf_PH); mfi.isValid(); ++mfi)
+    {
+        Box bx = mfi.validbox();
+        bx.setBig(2, bx.bigEnd(2)-1);   // the cells this z-face box bounds
+        if (!bx.ok()) { continue; }
+
+        // Count the columns this box contributes to each of the layers it spans.  Boxes
+        // stacked in z share an (i,j) footprint, so the count has to be per layer: for any
+        // one layer exactly one box of each vertical stack contributes.
+        const Long nxy = static_cast<Long>(bx.length(0)) * static_cast<Long>(bx.length(1));
+        for (int k(bx.smallEnd(2)); k<=bx.bigEnd(2); ++k) { ncol[k-klo] += nxy; }
+
+        const Array4<const Real>&  ph_arr = mf_PH.const_array(mfi);
+        const Array4<const Real>& phb_arr = mf_PHB.const_array(mfi);
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+        {
+            const Real dz = ( (ph_arr(i,j,k+1) + phb_arr(i,j,k+1))
+                            - (ph_arr(i,j,k  ) + phb_arr(i,j,k  )) ) / CONST_GRAV;
+            Gpu::Atomic::AddNoRet(&dptr[k-klo], dz);
+        });
+    }
+    Gpu::streamSynchronize();
+
+    Vector<Real> prof(nlay);
+    Gpu::copy(Gpu::deviceToHost, d_sum.begin(), d_sum.end(), prof.begin());
+    ParallelDescriptor::ReduceRealSum(prof.dataPtr(), nlay);
+    ParallelDescriptor::ReduceLongSum(ncol.dataPtr(), nlay);
+
+    ncol_min = std::numeric_limits<Long>::max();
+    for (int k(0); k<nlay; ++k) {
+        ncol_min = std::min(ncol_min, ncol[k]);
+        prof[k]  = (ncol[k] > 0) ? prof[k] / static_cast<Real>(ncol[k]) : zero;
+    }
+
+    return prof;
+}
+
+} // namespace
+
 /**
  * ERF function that initializes data from a WRF dataset
  *
  * @param lev Integer specifying the current level
  * @param mf_PSFC MultiFab storing surface pressure for this level
+ * @param read_atmos_state If true, read and remap the atmospheric state, build the base
+ *                         state and read the boundary data as well as the surface fields.
+ *                         If false, read only the surface fields and build the terrain from
+ *                         them, leaving the atmospheric state for the caller to fill by
+ *                         interpolation from the coarse level.
  */
 void
-ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
+ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev, bool read_atmos_state)
 {
     if (nc_init_file.empty()) {
         amrex::Error("NetCDF initialization file name must be provided via input");
     }
 
-    bool use_moist = (solverChoice.moisture_type != MoistureType::None);
+    // Leaving the atmospheric state to the caller only makes sense at a level that has a
+    // coarser level to interpolate from; at level 0 there would be nothing to fill it with.
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(read_atmos_state || lev > 0,
+        "init_from_wrfinput: the atmospheric state can only be left to the caller at lev > 0");
+
+    bool use_moist = (solverChoice.moisture_type != MoistureType::None) && read_atmos_state;
     bool use_lsm   = (solverChoice.lsm_type != LandSurfaceType::None);
 
     // *** FArrayBox's at this level for holding the INITIAL data
+    //
+    // The atmospheric fields are read only when we are filling the atmospheric state here.
+    // On the interp_atmos_from_coarse path they are supplied by FillCoarsePatch instead, so
+    // reading them would cost a NetCDF read and a MultiFab per field and then throw the
+    // result away.  The surface fields below are read on both paths.
     Vector<std::string> NC_names;
-    NC_names.push_back("ALB");       // 0 DO RHO FIRST
-    NC_names.push_back("AL");        // 1 DO RHO FIRST
-    NC_names.push_back("ALT");       // 2 DO RHO FIRST
-    NC_names.push_back("U");         // 3
-    NC_names.push_back("V");         // 4
-    NC_names.push_back("W");         // 5
-    NC_names.push_back("THM");       // 6
-    NC_names.push_back("PH");        // 7
-    NC_names.push_back("PHB");       // 8
-    NC_names.push_back("PB");        // 9
-    NC_names.push_back("P");         // 10
-    NC_names.push_back("PSFC");      // 11
-    NC_names.push_back("MUB");       // 12
-    NC_names.push_back("MAPFAC_U");  // 13
-    NC_names.push_back("MAPFAC_V");  // 14
-    NC_names.push_back("MAPFAC_M");  // 15
-    NC_names.push_back("SST");       // 16
-    NC_names.push_back("TSK");       // 17
-    NC_names.push_back("LANDMASK");  // 18
-    NC_names.push_back("C1H");       // 19
-    NC_names.push_back("C2H");       // 20
-    NC_names.push_back("RDNW");      // 21
-    NC_names.push_back("XLAT_V");    // 22
-    NC_names.push_back("XLONG_U");   // 23
+    if (read_atmos_state) {
+        NC_names.push_back("ALB");   // DO RHO FIRST
+        NC_names.push_back("AL");    // DO RHO FIRST
+        NC_names.push_back("ALT");   // DO RHO FIRST
+        NC_names.push_back("U");
+        NC_names.push_back("V");
+        NC_names.push_back("W");
+        NC_names.push_back("THM");
+    }
+    NC_names.push_back("PH");
+    NC_names.push_back("PHB");
+    if (read_atmos_state) {
+        NC_names.push_back("PB");
+        NC_names.push_back("P");
+    }
+    NC_names.push_back("PSFC");
+    NC_names.push_back("MUB");
+    NC_names.push_back("MAPFAC_U");
+    NC_names.push_back("MAPFAC_V");
+    NC_names.push_back("MAPFAC_M");
+    NC_names.push_back("SST");
+    NC_names.push_back("TSK");
+    NC_names.push_back("LANDMASK");
+    NC_names.push_back("C1H");
+    NC_names.push_back("C2H");
+    NC_names.push_back("RDNW");
+    NC_names.push_back("XLAT");
+    NC_names.push_back("XLONG");
     if (use_moist) {
         NC_names.push_back("QVAPOR");
         NC_names.push_back("QCLOUD");
@@ -398,11 +506,14 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
 
     // NOTE: These temporaries keep us from overwriting the lev==0 wrf data that is
     //       stored for the BDY operations.
-    MultiFab* mf_C1H;
-    MultiFab* mf_C2H;
-    MultiFab* mf_RDNW;
-    MultiFab* mf_MUB;
-    MultiFab* mf_PHB;
+    // Each is set when the matching variable is read below; the code that uses
+    // them is guarded by the flag that the read sets, so start them at null
+    // rather than leaving them indeterminate.
+    MultiFab* mf_C1H  = nullptr;
+    MultiFab* mf_C2H  = nullptr;
+    MultiFab* mf_RDNW = nullptr;
+    MultiFab* mf_MUB  = nullptr;
+    MultiFab* mf_PHB  = nullptr;
     MultiFab  C1H_tmp;
     MultiFab  C2H_tmp;
     MultiFab  RDNW_tmp;
@@ -479,7 +590,8 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
 
     const Real l_rdOcp = solverChoice.rdOcp;
 
-    Print() << "Loading initial data from NetCDF file at level " << lev << "\n";
+    Print() << (read_atmos_state ? "Loading initial data" : "Loading surface data")
+            << " from NetCDF file at level " << lev << "\n";
     for (int idx = 0; idx < num_boxes_at_level[lev]; idx++) {
         Print() << "Reading from file " << nc_init_file[lev][idx] << "\n";
 
@@ -571,24 +683,6 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
                 }
 
                 Box subdomain_to_fill_typed(convert(subdomain_tmp,var_fab_from_file.box().ixType()));
-
-                // XLONG_U and XLAT_V are edge-staggered in the file (west_east_stag /
-                // south_north_stag, so nx+1 / ny+1 entries) but their fabs carry CELL
-                // index type, so the typed subdomain -- and hence the intersection copy
-                // below -- would drop the last staggered column/row. Keep it here so the
-                // ghost fill further down can pick up the true east/north edge: a coupled
-                // ocean model consumes lon_m/lat_m as a corner mesh through
-                // ERF::GetOceanToAtmosCornerCoordinates, and duplicating the neighbour
-                // instead collapses the outermost corner quads to zero area.
-                // NOTE: var_fab keeps CELL index type; only its extent is widened.
-                if (var_name == "XLONG_U" &&
-                    var_fab_from_file.box().bigEnd(0) > subdomain_to_fill_typed.bigEnd(0)) {
-                    subdomain_to_fill_typed.growHi(0,1);
-                }
-                if (var_name == "XLAT_V" &&
-                    var_fab_from_file.box().bigEnd(1) > subdomain_to_fill_typed.bigEnd(1)) {
-                    subdomain_to_fill_typed.growHi(1,1);
-                }
 
                 // *********************************************************************
                 // Decide whether this particular field has to be interpolated in the
@@ -742,14 +836,11 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
             {
                 for ( MFIter mfi(lev_new[Vars::cons], false); mfi.isValid(); ++mfi )
                 {
-                    FArrayBox* cur_fab;
-                    if (var_name == "U") {
-                      cur_fab  = &lev_new[Vars::xvel][mfi];
-                    } else if (var_name == "V") {
-                      cur_fab  = &lev_new[Vars::yvel][mfi];
-                    } else if (var_name == "W") {
-                      cur_fab  = &lev_new[Vars::zvel][mfi];
-                    }
+                    // The enclosing test admits only U, V and W, so the last
+                    // case is W and cur_fab is always set.
+                    FArrayBox* cur_fab = (var_name == "U") ? &lev_new[Vars::xvel][mfi] :
+                                         (var_name == "V") ? &lev_new[Vars::yvel][mfi] :
+                                                             &lev_new[Vars::zvel][mfi];
 
                     if (success) {
                         cur_fab->template copy<RunOn::Device>(var_fab, 0, 0, 1);
@@ -991,15 +1082,9 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
           }
 
           // Initialize Latitude & Coriolis factors
-          if ( var_name == "XLAT_V" ) {
-              // var_fab retains XLAT_V's staggered row at j = ny (see the growHi above),
-              // so clamp lat_m against var_fab's own extent to give the j = ny ghost the
-              // true north edge instead of a copy of row ny-1.
-              // sinPhi_m/cosPhi_m deliberately stay on the cell-domain clamp: they are
-              // cell-centred Coriolis factors whose ghosts are read at the hi domain
-              // faces by ERF_MakeMomSources.cpp, and this fix is not meant to move the
-              // Coriolis source. So sin_arr/cos_arr do not track lat_m in that one row.
-              int vf_j_hi = var_fab.box().bigEnd(1);
+          if ( var_name == "XLAT" ) {
+              // XLAT is cell centered, so a consumer that wants the mass point
+              // can use it directly.
               lat_m[lev]    = std::make_unique<MultiFab>(ba2d[lev],dm,1,ngv);
               sinPhi_m[lev] = std::make_unique<MultiFab>(ba2d[lev],dm,1,ngv);
               cosPhi_m[lev] = std::make_unique<MultiFab>(ba2d[lev],dm,1,ngv);
@@ -1013,8 +1098,7 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
                   {
                       int li = amrex::min(amrex::max(i, i_lo), i_hi);
                       int lj = amrex::min(amrex::max(j, j_lo), j_hi);
-                      int sj = amrex::min(amrex::max(j, j_lo), vf_j_hi);
-                      dst_arr(i,j,0) = src_arr(li,sj,0);
+                      dst_arr(i,j,0) = src_arr(li,lj,0);
 
                       Real lat_rad = src_arr(li,lj,0) * (PI/Real(180.));
                       sin_arr(i,j,0) = std::sin(lat_rad);
@@ -1024,11 +1108,8 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
           }
 
           // Initialize Longitude
-          if ( var_name == "XLONG_U" ) {
-              // var_fab retains XLONG_U's staggered column at i = nx (see the growHi
-              // above), so clamp lon_m against var_fab's own extent to give the i = nx
-              // ghost the true east edge instead of a copy of column nx-1.
-              int vf_i_hi = var_fab.box().bigEnd(0);
+          if ( var_name == "XLONG" ) {
+              // XLONG is cell centered too; see the comment on XLAT above
               lon_m[lev] = std::make_unique<MultiFab>(ba2d[lev],dm,1,ngv);
               for ( MFIter mfi(*(lon_m[lev]), TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
                   Box gtbx = mfi.growntilebox();
@@ -1036,7 +1117,7 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
                   const Array4<const Real>& src_arr = var_fab.const_array();
                   ParallelFor(gtbx, [=] AMREX_GPU_DEVICE (int i, int j, int) noexcept
                   {
-                      int li = amrex::min(amrex::max(i, i_lo), vf_i_hi);
+                      int li = amrex::min(amrex::max(i, i_lo), i_hi);
                       int lj = amrex::min(amrex::max(j, j_lo), j_hi);
                       dst_arr(i,j,0) = src_arr(li,lj,0);
                   });
@@ -1132,36 +1213,36 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
               auto &lsm_wrfmap = lsm.Get_WRFInputNames();
               for (auto &var : lsm_wrfmap) {
                   if (var_name == var.first) {
-                      bool is_3d = var_fab.box().length(2) > 1;
+                      bool is_3d = var_fab_from_file.box().length(2) > 1;
                       amrex::Print() << "   Reading " << ((is_3d) ? "3D" : "2D") << " LSM variable '" << var.first << "' (" << var.second << ")" << std::endl;
                       int lsm_idx = lsm.Get_DataIdx(lev, var.second);
                       AMREX_ALWAYS_ASSERT_WITH_MESSAGE(lsm_idx != -1, "LSM variable mapping invalid!");
                       AMREX_ALWAYS_ASSERT(lsm_data[lev][lsm_idx]);
 
                       int lsm_nsoil = lsm.Get_Lsm_Geom(lev).Domain().length(2);
-                      amrex::Print() << " LSM NZ = " << lsm_nsoil << " WRFINPUT NZ = " << var_fab.box().length(2) << std::endl;
+                      amrex::Print() << " LSM NZ = " << lsm_nsoil << " WRFINPUT NZ = " << var_fab_from_file.box().length(2) << std::endl;
                       if (is_3d) {
-                        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(lsm_nsoil == var_fab.box().length(2), "Number of soil layers must match!");
+                        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(lsm_nsoil == var_fab_from_file.box().length(2), "Number of soil layers must match!");
                       }
 
                       // check for special case of single column data (such as soil thickness ZS, DZS)
                       //  the single column is duplicated across all grid points
-                      bool is_column = var_fab.box().length(0) == 1 && var_fab.box().length(1) == 1;
+                      bool is_column = var_fab_from_file.box().length(0) == 1 && var_fab_from_file.box().length(1) == 1;
 
                       for ( MFIter mfi(*lsm_data[lev][lsm_idx], TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
                           Box gtbx = mfi.tilebox();
                           int lsm_khi = gtbx.bigEnd(2);
-                          gtbx.setRange(2, 0, var_fab.box().length(2));
+                          gtbx.setRange(2, 0, var_fab_from_file.box().length(2));
                           const Array4<      Real>& dst_arr = lsm_data[lev][lsm_idx]->array(mfi);
-                          const Array4<const Real>& src_arr = var_fab.const_array();
+                          const Array4<const Real>& src_arr = var_fab_from_file.const_array();
                           ParallelFor(gtbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
                           {
                               int li = amrex::min(amrex::max(i, i_lo), i_hi);
                               int lj = amrex::min(amrex::max(j, j_lo), j_hi);
                               if (is_column) {
                                 // single column src input is copied to all i,j in dst
-                                li = 0;
-                                lj = 0;
+                                li = i_lo;
+                                lj = j_lo;
                               }
                               // Note: LSM z levels are at negative k below surface
                               //  map [0, nsoil-1] to [-1, -nsoil]
@@ -1279,41 +1360,50 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
     } // idx
 
     // Convert the velocities using the map factors
-    for ( MFIter mfi(lev_new[Vars::xvel], TilingIfNotGPU()); mfi.isValid(); ++mfi )
-    {
-        Box bx = mfi.tilebox();
-        const Array4<      Real>& dst_arr = lev_new[Vars::xvel].array(mfi);
-        const Array4<const Real>& src_arr = mapfac[lev][MapFacType::u_x]->const_array(mfi);
-        ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
+    //
+    // NOTE: only the velocities read from the file need this.  On the
+    //       interp_atmos_from_coarse path they are filled from the coarse level after this
+    //       function returns, already in ERF's units.
+    if (read_atmos_state) {
+        for ( MFIter mfi(lev_new[Vars::xvel], TilingIfNotGPU()); mfi.isValid(); ++mfi )
         {
-            dst_arr(i,j,k) /= src_arr(i,j,0);
-        });
-    }
-    for ( MFIter mfi(lev_new[Vars::yvel], TilingIfNotGPU()); mfi.isValid(); ++mfi )
-    {
-        Box bx = mfi.tilebox();
-        const Array4<      Real>& dst_arr = lev_new[Vars::yvel].array(mfi);
-        const Array4<const Real>& src_arr = mapfac[lev][MapFacType::v_x]->const_array(mfi);
-        ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
+            Box bx = mfi.tilebox();
+            const Array4<      Real>& dst_arr = lev_new[Vars::xvel].array(mfi);
+            const Array4<const Real>& src_arr = mapfac[lev][MapFacType::u_x]->const_array(mfi);
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
+            {
+                dst_arr(i,j,k) /= src_arr(i,j,0);
+            });
+        }
+        for ( MFIter mfi(lev_new[Vars::yvel], TilingIfNotGPU()); mfi.isValid(); ++mfi )
         {
-            dst_arr(i,j,k) /= src_arr(i,j,0);
-        });
-    }
-    for ( MFIter mfi(lev_new[Vars::zvel], TilingIfNotGPU()); mfi.isValid(); ++mfi )
-    {
-        Box bx = mfi.tilebox();
-        const Array4<      Real>& dst_arr = lev_new[Vars::zvel].array(mfi);
-        const Array4<const Real>& src_arr = mapfac[lev][MapFacType::m_x]->const_array(mfi);
-        ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
+            Box bx = mfi.tilebox();
+            const Array4<      Real>& dst_arr = lev_new[Vars::yvel].array(mfi);
+            const Array4<const Real>& src_arr = mapfac[lev][MapFacType::v_x]->const_array(mfi);
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
+            {
+                dst_arr(i,j,k) /= src_arr(i,j,0);
+            });
+        }
+        for ( MFIter mfi(lev_new[Vars::zvel], TilingIfNotGPU()); mfi.isValid(); ++mfi )
         {
-            dst_arr(i,j,k) /= src_arr(i,j,0);
-        });
-    }
+            Box bx = mfi.tilebox();
+            const Array4<      Real>& dst_arr = lev_new[Vars::zvel].array(mfi);
+            const Array4<const Real>& src_arr = mapfac[lev][MapFacType::m_x]->const_array(mfi);
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
+            {
+                dst_arr(i,j,k) /= src_arr(i,j,0);
+            });
+        }
+    } // read_atmos_state
 
     // **************************************************************************
     // Compute min and max of terrain
     // **************************************************************************
     if (compute_terrain_here) {
+        // compute_terrain_here is only left true when PHB was read, which is
+        // what sets mf_PHB; everything below dereferences it.
+        AMREX_ALWAYS_ASSERT(mf_PHB != nullptr);
         if (lev == 0) {
             AMREX_ALWAYS_ASSERT(solverChoice.terrain_type == TerrainType::StaticFittedMesh);
             z_top = compute_terrain_top_and_bottom(mf_PH, *mf_PHB, geom[lev].Domain());
@@ -1324,6 +1414,45 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
         // **************************************************************************
         // Initialize the terrain itself
         // **************************************************************************
+
+        // Determine if we need the fine terrain pathway for STF/Sullivan on lev > 0
+        ParmParse pp("erf");
+        int terrain_smoothing = 0;
+        pp.query("terrain_smoothing", terrain_smoothing);
+
+        FineTerrain fine_terrain = FineTerrain::None;
+        MultiFab z_phys_interp;
+
+        if (lev > 0 && terrain_smoothing != 0 && !solverChoice.avg_grid_faces_to_nodes) {
+            // Determine fine terrain mode
+            fine_terrain = which_fine_terrain();
+
+            // When reading terrain from wrfinput files, we must use Transform mode to blend
+            // the fine terrain detail onto the interpolated coarse mesh. Interpolate mode
+            // would leave a mismatch between the fine terrain surface (from wrfinput_d0N) and
+            // the interpolated coarse mesh above it, causing grid inconsistencies and NaNs.
+            // NOTE: This transform requirement does not apply when avg_grid_faces_to_nodes = true,
+            //       which uses a different terrain handling path.
+            if (fine_terrain != FineTerrain::Transform) {
+                Abort("terrain_smoothing = " + std::to_string(terrain_smoothing) +
+                      " with wrfinput initialization on level > 0 requires "
+                      "erf.amr_terrain_refinement = transform (not interpolate)");
+            }
+
+            // Interpolate coarse mesh to fine level first
+            InterpFromCoarseLevel(*z_phys_nd[lev], z_phys_nd[lev]->nGrowVect(),
+                                  IntVect(0,0,0),
+                                  *z_phys_nd[lev-1], 0, 0, 1,
+                                  geom[lev-1], geom[lev],
+                                  refRatio(lev-1), &node_bilinear_interp,
+                                  domain_bcs_type, BCVars::cons_bc);
+
+            // Save interpolated mesh before terrain overwrites k=0 slab
+            z_phys_interp.define(z_phys_nd[lev]->boxArray(), z_phys_nd[lev]->DistributionMap(),
+                                 1, z_phys_nd[lev]->nGrowVect());
+            MultiFab::Copy(z_phys_interp, *z_phys_nd[lev], 0, 0, 1, 0);
+        }
+
         Real dz0_max;
         init_terrain_from_wrfinput(lev, geom[lev], z_top, boxes_at_level[lev][0], z_phys_nd[lev].get(),
                                    mf_PH, *mf_PHB, dz0_max, solverChoice.avg_grid_faces_to_nodes);
@@ -1334,45 +1463,166 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
 #else
             const Real tol = Real(1.e-8);
 #endif
-            Real SFact = Real(1.03);
-            Real Nz = static_cast<Real>(zlevels_stag[lev].size() - 1);
+            const int nlay = static_cast<int>(zlevels_stag[lev].size()) - 1;
 
-            // Default to uniform grid or solve for a stretched grid
-            if (dz0_max >= z_top/Nz) {
-                SFact   = one;
-                dz0_max = z_top/Nz;
-            } else {
-                int max_iter = 50;
-                int iter     = 0;
-                Real F       = dz0_max * ( (std::pow(SFact,Nz) - one) / (SFact - one) ) - z_top;
-                while (std::fabs(F)>tol && iter<max_iter) {
-                    Real dFdSF = dz0_max * ( Nz * std::pow(SFact,Nz-one) * (SFact - one)
-                                           - std::pow(SFact,Nz) + one ) /
-                                           std::pow(SFact-one,two);
-                    SFact     -= F/dFdSF;
-                    SFact      = std::max(one+tol,SFact);
-                    F          = dz0_max * ( (std::pow(SFact,Nz) - one) / (SFact - one) ) - z_top;
-                    ++iter;
+            //
+            // Two constructions are available, chosen by erf.wrfinput_zlevels_from_file.
+            //
+            // The default takes the file's own domain-mean layer thicknesses and rescales them
+            //    to reach z_top.  The alternative, which is what ERF did before and what
+            //    erf_grid_utils::geometric_stretch still provides for the idealized case in
+            //    which dz0 and the domain height are what is known a priori, anchors dz0 to the
+            //    *maximum* over columns of the file's first layer thickness and applies one
+            //    geometric stretch.  A wrfinput first layer is deliberately thicker than the
+            //    layers just above it -- 17.78 m over 9.09 m in the domain mean on the WPS test
+            //    case -- so anchoring to it and only growing makes every ERF layer through the
+            //    boundary layer about 2.2x thicker than the file's, discarding over half the
+            //    vertical resolution the file provided exactly where an atmospheric model wants
+            //    it, while ending up finer than the file aloft.  A single geometric stretch
+            //    cannot do better: the file's own stretch ratio rises to ~1.031 in
+            //    mid-troposphere and relaxes to ~1.004 near the top, which one constant factor
+            //    cannot represent.
+            //
+            // Either way the result is a single 1-D array draped by make_terrain_fitted_coords,
+            //    so the mesh is exactly as smooth in the horizontal as it has always been; what
+            //    the default changes is the vertical distribution.
+            //
+            bool use_file_profile = solverChoice.wrfinput_zlevels_from_file;
+
+            Vector<Real> dz_prof;
+            if (use_file_profile) {
+                Long ncol_min = 0;
+                dz_prof = wrf_mean_layer_thickness(mf_PH, *mf_PHB, geom[lev], ncol_min);
+                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(static_cast<int>(dz_prof.size()) == nlay,
+                    "The mean layer-thickness profile does not match the number of ERF layers");
+
+                const Long ncol_domain = static_cast<Long>(geom[lev].Domain().length(0)) *
+                                         static_cast<Long>(geom[lev].Domain().length(1));
+
+                // A nest that stops below the domain top has no columns at all in the layers
+                //    above it, so there is no profile to build a grid from up there and this
+                //    level falls back to geometric stretching, which needs only its own dz0.
+                if (ncol_min == 0) {
+                    Print() << "NOTE: the grids at level " << lev << " do not reach the top of the "
+                               "domain, so the file's layer-thickness profile is undefined over "
+                               "part of the column; building this level's vertical grid by "
+                               "geometric stretching instead.\n";
+                    use_file_profile = false;
+                } else if (ncol_min < ncol_domain) {
+                    Print() << "NOTE: the grids at level " << lev << " cover " << ncol_min << " of "
+                            << ncol_domain << " columns, so this level's layer-thickness profile is "
+                               "the mean over its own region rather than over the whole domain.\n";
                 }
-                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(std::fabs(F) <= tol,
-                                                 "Newton iterations to determine the grid stretching factor failed!\n");
             }
 
-            // Build the zlevels
-            Print() << "Building an ERF grid with dz0: " << dz0_max <<
-                " and stretching factor: " << SFact << "\n";
-            Real dz = dz0_max;
-            zlevels_stag[lev][0] = zero;
-            for (int k(1); k<zlevels_stag[lev].size(); ++k) {
-                zlevels_stag[lev][k] = zlevels_stag[lev][k-1] + dz;
-                dz *= SFact;
+            if (use_file_profile) {
+                Real dz_tot = zero;
+                for (int k(0); k<nlay; ++k) {
+                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(dz_prof[k] > zero,
+                        "Non-positive mean layer thickness in the wrfinput vertical grid");
+                    dz_tot += dz_prof[k];
+                }
+
+                //
+                // z_top and the mean depth of the file's column are not the same number, so the
+                //    profile has to be stretched to fit.  Absorb that difference ALOFT rather than
+                //    spreading it uniformly, so the near-surface layers keep the thicknesses the file
+                //    actually has: the weight w(k) = 1 + a*s(k) is unity at the surface and grows
+                //    linearly with the height fraction s, chosen so the column closes exactly.
+                //
+                // This leaves the profile as smooth as the file's own.  w multiplies the stretch
+                //    ratio by w(k+1)/w(k), and since s advances by at most dz_top/depth ~ 0.012 per
+                //    layer the perturbation is order a*ds ~ 1e-3, far below the ratio's own variation.
+                //
+                Vector<Real> sfrac(nlay, zero);
+                {
+                    Real c = zero;
+                    for (int k(0); k<nlay; ++k) { sfrac[k] = c/dz_tot; c += dz_prof[k]; }
+                }
+                Real wsum = zero;
+                for (int k(0); k<nlay; ++k) { wsum += sfrac[k]*dz_prof[k]; }
+
+                Real a_ramp     = (wsum > zero) ? (z_top - dz_tot)/wsum : zero;
+                bool ramp_closes = true;
+
+                // The weight has to stay positive.  It is smallest at the top, where s is largest,
+                //    so this only bites when z_top is far below the file's own column depth.
+                if (one + a_ramp*sfrac[nlay-1] < Real(0.1)) {
+                    Print() << "WARNING: z_top (" << z_top << " m) is far below the mean depth of the "
+                               "wrfinput column (" << dz_tot << " m); the profile cannot be closed by "
+                               "stretching aloft alone, so it is rescaled uniformly instead and the "
+                               "near-surface layers will not match the file.\n";
+                    a_ramp      = zero;
+                    ramp_closes = false;
+                }
+                const Real zscale = ramp_closes ? one : z_top/dz_tot;
+
+                zlevels_stag[lev][0] = zero;
+                for (int k(1); k<=nlay; ++k) {
+                    const Real w = zscale * (one + a_ramp*sfrac[k-1]);
+                    zlevels_stag[lev][k] = zlevels_stag[lev][k-1] + w*dz_prof[k-1];
+                }
+                zlevels_stag[lev][nlay] = z_top;
+
+                // Report the grid that was actually built, and how smooth it is.  The mean over the
+                //    domain is smooth in k even though individual columns are not, so a ratio far
+                //    from 1 above the surface layer would mean this file is unlike the ones this has
+                //    been exercised on and the mesh deserves a look.
+                // A column of fewer than three layers has no ratio above the surface layer
+                //    to report, so leave the range at unity rather than printing the
+                //    sentinels the loop would otherwise leave behind.
+                Real r_min = one;
+                Real r_max = one;
+                for (int k(1); k<nlay-1; ++k) {
+                    const Real r = (zlevels_stag[lev][k+2] - zlevels_stag[lev][k+1])
+                                 / (zlevels_stag[lev][k+1] - zlevels_stag[lev][k  ]);
+                    if (k == 1) {
+                        r_min = r;
+                        r_max = r;
+                    } else {
+                        r_min = std::min(r_min,r);
+                        r_max = std::max(r_max,r);
+                    }
+                }
+                const Real built_dz0 = zlevels_stag[lev][1]      - zlevels_stag[lev][0];
+                const Real built_dzt = zlevels_stag[lev][nlay]   - zlevels_stag[lev][nlay-1];
+                Print() << "Building an ERF grid from the mean wrfinput layer profile: dz0 "
+                        << built_dz0 << " m (file's own " << dz_prof[0] << " m), dz_top "
+                        << built_dzt << " m (file's own " << dz_prof[nlay-1] << " m)\n";
+                Print() << "    the " << (z_top - dz_tot) << " m by which z_top exceeds the file's mean"
+                        << " column depth is absorbed aloft: layers are stretched by 0% at the surface"
+                        << " and " << Real(100)*a_ramp*sfrac[nlay-1] << "% at the top\n";
+                Print() << "    layer-to-layer stretch ratio above the surface layer is in ["
+                        << r_min << ", " << r_max << "]"
+                        << "    (thickest first layer over the domain was " << dz0_max << " m)\n";
+                if (r_min < Real(0.5) || r_max > Real(2.0)) {
+                    Print() << "WARNING: the mean vertical profile of this file is not smooth in k "
+                               "(stretch ratio outside [0.5, 2]); the ERF mesh inherits that.\n";
+                }
+
+            } else {
+                //
+                // Solve for the geometric stretch factor that fills the domain with nlay layers
+                //    whose first is dz0_max thick.  The solve lives in Source/Utils so that an
+                //    idealized case, where dz0 and the domain height are the knowns, can use it
+                //    without going through the wrfinput path.
+                //
+                const erf_grid_utils::GeometricStretch gs =
+                    erf_grid_utils::build_geometric_zlevels(zlevels_stag[lev], dz0_max, z_top, tol);
+                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(gs.converged,
+                    "Newton iterations to determine the grid stretching factor failed!\n");
+                Print() << "Building an ERF grid with dz0: " << gs.dz0 <<
+                    " and stretching factor: " << gs.ratio << "\n";
             }
+
             AMREX_ALWAYS_ASSERT_WITH_MESSAGE(std::fabs(zlevels_stag[lev].back() - z_top) <= tol,
                 "Top of zlevels_stag does not match z_top!\n");
 
             // Update stretched dz and build terrain fitted coords
             update_stretched_dz(lev, zlevels_stag, stretched_dz_h, stretched_dz_d);
-            make_terrain_fitted_coords(lev, geom[lev], *z_phys_nd[lev], zlevels_stag[lev], phys_bc_type);
+            make_terrain_fitted_coords(lev, geom[lev], *z_phys_nd[lev], zlevels_stag[lev], phys_bc_type,
+                                       fine_terrain,
+                                       (fine_terrain == FineTerrain::Transform) ? &z_phys_interp : nullptr);
         }
 
         // **************************************************************************
@@ -1381,10 +1631,22 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
         make_J    (geom[lev],*z_phys_nd[lev],*detJ_cc[lev]);
         make_areas(geom[lev],*z_phys_nd[lev],*ax[lev],*ay[lev],*az[lev]);
         make_zcc  (geom[lev],*z_phys_nd[lev],*z_phys_cc[lev]);
+    }
+
+    // **************************************************************************
+    // Interpolate the data to the grid
+    //
+    // NOTE: This remaps the atmospheric state from WRF's vertical grid onto ERF's, so it
+    //       runs only when we read that state above.  On the interp_atmos_from_coarse path
+    //       there is nothing here to remap -- the state arrives from the coarse level, on
+    //       ERF's grid already, after this function returns.
+    // **************************************************************************
+    if (compute_terrain_here && read_atmos_state) {
+        // Set together with compute_terrain_here when PHB was read; the remap
+        // below dereferences it.
+        AMREX_ALWAYS_ASSERT(mf_PHB != nullptr);
 
         // **************************************************************************
-        // Interpolate the data to the grid
-        //
         // NOTE: When keeping the WRF grid, we really only need to interpolate
         //       the highest level values, due to enforcing z_top. When using
         //       the ERF grid, interpolation is required everywhere.
@@ -1467,8 +1729,24 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
         MultiFab::Copy(xvel_tmp, lev_new[Vars::xvel], 0, 0, 1    , 0);
         MultiFab::Copy(yvel_tmp, lev_new[Vars::yvel], 0, 0, 1    , 0);
 
+        //
+        // The cell-centered remap below only assigns a value when it finds a wrfinput
+        //    interval bracketing the destination height.  A cell whose z_cc falls outside
+        //    the source column keeps whatever the read left there, which is WRF's value at
+        //    the same *index* rather than at the same height.  Record where that happens:
+        //      1  below the source column, in the bottom plane (expected: ERF's lowest
+        //         z_cc sits below WRF's first mass level, half a layer above the terrain)
+        //      3  below the source column, above the bottom plane (not expected)
+        //      2  above the source column
+        //      4  outside the source column with fewer than two source levels in the box,
+        //         so not even extrapolated (not expected)
+        //
+        MultiFab remap_flag(lev_new[Vars::cons].boxArray(), lev_new[Vars::cons].DistributionMap(), 1, 0);
+        remap_flag.setVal(0.);
+
         for (MFIter mfi(lev_new[Vars::cons], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
             const Box& bx  = mfi.tilebox();
+            const Array4<Real>& remap_flag_arr = remap_flag.array(mfi);
             const Box& bxx = mfi.tilebox(IntVect(1,0,0));
             const Box& bxy = mfi.tilebox(IntVect(0,1,0));
 
@@ -1509,6 +1787,10 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
                     ( ph_arr(i,j,kstart  ) + phb_arr(i,j,kstart  ) +
                       ph_arr(i,j,kstart+1) + phb_arr(i,j,kstart+1)) / CONST_GRAV;
 
+                // The loop below walks z_lo_src up the column, so keep the bottom of the
+                //    source column now; it is what tells the end policy which end it is at.
+                const Real z_first = z_lo_src;
+
                 bool found = false;
                 int kend   = kstart;
                 for (int lk(kstart+1); lk<=khi_src; ++lk) {
@@ -1534,6 +1816,70 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
                         Real cons_lo = cons_tmp_arr(i,j,kstart,icons);
                         cons_arr(i,j,k,icons) = ( cons_hi - cons_lo ) * dz_rat + cons_lo;
                     }
+                } else {
+                    //
+                    // The destination height lies outside the wrfinput column.  Extrapolate
+                    //    from the two nearest source levels rather than leaving the cell
+                    //    holding whatever the read put at this index, which belongs to a
+                    //    different height entirely.
+                    //
+                    // What gets extrapolated are the PRIMITIVES, not the conserved products.
+                    //    theta rises smoothly through the stratosphere and is well fitted by a
+                    //    straight line, whereas rho*theta carries the density's exponential
+                    //    decay and is not.  Every other primitive is held at the nearest source
+                    //    level: moisture up there is ~0 and its vertical gradient is noise, so a
+                    //    linear fit manufactures negatives more readily than it captures
+                    //    structure, and a zeroth-order hold preserves the sign of whatever it
+                    //    copies without needing a clamp.
+                    //
+                    // Density is extrapolated linearly, which is accurate to a few tenths of a
+                    //    percent over the ~250 m involved at the top of this grid, and is in any
+                    //    case only a seed: rebalance_columns re-derives rho from theta and a
+                    //    marched pressure, which is what makes these cells hydrostatic.  That
+                    //    delegation is why erf.rebalance_wrf_input = false warns below.
+                    //
+                    const bool below = (z_dst < z_first);
+
+                    // Two nearest source levels, and which of them is nearest to z_dst
+                    const int ks = (below) ? klo        : khi_src - 1;
+                    const int ke = (below) ? klo + 1    : khi_src;
+                    const int kn = (below) ? ks         : ke;
+
+                    if (ke > ks && ks >= klo && ke <= khi_src) {
+                        remap_flag_arr(i,j,k) = (below) ? ((k == klo) ? one : three) : two;
+
+                        const Real z_s = Real(0.5) * ( ph_arr(i,j,ks  ) + phb_arr(i,j,ks  ) +
+                                                       ph_arr(i,j,ks+1) + phb_arr(i,j,ks+1) ) / CONST_GRAV;
+                        const Real z_e = Real(0.5) * ( ph_arr(i,j,ke  ) + phb_arr(i,j,ke  ) +
+                                                       ph_arr(i,j,ke+1) + phb_arr(i,j,ke+1) ) / CONST_GRAV;
+                        const Real dz_rat = (z_dst - z_s) / (z_e - z_s);
+
+                        const Real rho_s = cons_tmp_arr(i,j,ks,Rho_comp);
+                        const Real rho_e = cons_tmp_arr(i,j,ke,Rho_comp);
+                        const Real rho_n = cons_tmp_arr(i,j,kn,Rho_comp);
+
+                        // Linear in rho, floored well below either source value so that a long
+                        //    extrapolation can never drive it non-positive.
+                        Real rho_x = (rho_e - rho_s) * dz_rat + rho_s;
+                        rho_x = amrex::max(rho_x, Real(0.1) * amrex::min(rho_s, rho_e));
+                        cons_arr(i,j,k,Rho_comp) = rho_x;
+
+                        // Linear in theta
+                        const Real th_s = cons_tmp_arr(i,j,ks,RhoTheta_comp) / rho_s;
+                        const Real th_e = cons_tmp_arr(i,j,ke,RhoTheta_comp) / rho_e;
+                        cons_arr(i,j,k,RhoTheta_comp) = rho_x * ((th_e - th_s) * dz_rat + th_s);
+
+                        // Zeroth order in every other primitive
+                        for (int icons(RhoTheta_comp+1); icons<ncons; ++icons) {
+                            cons_arr(i,j,k,icons) = rho_x * (cons_tmp_arr(i,j,kn,icons) / rho_n);
+                        }
+                    } else {
+                        // This box holds fewer than two source levels, so there is nothing
+                        //    to extrapolate from and the cell keeps whatever the read left.
+                        //    Flag it separately rather than counting it as extrapolated,
+                        //    which would report work that did not happen.
+                        remap_flag_arr(i,j,k) = four;
+                    }
                 }
             });
 
@@ -1552,6 +1898,8 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
                       ph_arr(ii ,j,kstart+1) + phb_arr(ii ,j,kstart+1) +
                       ph_arr(iim,j,kstart  ) + phb_arr(iim,j,kstart  ) +
                       ph_arr(iim,j,kstart+1) + phb_arr(iim,j,kstart+1) ) / CONST_GRAV;
+
+                const Real z_first = z_lo_src;
 
                 bool found = false;
                 int kend   = kstart;
@@ -1580,6 +1928,22 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
                     Real xvel_hi = xvel_tmp_arr(i,j,kend  );
                     Real xvel_lo = xvel_tmp_arr(i,j,kstart);
                     xvel_arr(i,j,k) = ( xvel_hi - xvel_lo ) * dz_rat + xvel_lo;
+                } else {
+                    //
+                    // Outside the source column, hold the nearest source level -- the same
+                    //    end policy the cell-centered remap above applies to every primitive
+                    //    but theta.  Theta is extrapolated there because it is smooth and
+                    //    nearly linear through the stratosphere; a wind component is neither,
+                    //    so a linear fit off the end of the column is as likely to invent
+                    //    shear as to capture it, and a hold cannot.
+                    //
+                    // Leaving this to the implicit behavior of the read would be *almost* the
+                    //    same thing -- at k = klo and at the top of the column the value left
+                    //    at this index happens to be the nearest level -- but only almost, and
+                    //    only by coincidence of the indexing.  Say what is meant instead.
+                    //
+                    xvel_arr(i,j,k) = (z_dst < z_first) ? xvel_tmp_arr(i,j,klo)
+                                                        : xvel_tmp_arr(i,j,khi_src);
                 }
             });
 
@@ -1597,6 +1961,8 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
                       ph_arr(i,jj ,kstart+1) + phb_arr(i,jj ,kstart+1) +
                       ph_arr(i,jjm,kstart  ) + phb_arr(i,jjm,kstart  ) +
                       ph_arr(i,jjm,kstart+1) + phb_arr(i,jjm,kstart+1) ) / CONST_GRAV;
+
+                const Real z_first = z_lo_src;
 
                 bool found = false;
                 int kend   = kstart;
@@ -1625,16 +1991,86 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
                     Real yvel_hi = yvel_tmp_arr(i,j,kend  );
                     Real yvel_lo = yvel_tmp_arr(i,j,kstart);
                     yvel_arr(i,j,k) = ( yvel_hi - yvel_lo ) * dz_rat + yvel_lo;
+                } else {
+                    // Outside the source column: hold the nearest source level, as xvel does
+                    //    above and as the cell-centered remap does for every primitive but
+                    //    theta.
+                    yvel_arr(i,j,k) = (z_dst < z_first) ? yvel_tmp_arr(i,j,klo)
+                                                        : yvel_tmp_arr(i,j,khi_src);
                 }
             });
 
         } // mfi
+
+        if (verbose > 0) {
+            auto count_flag = [&] (Real target) -> Real {
+                return ReduceSum(remap_flag, 0,
+                    [=] AMREX_GPU_HOST_DEVICE (Box const& tbx, Array4<Real const> const& f) -> Real
+                    {
+                        Real sum = zero;
+                        amrex::Loop(tbx, [=,&sum] (int i, int j, int k) noexcept
+                        {
+                            if (f(i,j,k) == target) { sum += one; }
+                        });
+                        return sum;
+                    });
+            };
+            Real n_below_klo = count_flag(one);
+            Real n_above     = count_flag(two);
+            Real n_below_int = count_flag(three);
+            Real n_unhandled = count_flag(four);
+            ParallelDescriptor::ReduceRealSum(n_below_klo);
+            ParallelDescriptor::ReduceRealSum(n_above);
+            ParallelDescriptor::ReduceRealSum(n_below_int);
+            ParallelDescriptor::ReduceRealSum(n_unhandled);
+
+            const Real n_tot = static_cast<Real>(geom[lev].Domain().numPts());
+            const Real n_pln = static_cast<Real>(geom[lev].Domain().length(0)) *
+                               static_cast<Real>(geom[lev].Domain().length(1));
+
+            Print() << " " << std::endl;
+            Print() << "Cells whose height lies outside the wrfinput column, and are"
+                    << " therefore extrapolated rather than interpolated:" << std::endl;
+            Print() << "  below the source column, bottom plane : " << n_below_klo
+                    << " of " << n_pln << " (" << Real(100)*n_below_klo/n_pln << "% of that plane)"
+                    << std::endl;
+            Print() << "  below the source column, interior     : " << n_below_int << std::endl;
+            Print() << "  above the source column               : " << n_above << std::endl;
+            const Real n_extrap = n_below_klo + n_below_int + n_above;
+            Print() << "  total                                 : " << n_extrap
+                    << " of " << n_tot << std::endl;
+            Print() << "  (these are extrapolated from the two nearest source levels; theta"
+                    << " linearly, every other primitive held)" << std::endl;
+
+            if (n_unhandled > zero) {
+                Print() << " " << std::endl;
+                Print() << "WARNING: " << n_unhandled << " cells lie outside the wrfinput column "
+                           "in a box that holds fewer than two source levels, so there was "
+                           "nothing to extrapolate from and they keep the value the read left "
+                           "at their index, which belongs to a different height.  This is not "
+                           "expected; it means a grid is only one cell deep in z.\n";
+            }
+
+            if (n_extrap > zero && !solverChoice.rebalance_wrf_input) {
+                Print() << " " << std::endl;
+                Print() << "WARNING: " << n_extrap << " cells lie outside the wrfinput column and "
+                           "have had their density extrapolated linearly, on the understanding "
+                           "that rebalance_columns would re-derive it from theta and a marched "
+                           "pressure.\n";
+                Print() << "         erf.rebalance_wrf_input is false, so that will not happen "
+                           "and those cells are left in whatever hydrostatic state the linear "
+                           "extrapolation produced.  Set erf.rebalance_wrf_input = true, or "
+                           "expect the initial state to be out of hydrostatic balance near the "
+                           "top and bottom of the column.\n";
+            }
+            Print() << " " << std::endl;
+        }
     }
 
     // **************************************************************************
     // Rebalance the WRF state if needed
     // **************************************************************************
-    if (solverChoice.rebalance_wrf_input) {
+    if (read_atmos_state && solverChoice.rebalance_wrf_input) {
         Print() << "The state read from WRF is being rebalanced!\n";
 
         MultiFab rho (lev_new[Vars::cons], make_alias, Rho_comp, 1);
@@ -1665,7 +2101,18 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
 
     // **************************************************************************
     // Initialize the base state
+    //
+    // NOTE: On the interp_atmos_from_coarse path the caller rebuilds the base state
+    //       itself, after this level's terrain has been finalized by init_zphys and
+    //       before it interpolates the (perturbational) atmospheric state from the
+    //       coarse level.  See MakeNewLevelFromCoarse.
     // **************************************************************************
+    if (!read_atmos_state) {
+        Print() << "Surface-only initialization from wrfinput complete at level " << lev << ".\n";
+        Print() << "The atmospheric state and the base state will be built by the caller.\n";
+        return;
+    }
+
     rebuild_base_state_from_wrfinput(lev, base_state[lev]);
 
     // rho0 is consumed below by read_and_convert_from_wrfbdy (via scale_bdy_normal_by_rho0),
@@ -1686,9 +2133,16 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
             amrex::Error("NetCDF boundary file name must be provided via input");
         }
 
-        // Check for erfbdy file.
+        // The wrfbdy file named in the inputs file is authoritative on this pathway, so an
+        // erfbdy file is read only if the user has explicitly asked for one with
+        // erf.use_erfbdy.  If it was asked for but isn't there we simply read wrfbdy, which
+        // gives the same boundary data; the erfbdy file is only a faster way to get it.
         std::string erfbdy_header = erfbdy_file + "/Header";
-        use_erfbdy = FileSystem::Exists(erfbdy_header);
+        if (use_erfbdy && !FileSystem::Exists(erfbdy_header)) {
+            Print() << "erf.use_erfbdy is true but there is no file " << erfbdy_header
+                    << " -- reading the boundary data from " << nc_bdy_file << " instead" << std::endl;
+            use_erfbdy = false;
+        }
         const bool separate_hydrometeors = solverChoice.use_wrf_bdy_qc_qi &&
             wrf_bdy_has_separate_hydrometeors(solverChoice.moisture_indices);
         if (write_erfbdy) {
@@ -1711,7 +2165,7 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
             // Read metadata and times from erfbdy.
             int ntimes_erfbdy;
             Vector<double> bdy_times;
-            bdy_time_interval = read_times_from_erfbdy(erfbdy_file,
+            bdy_time_interval = read_times_from_erfbdy(erfbdy_file, geom[lev].Domain(),
                                                        ntimes_erfbdy, nvars_erfbdy, real_width,
                                                        bdy_times, start_bdy_time, final_bdy_time);
 

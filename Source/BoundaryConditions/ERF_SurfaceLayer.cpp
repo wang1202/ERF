@@ -1,7 +1,10 @@
 #include "ERF_SurfaceLayer.H"
+#include <AMReX_Math.H>
 #include <AMReX_MultiFabUtil.H>
 #include "ERF_Constants.H"
 #include "ERF_SurfaceLayerStress.H"
+#include "ERF_SurfaceTemperature.H"
+#include "ERF_TerrainMetrics.H"
 
 using namespace amrex;
 
@@ -38,7 +41,7 @@ SurfaceLayer::update_fluxes (const int& lev,
     }
     if (zlo && m_use_sfc_sst) {
         // Set tsurf to time varying SST from sfc file
-        fill_tsurf_with_sfc_sst(lev, elapsed_time);
+        fill_tsurf_with_sfc_sst(lev, elapsed_time, cons_in, z_phys_nd);
     }
 
     // Apply heating rate if needed
@@ -50,16 +53,24 @@ SurfaceLayer::update_fluxes (const int& lev,
     // after update_surf_temp, which is a whole-domain setVal, and before
     // fill_qsurf_with_qsat, which derives sea-surface humidity from t_surf.
     if (zlo) {
-        fill_tsurf_with_coupled_sst(lev);
+        fill_tsurf_with_coupled_sst(lev, cons_in, z_phys_nd);
+    }
+
+    // Update land surface temp if we have a valid pointer
+    if (zlo && m_has_lsm_tsurf) {
+        get_lsm_tsurf(lev);
+    }
+
+    // An external skin temperature (the two-stream surface energy balance's) owns
+    // the land surface temperature; last, so it replaces what was written above.
+    if (zlo && lev < static_cast<int>(m_skin_tsurf_lev.size()) && m_skin_tsurf_lev[lev]) {
+        fill_tsurf_with_skin_temperature(lev, cons_in, z_phys_nd);
     }
 
     // Update qsurf with qsat over sea
     if (use_moisture) {
         fill_qsurf_with_qsat(lev, cons_in, z_phys_nd);
     }
-
-    // Update land surface temp if we have a valid pointer
-    if (m_has_lsm_tsurf && zlo) get_lsm_tsurf(lev);
 
     // Fill interior ghost cells
     fill_planar_boundary(lev, *t_surf[lev]);
@@ -307,6 +318,56 @@ SurfaceLayer::update_fluxes (const int& lev,
                 }
             });
         }
+    }
+
+    // If using Land and/or Urban models, then overwrite u_star and t_star with values calculated from the surface models
+    //
+    // Gate on whether the surface models have actually advanced, not on the lower-boundary-data
+    // clock: elapsed_time_since_start_low is offset by (start_time - start_low_time), so it is
+    // already positive at step 0 when the wrflowinp series starts before erf.start_time (which
+    // would let the still-uninitialized u*/t*/q* overwrite the MOST values), and it never becomes
+    // positive at all when the series starts after it.
+    if (use_surface_model && !surf_model_fluxes && m_surf_model->fields_are_valid()) {
+        for (MFIter mfi(*u_star[lev]); mfi.isValid(); ++mfi)
+        {
+            Box gtbx = mfi.growntilebox();
+
+            auto u_star_arr = u_star[lev]->array(mfi);
+            auto t_star_arr = t_star[lev]->array(mfi);
+            auto q_star_arr = q_star[lev]->array(mfi);
+            auto olen_arr   = olen[lev]->array(mfi);
+
+            // Land mask array if it exists
+            auto lmask_arr = (m_lmask_lev[lev][0]) ? m_lmask_lev[lev][0]->array(mfi) :
+                                                     Array4<int> {};
+
+            auto lsm_tstar_arr = Array4<Real> {};
+            auto lsm_qstar_arr = Array4<Real> {};
+            auto lsm_ustar_arr = Array4<Real> {};
+            auto lsm_olen_arr  = Array4<Real> {};
+            if (use_surface_model) {
+                auto mf = m_surf_model->get_field("tstar", lev);
+                lsm_tstar_arr = (mf) ? mf->array(mfi) : Array4<Real> {};
+                mf = m_surf_model->get_field("qstar", lev);
+                lsm_qstar_arr = (mf) ? mf->array(mfi) : Array4<Real> {};
+                mf = m_surf_model->get_field("ustar", lev);
+                lsm_ustar_arr = (mf) ? mf->array(mfi) : Array4<Real> {};
+                mf = m_surf_model->get_field("olen", lev);
+                lsm_olen_arr = (mf) ? mf->array(mfi) : Array4<Real> {};
+            }
+
+            ParallelFor(gtbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
+            {
+                // Overwrite ustar, tstar, qstar, and olen computed above with LSM values
+                if (lmask_arr(i,j,0) == 1) {
+                    if (lsm_tstar_arr) t_star_arr(i,j,k) = lsm_tstar_arr(i,j,0);
+                    if (lsm_qstar_arr) q_star_arr(i,j,k) = lsm_qstar_arr(i,j,0);
+                    if (lsm_ustar_arr) u_star_arr(i,j,k) = lsm_ustar_arr(i,j,0);
+                    if (lsm_olen_arr)  olen_arr(i,j,k)   = lsm_olen_arr(i,j,0);
+                }
+            });
+        }
+
     }
 
     if (m_terrain_type == TerrainType::EB || m_face.coordDir() == 2) {
@@ -992,22 +1053,34 @@ SurfaceLayer::compute_SurfaceLayer_bcs (const int& lev,
         // Get LSM fluxes
         auto lmask_arr      = (m_lmask_lev[lev][0]) ? m_lmask_lev[lev][0]->array(mfi) :
                                                       Array4<int> {};
-        auto lsm_t_flux_arr  = Array4<Real> {};
+        auto lsm_t_flux_arr  = Array4<const Real> {};
         auto soil_t_flux_arr = Array4<Real> {};
-        auto lsm_q_flux_arr = Array4<Real> {};
-        auto lsm_tau13_arr  = Array4<Real> {};
-        auto lsm_tau23_arr  = Array4<Real> {};
+        auto lsm_q_flux_arr = Array4<const Real> {};
+        auto lsm_tau13_arr  = Array4<const Real> {};
+        auto lsm_tau23_arr  = Array4<const Real> {};
         // LSM tau fields are cell-centered kinematic stresses [m2 s-2].
         // Tau_lev tau13/tau23 are face-centered conservative stresses [N m-2].
         for (int n(0); n<m_lsm_flux_lev[lev].size(); ++n) {
-            if (toLower(m_lsm_flux_name[n]) == "t_flux")      { lsm_t_flux_arr  = m_lsm_flux_lev[lev][n]->array(mfi); }
+            if (toLower(m_lsm_flux_name[n]) == "t_flux")      { lsm_t_flux_arr  = m_lsm_flux_lev[lev][n]->const_array(mfi); }
             if (toLower(m_lsm_flux_name[n]) == "soil_t_flux") { soil_t_flux_arr = m_lsm_flux_lev[lev][n]->array(mfi); }
-            if (toLower(m_lsm_flux_name[n]) == "q_flux")      { lsm_q_flux_arr  = m_lsm_flux_lev[lev][n]->array(mfi); }
-            if (toLower(m_lsm_flux_name[n]) == "tau13")       { lsm_tau13_arr   = m_lsm_flux_lev[lev][n]->array(mfi); }
-            if (toLower(m_lsm_flux_name[n]) == "tau23")       { lsm_tau23_arr   = m_lsm_flux_lev[lev][n]->array(mfi); }
+            if (toLower(m_lsm_flux_name[n]) == "q_flux")      { lsm_q_flux_arr  = m_lsm_flux_lev[lev][n]->const_array(mfi); }
+            if (toLower(m_lsm_flux_name[n]) == "tau13")       { lsm_tau13_arr   = m_lsm_flux_lev[lev][n]->const_array(mfi); }
+            if (toLower(m_lsm_flux_name[n]) == "tau23")       { lsm_tau23_arr   = m_lsm_flux_lev[lev][n]->const_array(mfi); }
         }
 
-        const bool has_lsm_t_flux = static_cast<bool>(lsm_t_flux_arr);
+        // Get provider or weight-averaged LSM+Urban fluxes through SurfaceModel.
+        const SurfaceFluxView surf_flux = (use_surface_model && surf_model_fluxes)
+            ? m_surf_model->get_surface_flux_view(lev, mfi) : SurfaceFluxView{};
+        const auto surf_tflux_arr = surf_flux.t_flux;
+        const auto surf_qflux_arr = surf_flux.q_flux;
+        const auto surf_uflux_arr = surf_flux.tau13;
+        const auto surf_vflux_arr = surf_flux.tau23;
+        const bool use_surface_model_fluxes = use_surface_model && surf_model_fluxes;
+        const auto t_flux_arr = use_surface_model_fluxes ? surf_tflux_arr : lsm_t_flux_arr;
+        const auto q_flux_arr = use_surface_model_fluxes ? surf_qflux_arr : lsm_q_flux_arr;
+        const auto surface_tau13_arr = use_surface_model_fluxes ? surf_uflux_arr : lsm_tau13_arr;
+        const auto surface_tau23_arr = use_surface_model_fluxes ? surf_vflux_arr : lsm_tau23_arr;
+        const bool has_lsm_t_flux = static_cast<bool>(t_flux_arr);
         const bool is_custom = (flux_type == FluxCalcType::CUSTOM);
         const bool is_rico   = (flux_type == FluxCalcType::RICO);
 
@@ -1023,13 +1096,13 @@ SurfaceLayer::compute_SurfaceLayer_bcs (const int& lev,
             // open water); fall back to MOST there instead of applying garbage.
             Real Tflux;
             int is_land = (lmask_arr) ? lmask_arr(i,j,0) : 1;
-            const bool lsm_flux_is_valid = (lsm_t_flux_arr) ? (lsm_t_flux_arr(i,j,0) < lsm_undefined) :
+            const bool lsm_flux_is_valid = (t_flux_arr) ? (t_flux_arr(i,j,0) < lsm_undefined) :
                                                               false;
             const bool has_land_and_flux = (is_land == 1 && lsm_flux_is_valid);
-            if (lsm_t_flux_arr && has_land_and_flux) {
+            if (t_flux_arr && has_land_and_flux) {
                 // LSM flux MultiFabs store kinematic fluxes for MOST parameter
                 // updates. The applied hfx array stores the conservative RHS flux.
-                Tflux = cons_arr(i,j,k,Rho_comp) * lsm_t_flux_arr(i,j,0);
+                Tflux = cons_arr(i,j,k,Rho_comp) * t_flux_arr(i,j,0);
             } else if (is_land == 2) { // no temperature flux within buildings
                 Tflux = zero;
             } else {
@@ -1092,13 +1165,13 @@ SurfaceLayer::compute_SurfaceLayer_bcs (const int& lev,
                 // Valid qv flux from LSM and over land (sentinel -> fall back to MOST)
                 Real Qflux;
                 int is_land = (lmask_arr) ? lmask_arr(i,j,0) : 1;
-                const bool lsm_flux_is_valid = (lsm_q_flux_arr) ? (lsm_q_flux_arr(i,j,0) < lsm_undefined) :
+                const bool lsm_flux_is_valid = (q_flux_arr) ? (q_flux_arr(i,j,0) < lsm_undefined) :
                                                                   false;
                 const bool has_land_and_flux = (is_land == 1 && lsm_flux_is_valid);
-                if (lsm_q_flux_arr && has_land_and_flux) {
+                if (q_flux_arr && has_land_and_flux) {
                     // LSM flux MultiFabs store kinematic fluxes for MOST parameter
                     // updates. The applied qfx array stores the conservative RHS flux.
-                    Qflux = cons_arr(i,j,k,Rho_comp) * lsm_q_flux_arr(i,j,0);
+                    Qflux = cons_arr(i,j,k,Rho_comp) * q_flux_arr(i,j,0);
                 } else if (is_land == 2) { // no moisture flux within buildings
                     Qflux = zero;
                 } else {
@@ -1162,14 +1235,14 @@ SurfaceLayer::compute_SurfaceLayer_bcs (const int& lev,
                 int is_land_hi = (lmask_arr) ? lmask_arr(i  ,j,0) : 1;
                 int is_land_lo = (lmask_arr) ? lmask_arr(i-1,j,0) : 1;
                 const bool lsm_hi_flux_is_valid = surface_layer_stress::lsm_flux_is_valid(
-                    static_cast<bool>(lsm_tau13_arr), is_land_hi == 1,
-                    lsm_tau13_arr ? lsm_tau13_arr(i  ,j,0) : zero, lsm_undefined);
+                    static_cast<bool>(surface_tau13_arr), is_land_hi == 1,
+                    surface_tau13_arr ? surface_tau13_arr(i  ,j,0) : zero, lsm_undefined);
                 const bool lsm_lo_flux_is_valid = surface_layer_stress::lsm_flux_is_valid(
-                    static_cast<bool>(lsm_tau13_arr), is_land_lo == 1,
-                    lsm_tau13_arr ? lsm_tau13_arr(i-1,j,0) : zero, lsm_undefined);
+                    static_cast<bool>(surface_tau13_arr), is_land_lo == 1,
+                    surface_tau13_arr ? surface_tau13_arr(i-1,j,0) : zero, lsm_undefined);
                 const bool has_land_and_flux_hi = (is_land_hi == 1 && lsm_hi_flux_is_valid);
                 const bool has_land_and_flux_lo = (is_land_lo == 1 && lsm_lo_flux_is_valid);
-                if (lsm_tau13_arr && (has_land_and_flux_hi || has_land_and_flux_lo)) {
+                if (surface_tau13_arr && (has_land_and_flux_hi || has_land_and_flux_lo)) {
                     const Real rho_hi = cons_arr(i  ,j,k,Rho_comp);
                     const Real rho_lo = cons_arr(i-1,j,k,Rho_comp);
                     const Real most_stress = (!has_land_and_flux_hi || !has_land_and_flux_lo) ?
@@ -1177,7 +1250,7 @@ SurfaceLayer::compute_SurfaceLayer_bcs (const int& lev,
                                                  cons_arr, velx_arr, vely_arr, velz_arr,
                                                  dir_umm_arr, um_arr, vm_arr, wm_arr, u_star_arr) : zero;
                     const auto result = surface_layer_stress::combine_lsm_and_most_stress(
-                        rho_lo, rho_hi, lsm_tau13_arr(i-1,j,0), lsm_tau13_arr(i,j,0),
+                        rho_lo, rho_hi, surface_tau13_arr(i-1,j,0), surface_tau13_arr(i,j,0),
                         has_land_and_flux_lo, has_land_and_flux_hi, most_stress);
                     stressx = result.face_stress;
                     // NOTE: do NOT write the MOST-fallback stress back into the
@@ -1236,14 +1309,14 @@ SurfaceLayer::compute_SurfaceLayer_bcs (const int& lev,
                 int is_land_hi = (lmask_arr) ? lmask_arr(i,j  ,0) : 1;
                 int is_land_lo = (lmask_arr) ? lmask_arr(i,j-1,0) : 1;
                 const bool lsm_hi_flux_is_valid = surface_layer_stress::lsm_flux_is_valid(
-                    static_cast<bool>(lsm_tau23_arr), is_land_hi == 1,
-                    lsm_tau23_arr ? lsm_tau23_arr(i,j  ,0) : zero, lsm_undefined);
+                    static_cast<bool>(surface_tau23_arr), is_land_hi == 1,
+                    surface_tau23_arr ? surface_tau23_arr(i,j  ,0) : zero, lsm_undefined);
                 const bool lsm_lo_flux_is_valid = surface_layer_stress::lsm_flux_is_valid(
-                    static_cast<bool>(lsm_tau23_arr), is_land_lo == 1,
-                    lsm_tau23_arr ? lsm_tau23_arr(i,j-1,0) : zero, lsm_undefined);
+                    static_cast<bool>(surface_tau23_arr), is_land_lo == 1,
+                    surface_tau23_arr ? surface_tau23_arr(i,j-1,0) : zero, lsm_undefined);
                 const bool has_land_and_flux_hi = (is_land_hi == 1 && lsm_hi_flux_is_valid);
                 const bool has_land_and_flux_lo = (is_land_lo == 1 && lsm_lo_flux_is_valid);
-                if (lsm_tau23_arr && (has_land_and_flux_hi || has_land_and_flux_lo)) {
+                if (surface_tau23_arr && (has_land_and_flux_hi || has_land_and_flux_lo)) {
                     const Real rho_hi = cons_arr(i,j  ,k,Rho_comp);
                     const Real rho_lo = cons_arr(i,j-1,k,Rho_comp);
                     const Real most_stress = (!has_land_and_flux_hi || !has_land_and_flux_lo) ?
@@ -1251,7 +1324,7 @@ SurfaceLayer::compute_SurfaceLayer_bcs (const int& lev,
                                                  cons_arr, velx_arr, vely_arr, velz_arr,
                                                  dir_umm_arr, um_arr, vm_arr, wm_arr, u_star_arr) : zero;
                     const auto result = surface_layer_stress::combine_lsm_and_most_stress(
-                        rho_lo, rho_hi, lsm_tau23_arr(i,j-1,0), lsm_tau23_arr(i,j,0),
+                        rho_lo, rho_hi, surface_tau23_arr(i,j-1,0), surface_tau23_arr(i,j,0),
                         has_land_and_flux_lo, has_land_and_flux_hi, most_stress);
                     stressy = result.face_stress;
                     // NOTE: no writeback into cell-centered lsm_tau23_arr -- see the
@@ -1598,6 +1671,7 @@ SurfaceLayer::compute_sfc_params_from_lsm_fluxes (const int& lev,
 
     Real eps = std::numeric_limits<amrex::Real>::epsilon();
     bool has_moisture = use_moisture;
+    const bool use_surface_model_fluxes = use_surface_model && surf_model_fluxes;
     const int klo = m_geom[lev].Domain().smallEnd(2);
     const auto *const umm_ptr  = m_ma.get_average(lev,6); // horizontal velocity magnitude
     const auto *const zref_ptr = m_ma.get_zref(lev);     // reference height
@@ -1623,17 +1697,25 @@ SurfaceLayer::compute_sfc_params_from_lsm_fluxes (const int& lev,
         // Get LSM fluxes
         auto lmask_arr      = (m_lmask_lev[lev][0]) ? m_lmask_lev[lev][0]->array(mfi) :
                                                       Array4<int> {};
-        auto lsm_t_flux_arr = Array4<Real> {};
-        auto lsm_q_flux_arr = Array4<Real> {};
-        auto lsm_tau13_arr  = Array4<Real> {};
-        auto lsm_tau23_arr  = Array4<Real> {};
+        auto lsm_t_flux_arr = Array4<const Real> {};
+        auto lsm_q_flux_arr = Array4<const Real> {};
+        auto lsm_tau13_arr  = Array4<const Real> {};
+        auto lsm_tau23_arr  = Array4<const Real> {};
         // compute_sfc_params_from_lsm_fluxes consumes signed kinematic stress
         // components; their vector magnitude determines u_star^2.
-        for (int n(0); n<m_lsm_flux_lev[lev].size(); ++n) {
-            if (toLower(m_lsm_flux_name[n]) == "t_flux") { lsm_t_flux_arr = m_lsm_flux_lev[lev][n]->array(mfi); }
-            if (toLower(m_lsm_flux_name[n]) == "q_flux") { lsm_q_flux_arr = m_lsm_flux_lev[lev][n]->array(mfi); }
-            if (toLower(m_lsm_flux_name[n]) == "tau13")  { lsm_tau13_arr  = m_lsm_flux_lev[lev][n]->array(mfi); }
-            if (toLower(m_lsm_flux_name[n]) == "tau23")  { lsm_tau23_arr  = m_lsm_flux_lev[lev][n]->array(mfi); }
+        if (use_surface_model_fluxes) {
+            const SurfaceFluxView surf_flux = m_surf_model->get_surface_flux_view(lev, mfi);
+            lsm_t_flux_arr = surf_flux.t_flux;
+            lsm_q_flux_arr = surf_flux.q_flux;
+            lsm_tau13_arr  = surf_flux.tau13;
+            lsm_tau23_arr  = surf_flux.tau23;
+        } else {
+            for (int n(0); n<m_lsm_flux_lev[lev].size(); ++n) {
+                if (toLower(m_lsm_flux_name[n]) == "t_flux") { lsm_t_flux_arr = m_lsm_flux_lev[lev][n]->const_array(mfi); }
+                if (toLower(m_lsm_flux_name[n]) == "q_flux") { lsm_q_flux_arr = m_lsm_flux_lev[lev][n]->const_array(mfi); }
+                if (toLower(m_lsm_flux_name[n]) == "tau13")  { lsm_tau13_arr  = m_lsm_flux_lev[lev][n]->const_array(mfi); }
+                if (toLower(m_lsm_flux_name[n]) == "tau23")  { lsm_tau23_arr  = m_lsm_flux_lev[lev][n]->const_array(mfi); }
+            }
         }
 
         ParallelFor(vbx, [=] AMREX_GPU_DEVICE(int i, int j, int /*k*/) noexcept
@@ -1764,29 +1846,106 @@ SurfaceLayer::fill_tsurf_with_sst_and_tsk (const int& lev,
 
 void
 SurfaceLayer::fill_tsurf_with_sfc_sst (const int& lev,
-                                       const double& elapsed_time)
+                                       const double& elapsed_time,
+                                       const MultiFab& cons_in,
+                                       const std::unique_ptr<MultiFab>& z_phys_nd)
 {
     update_sfc_time_index(elapsed_time);
     const Real sfc_sst = interpolate_sfc_column(elapsed_time, 1);
     const int klo = m_geom[lev].Domain().smallEnd(2);
+    const Real dz = m_geom[lev].CellSize(2);
+    const bool moist = use_moisture;
+    const bool have_rho_qv = cons_in.nComp() > RhoQ1_comp;
+    const Real rdOcp = m_rdOcp;
+    amrex::Gpu::DeviceScalar<int> d_conversion_failed(0);
+    int* conversion_failed = d_conversion_failed.dataPtr();
 
     for (MFIter mfi(*t_surf[lev]); mfi.isValid(); ++mfi)
     {
         Box gtbx = mfi.growntilebox();
 
-        if (gtbx.smallEnd(2) != klo) { continue; }
+        // A z-split planar field has one copy for every stacked 3-D box. Only
+        // the copy whose source box touches the physical z-low face owns the
+        // text-SST conversion and may read the 3-D state or terrain.
+        if (gtbx.smallEnd(2) != klo ||
+            !m_planar_bndry[lev].is_surface_copy(mfi.index())) {
+            continue;
+        }
+
+        const Box source_box = cons_in.boxArray()[mfi.index()];
+        gtbx &= t_surf[lev]->fabbox(mfi.index());
+        gtbx &= cons_in.fabbox(mfi.index());
+        if (z_phys_nd) {
+            gtbx &= amrex::convert(z_phys_nd->fabbox(mfi.index()), IntVect::TheCellVector());
+        }
+        if (m_lmask_lev[lev][0]) {
+            gtbx &= m_lmask_lev[lev][0]->fabbox(mfi.index());
+        }
+        if (gtbx.isEmpty()) { continue; }
 
         auto t_surf_arr = t_surf[lev]->array(mfi);
         auto lmask_arr  = (m_lmask_lev[lev][0]) ? m_lmask_lev[lev][0]->array(mfi) :
                                                   Array4<int> {};
+        const auto cons_arr = cons_in.const_array(mfi);
+        const auto z_arr    = (z_phys_nd) ? z_phys_nd->const_array(mfi) :
+                                            Array4<const Real> {};
+        const int i_lo = source_box.smallEnd(0);
+        const int i_hi = source_box.bigEnd(0);
+        const int j_lo = source_box.smallEnd(1);
+        const int j_hi = source_box.bigEnd(1);
 
         ParallelFor(gtbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
         {
-            int is_land = (lmask_arr) ? lmask_arr(i,j,k) : 0;
+            const int li = amrex::min(amrex::max(i, i_lo), i_hi);
+            const int lj = amrex::min(amrex::max(j, j_lo), j_hi);
+            int is_land = (lmask_arr) ? lmask_arr(li,lj,0) : 0;
             if (!is_land) {
-                t_surf_arr(i,j,k) = sfc_sst;
+                const Real rho = cons_arr(li,lj,klo,Rho_comp);
+                const Real rho_theta = cons_arr(li,lj,klo,RhoTheta_comp);
+                if (!amrex::Math::isfinite(rho) || rho <= Real(0.0) ||
+                    !amrex::Math::isfinite(rho_theta)) {
+                    amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                    return;
+                }
+                Real qv = Real(0.0);
+                if (moist) {
+                    if (!have_rho_qv) {
+                        amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                        return;
+                    }
+                    const Real rho_qv = cons_arr(li,lj,klo,RhoQ1_comp);
+                    if (!amrex::Math::isfinite(rho_qv)) {
+                        amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                        return;
+                    }
+                    qv = rho_qv / rho;
+                    if (!amrex::Math::isfinite(qv)) {
+                        amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                        return;
+                    }
+                }
+                const Real delta_z = z_arr
+                    ? Compute_Z_AtCellCenter(li,lj,klo,z_arr) -
+                      Compute_Z_AtWFace(li,lj,klo,z_arr)
+                    : myhalf*dz;
+                const Real pressure = erf_surface_temperature::pressure_at_boundary_from_cell(
+                    rho, rho_theta, qv, delta_z);
+                Real theta = t_surf_arr(i,j,k);
+                if (erf_surface_temperature::temperature_to_theta(sfc_sst, pressure, rdOcp, theta)) {
+                    t_surf_arr(i,j,k) = theta;
+                } else {
+                    amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                }
             }
         });
+    }
+
+    amrex::Gpu::streamSynchronize();
+    int conversion_failed_host = d_conversion_failed.dataValue();
+    amrex::ParallelDescriptor::ReduceIntMax(conversion_failed_host);
+    if (conversion_failed_host != 0) {
+        amrex::Abort("SurfaceLayer fill_tsurf_with_sfc_sst: failed to convert the authoritative "
+                     "sea-surface temperature to potential temperature.");
     }
 
     fill_planar_boundary(lev, *t_surf[lev]);
@@ -1804,7 +1963,6 @@ SurfaceLayer::fill_qsurf_with_qsat (const int& lev,
                                     const MultiFab& cons_in,
                                     const std::unique_ptr<MultiFab>& z_phys_nd)
 {
-    // NOTE: We have already tested a moisture model exists
     const int dir = m_face.coordDir();
     int sm_index;
     if (m_face.isLow()) {
@@ -1813,11 +1971,18 @@ SurfaceLayer::fill_qsurf_with_qsat (const int& lev,
         sm_index = m_geom[lev].Domain().bigEnd(dir);
     }
 
-    // Populate q_surf with qsat over water
-    auto dz = m_geom[lev].CellSize(2);
+    // Populate q_surf with qsat over water. The selected face is the only
+    // authoritative slab; state/terrain ghosts are useful when valid, but a
+    // bad halo must not turn into a collective conversion failure.
+    const Real dz = m_geom[lev].CellSize(2);
     const int ng_z = amrex::min(cons_in.nGrowVect()[2],
                                 amrex::min(t_surf[lev]->nGrowVect()[2],
                                            q_surf[lev]->nGrowVect()[2]));
+    const bool moist = use_moisture;
+    const bool have_rho_qv = cons_in.nComp() > RhoQ1_comp;
+    const Real rdOcp = m_rdOcp;
+    amrex::Gpu::DeviceScalar<int> d_conversion_failed(0);
+    int* conversion_failed = d_conversion_failed.dataPtr();
     // Use the 2-D surface mask as the iterator so ranks participate only when
     // their grids coincide with the selected face.
     for (MFIter mfi(*m_lmask_lev[lev][0]); mfi.isValid(); ++mfi)
@@ -1872,22 +2037,85 @@ SurfaceLayer::fill_qsurf_with_qsat (const int& lev,
         const auto cons_arr = cons_in.const_array(mfi);
         const auto z_arr    = (z_phys_nd) ? z_phys_nd->const_array(mfi) :
                                             Array4<const Real> {};
+        const Box source_box = cons_in.boxArray()[mfi.index()];
+        const int src_i_lo = source_box.smallEnd(0);
+        const int src_i_hi = source_box.bigEnd(0);
+        const int src_j_lo = source_box.smallEnd(1);
+        const int src_j_hi = source_box.bigEnd(1);
+        const int src_k_lo = source_box.smallEnd(2);
+        const int src_k_hi = source_box.bigEnd(2);
+        const bool z_face = (dir == 2);
+        const bool low_face = m_face.isLow();
 
         ParallelFor(gtbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
         {
             int is_land = (lmask_arr) ? lmask_arr(i,j,0) : 1;
             if (!is_land) {
-                auto deltaZ = (z_arr) ? Compute_Zrel_AtCellCenter(i,j,k,z_arr) :
-                                        myhalf*dz;
-                auto Rho  = cons_arr(i,j,k,Rho_comp);
-                auto RTh  = cons_arr(i,j,k,RhoTheta_comp);
-                auto Qv   = cons_arr(i,j,k,RhoQ1_comp) / Rho;
-                auto P_cc = getPgivenRTh(RTh, Qv);
-                P_cc += Rho*CONST_GRAV*deltaZ;
-                P_cc *= Real(0.01);
-                erf_qsatw(t_surf_arr(i,j,k), P_cc, q_surf_arr(i,j,k));
+                const bool authoritative = i >= src_i_lo && i <= src_i_hi &&
+                                           j >= src_j_lo && j <= src_j_hi &&
+                                           k >= src_k_lo && k <= src_k_hi;
+                const Real rho = cons_arr(i,j,k,Rho_comp);
+                const Real rho_theta = cons_arr(i,j,k,RhoTheta_comp);
+                if (!amrex::Math::isfinite(rho) || rho <= Real(0.0) ||
+                    !amrex::Math::isfinite(rho_theta)) {
+                    if (authoritative) {
+                        amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                    }
+                    return;
+                }
+                Real qv = Real(0.0);
+                if (moist) {
+                    if (!have_rho_qv) {
+                        if (authoritative) {
+                            amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                        }
+                        return;
+                    }
+                    const Real rho_qv = cons_arr(i,j,k,RhoQ1_comp);
+                    if (!amrex::Math::isfinite(rho_qv)) {
+                        if (authoritative) {
+                            amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                        }
+                        return;
+                    }
+                    qv = rho_qv / rho;
+                    if (!amrex::Math::isfinite(qv)) {
+                        if (authoritative) {
+                            amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                        }
+                        return;
+                    }
+                }
+                Real delta_z = Real(0.0);
+                if (z_face) {
+                    if (z_arr) {
+                        const Real z_cc = Compute_Z_AtCellCenter(i,j,k,z_arr);
+                        const Real z_face_local = low_face
+                            ? Compute_Z_AtWFace(i,j,k,z_arr)
+                            : Compute_Z_AtWFace(i,j,k+1,z_arr);
+                        delta_z = z_cc - z_face_local;
+                    } else {
+                        delta_z = low_face ? myhalf*dz : -myhalf*dz;
+                    }
+                }
+                const Real pressure = erf_surface_temperature::pressure_at_boundary_from_cell(
+                    rho, rho_theta, qv, delta_z);
+                Real t_surface = t_surf_arr(i,j,k);
+                if (erf_surface_temperature::theta_to_temperature(
+                        t_surface, pressure, rdOcp, t_surface)) {
+                    erf_qsatw(t_surface, pressure * Real(0.01), q_surf_arr(i,j,k));
+                } else if (authoritative) {
+                    amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                }
             }
         });
+    }
+    amrex::Gpu::streamSynchronize();
+    int conversion_failed_host = d_conversion_failed.dataValue();
+    amrex::ParallelDescriptor::ReduceIntMax(conversion_failed_host);
+    if (conversion_failed_host != 0) {
+        amrex::Abort("SurfaceLayer fill_qsurf_with_qsat: failed to convert the authoritative "
+                     "surface potential temperature to absolute temperature.");
     }
     fill_planar_boundary(lev, *q_surf[lev]);
 }
@@ -1918,7 +2146,12 @@ SurfaceLayer::get_lsm_tsurf (const int& lev)
         auto t_surf_arr = t_surf[lev]->array(mfi);
         auto lmask_arr  = (m_lmask_lev[lev][0]) ? m_lmask_lev[lev][0]->array(mfi) :
                                                   Array4<int> {};
-        const auto lsm_arr = m_lsm_data_lev[lev][m_lsm_tsurf_indx]->const_array(mfi);
+        const auto& lsm_tsurf = *m_lsm_data_lev[lev][m_lsm_tsurf_indx];
+        // get the top-most index of the LSM to use as the surface temperature
+        // this is -1 for SLM, but could be different for other models?
+        const auto& lsm_box = lsm_tsurf.box(mfi.index());
+        const int lsm_khi = lsm_box.bigEnd(2);
+        const auto lsm_arr = lsm_tsurf.const_array(mfi);
 
         ParallelFor(gtbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
         {
@@ -1926,7 +2159,11 @@ SurfaceLayer::get_lsm_tsurf (const int& lev)
             if (is_land) {
                 int li = amrex::min(amrex::max(i, i_lo), i_hi);
                 int lj = amrex::min(amrex::max(j, j_lo), j_hi);
-                t_surf_arr(i,j,k) = lsm_arr(li,lj,k);
+                const Real lsm_value = lsm_arr(li,lj,lsm_khi);
+                if (amrex::Math::isfinite(lsm_value) && lsm_value > Real(0.0) &&
+                    lsm_value < lsm_undefined) {
+                    t_surf_arr(i,j,k) = lsm_value;
+                }
             }
         });
     }
@@ -1938,7 +2175,9 @@ SurfaceLayer::get_lsm_tsurf (const int& lev)
  * @param[in] lev Current level
  */
 void
-SurfaceLayer::fill_tsurf_with_coupled_sst (const int& lev)
+SurfaceLayer::fill_tsurf_with_coupled_sst (const int& lev,
+                                           const MultiFab& cons_in,
+                                           const std::unique_ptr<MultiFab>& z_phys_nd)
 {
     // No coupler has handed us anything yet. Whatever fill_tsurf_with_sst_and_tsk
     // wrote stands, which is the correct answer for one-way and uncoupled runs.
@@ -1956,6 +2195,12 @@ SurfaceLayer::fill_tsurf_with_coupled_sst (const int& lev)
         "Coupled SST layout does not match the surface-layer layout.");
 
     const int klo = m_geom[lev].Domain().smallEnd(2);
+    const Real dz = m_geom[lev].CellSize(2);
+    const bool moist = use_moisture;
+    const bool have_rho_qv = cons_in.nComp() > RhoQ1_comp;
+    const Real rdOcp = m_rdOcp;
+    amrex::Gpu::DeviceScalar<int> d_conversion_failed(0);
+    int* conversion_failed = d_conversion_failed.dataPtr();
 
     // Absent coverage information we must assume nothing is covered: silently
     // treating the whole field as valid is how an uncovered cell ends up holding
@@ -1966,14 +2211,28 @@ SurfaceLayer::fill_tsurf_with_coupled_sst (const int& lev)
     {
         Box gtbx = mfi.growntilebox();
 
-        if (gtbx.smallEnd(2) != klo) { continue; }
+        if (gtbx.smallEnd(2) != klo ||
+            !m_planar_bndry[lev].is_surface_copy(mfi.index())) {
+            continue;
+        }
 
         // NOTE: the coupled lane does not carry lateral ghost cells, so clamp
-        //       into the valid box exactly as get_lsm_tsurf does. FillBoundary
-        //       in update_fluxes picks up the interior and periodic directions.
-        Box vbx  = mfi.validbox();
-        int i_lo = vbx.smallEnd(0); int i_hi = vbx.bigEnd(0);
-        int j_lo = vbx.smallEnd(1); int j_hi = vbx.bigEnd(1);
+        //       into the physical source box exactly as the fallback path does.
+        //       FillBoundary in update_fluxes picks up the interior and
+        //       periodic directions.
+        const Box source_box = cons_in.boxArray()[mfi.index()];
+        const Box donor_box = m_coupled_sst_lev[lev]->boxArray()[mfi.index()];
+        const int source_i_lo = source_box.smallEnd(0);
+        const int source_i_hi = source_box.bigEnd(0);
+        const int source_j_lo = source_box.smallEnd(1);
+        const int source_j_hi = source_box.bigEnd(1);
+        const int donor_i_lo = donor_box.smallEnd(0);
+        const int donor_i_hi = donor_box.bigEnd(0);
+        const int donor_j_lo = donor_box.smallEnd(1);
+        const int donor_j_hi = donor_box.bigEnd(1);
+        const int donor_k = donor_box.smallEnd(2);
+        gtbx &= t_surf[lev]->fabbox(mfi.index());
+        if (gtbx.isEmpty()) { continue; }
 
         auto t_surf_arr = t_surf[lev]->array(mfi);
         auto lmask_arr  = (m_lmask_lev[lev][0]) ? m_lmask_lev[lev][0]->array(mfi) :
@@ -1981,19 +2240,163 @@ SurfaceLayer::fill_tsurf_with_coupled_sst (const int& lev)
         const auto coupled_sst_arr = m_coupled_sst_lev[lev]->const_array(mfi);
         auto const& valid_arr = has_valid ? m_coupled_sst_valid_lev[lev]->const_array(mfi)
                                           : Array4<const int>{};
+        const auto cons_arr = cons_in.const_array(mfi);
+        const auto z_arr    = (z_phys_nd) ? z_phys_nd->const_array(mfi) :
+                                            Array4<const Real> {};
 
         ParallelFor(gtbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
         {
-            int is_land = (lmask_arr) ? lmask_arr(i,j,k) : 1;
+            const int li = amrex::min(amrex::max(i, source_i_lo), source_i_hi);
+            const int lj = amrex::min(amrex::max(j, source_j_lo), source_j_hi);
+            const int si = amrex::min(amrex::max(li, donor_i_lo), donor_i_hi);
+            const int sj = amrex::min(amrex::max(lj, donor_j_lo), donor_j_hi);
+            int is_land = (lmask_arr) ? lmask_arr(li,lj,0) : 1;
             if (is_land) { return; }
 
-            int li = amrex::min(amrex::max(i, i_lo), i_hi);
-            int lj = amrex::min(amrex::max(j, j_lo), j_hi);
+            if (!has_valid || valid_arr(si,sj,donor_k) == 0) { return; }
 
-            if (has_valid && valid_arr(li,lj,k) == 0) { return; }
-
-            t_surf_arr(i,j,k) = coupled_sst_arr(li,lj,k);
+            const Real rho = cons_arr(li,lj,klo,Rho_comp);
+            const Real rho_theta = cons_arr(li,lj,klo,RhoTheta_comp);
+            if (!amrex::Math::isfinite(rho) || rho <= Real(0.0) ||
+                !amrex::Math::isfinite(rho_theta)) {
+                amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                return;
+            }
+            Real qv = Real(0.0);
+            if (moist) {
+                if (!have_rho_qv) {
+                    amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                    return;
+                }
+                const Real rho_qv = cons_arr(li,lj,klo,RhoQ1_comp);
+                if (!amrex::Math::isfinite(rho_qv)) {
+                    amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                    return;
+                }
+                qv = rho_qv / rho;
+                if (!amrex::Math::isfinite(qv)) {
+                    amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                    return;
+                }
+            }
+            const Real delta_z = z_arr
+                ? Compute_Z_AtCellCenter(li,lj,klo,z_arr) -
+                  Compute_Z_AtWFace(li,lj,klo,z_arr)
+                : myhalf*dz;
+            const Real pressure = erf_surface_temperature::pressure_at_boundary_from_cell(
+                rho, rho_theta, qv, delta_z);
+            Real theta = t_surf_arr(i,j,k);
+            if (erf_surface_temperature::temperature_to_theta(
+                    coupled_sst_arr(si,sj,donor_k), pressure, rdOcp, theta)) {
+                t_surf_arr(i,j,k) = theta;
+            } else {
+                amrex::Gpu::Atomic::Max(conversion_failed, 1);
+            }
         });
+    }
+    amrex::Gpu::streamSynchronize();
+    int conversion_failed_host = d_conversion_failed.dataValue();
+    amrex::ParallelDescriptor::ReduceIntMax(conversion_failed_host);
+    if (conversion_failed_host != 0) {
+        amrex::Abort("SurfaceLayer fill_tsurf_with_coupled_sst: failed to convert the authoritative "
+                     "coupled sea-surface temperature to potential temperature.");
+    }
+}
+
+/**
+ * Overwrite the land surface temperature with an external absolute skin
+ * temperature, converted to potential temperature at the surface pressure.
+ *
+ * @param[in] lev       Current level
+ * @param[in] cons_in   Conserved state (surface pressure from the lowest cell)
+ * @param[in] z_phys_nd Nodal heights, or nullptr on a flat mesh
+ */
+void
+SurfaceLayer::fill_tsurf_with_skin_temperature (const int& lev,
+                                                const MultiFab& cons_in,
+                                                const std::unique_ptr<MultiFab>& z_phys_nd)
+{
+    const MultiFab& skin = *m_skin_tsurf_lev[lev];
+    // Indexed with the MFIter of t_surf, so the layouts must agree: both are the
+    // level's grids flattened to the surface for planar terrain.
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+        skin.boxArray() == t_surf[lev]->boxArray() &&
+        skin.DistributionMap() == t_surf[lev]->DistributionMap(),
+        "Skin temperature layout does not match the surface-layer layout.");
+
+    const int klo = m_geom[lev].Domain().smallEnd(2);
+    const Real dz = m_geom[lev].CellSize(2);
+    const bool moist = use_moisture;
+    const Real rdOcp = m_rdOcp;
+    // As in fill_tsurf_with_coupled_sst: a moist run whose state lacks the vapour
+    // component aborts below rather than reading past the components.
+    const bool have_rho_qv = cons_in.nComp() > RhoQ1_comp;
+    amrex::Gpu::DeviceScalar<int> d_conversion_failed(0);
+    int* conversion_failed = d_conversion_failed.dataPtr();
+
+    for (MFIter mfi(*t_surf[lev]); mfi.isValid(); ++mfi)
+    {
+        Box gtbx = mfi.growntilebox();
+        if (gtbx.smallEnd(2) != klo ||
+            !m_planar_bndry[lev].is_surface_copy(mfi.index())) {
+            continue;
+        }
+        gtbx &= t_surf[lev]->fabbox(mfi.index());
+        if (gtbx.isEmpty()) { continue; }
+
+        // The skin is written on valid cells only, so the halo takes the nearest
+        // valid column; fill_planar_boundary in update_fluxes then fills the
+        // interior and periodic ghosts.
+        const Box vbx = mfi.validbox();
+        const int i_lo = vbx.smallEnd(0); const int i_hi = vbx.bigEnd(0);
+        const int j_lo = vbx.smallEnd(1); const int j_hi = vbx.bigEnd(1);
+
+        auto t_surf_arr = t_surf[lev]->array(mfi);
+        auto lmask_arr  = (m_lmask_lev[lev][0]) ? m_lmask_lev[lev][0]->array(mfi) :
+                                                  Array4<int> {};
+        const auto skin_arr = skin.const_array(mfi);
+        const auto cons_arr = cons_in.const_array(mfi);
+        const auto z_arr    = (z_phys_nd) ? z_phys_nd->const_array(mfi) :
+                                            Array4<const Real> {};
+
+        ParallelFor(gtbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
+        {
+            const int li = amrex::min(amrex::max(i, i_lo), i_hi);
+            const int lj = amrex::min(amrex::max(j, j_lo), j_hi);
+            const int is_land = (lmask_arr) ? lmask_arr(li,lj,0) : 1;
+            if (!is_land) { return; }
+
+            const Real rho = cons_arr(li,lj,klo,Rho_comp);
+            const Real rho_theta = cons_arr(li,lj,klo,RhoTheta_comp);
+            if (moist && !have_rho_qv) {
+                amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                return;
+            }
+            const Real qv = moist ? cons_arr(li,lj,klo,RhoQ1_comp) / rho : Real(0.0);
+            const Real delta_z = z_arr
+                ? Compute_Z_AtCellCenter(li,lj,klo,z_arr) -
+                  Compute_Z_AtWFace(li,lj,klo,z_arr)
+                : myhalf*dz;
+            const Real pressure = erf_surface_temperature::pressure_at_boundary_from_cell(
+                rho, rho_theta, qv, delta_z);
+            Real theta = t_surf_arr(i,j,k);
+            if (amrex::Math::isfinite(qv) &&
+                erf_surface_temperature::temperature_to_theta(
+                    skin_arr(li,lj,k), pressure, rdOcp, theta)) {
+                t_surf_arr(i,j,k) = theta;
+            } else {
+                amrex::Gpu::Atomic::Max(conversion_failed, 1);
+            }
+        });
+    }
+    amrex::Gpu::streamSynchronize();
+    int conversion_failed_host = d_conversion_failed.dataValue();
+    amrex::ParallelDescriptor::ReduceIntMax(conversion_failed_host);
+    if (conversion_failed_host != 0) {
+        amrex::Abort("SurfaceLayer fill_tsurf_with_skin_temperature: failed to convert the "
+                     "skin temperature to potential temperature (non-finite or non-positive "
+                     "skin temperature, density or pressure, or a moist state without "
+                     "water vapour).");
     }
 }
 
@@ -2061,6 +2464,20 @@ SurfaceLayer::compute_pblh (const int& lev,
         define_pblh_columns(lev, cons.boxArray(), cons.DistributionMap());
     }
     const PBLHColumns& cols = m_pblh_columns[lev];
+
+    // A refined level whose grids do not run from the ground to the top of the domain in every
+    // column cannot diagnose the boundary layer there: a level that ends below the top would
+    // return a height capped by its grids, and a level that does not reach the ground has no
+    // column to scan (it was left at zero).  Such a level takes the PBL height of the next
+    // coarser level at each of its columns.  Levels are updated coarse to fine, so that height
+    // is the one set at the start of the enclosing coarse step: with subcycling, the later fine
+    // substeps read a coarse height up to one coarse step old.  A refined level that spans the
+    // full height diagnoses its own.
+    if (lev > 0 && !cols.full_height && m_face.coordDir() == 2 && m_face.isLow() &&
+        m_terrain_type != TerrainType::EB) {
+        fill_pblh_from_coarser(lev);
+        return;
+    }
 
     if (!cols.needed) {
         est.compute_pblh(m_geom[lev], z_phys_cc, pblh[lev].get(), cons, lmask, moisture_indices);
@@ -2163,8 +2580,15 @@ SurfaceLayer::define_pblh_columns (const int& lev,
     cols.dm = dm;
 
     const int k_ground = m_geom[lev].Domain().smallEnd(2);
+    const int k_top    = m_geom[lev].Domain().bigEnd(2);
     for (int ib = 0; ib < ba.size(); ++ib) {
         if (ba[ib].smallEnd(2) != k_ground) { cols.needed = true; }
+    }
+
+    // The runs of cells in z, each as one box
+    const BoxArray ba_joined = join_boxes_stacked_in_z(ba);
+    for (int ib = 0; ib < ba_joined.size(); ++ib) {
+        if (ba_joined[ib].smallEnd(2) != k_ground || ba_joined[ib].bigEnd(2) != k_top) { cols.full_height = false; }
     }
     if (!cols.needed) { return; }
 
@@ -2177,10 +2601,9 @@ SurfaceLayer::define_pblh_columns (const int& lev,
               "(amr.max_grid_size_z) and refined regions that reach the ground.");
     }
 
-    // The runs of cells in z, each as one box; those that start at the ground are the columns.
-    // A column goes to the rank that owns its lowest corner cell, which keeps most of the
-    // copies to and from the columns on the rank.
-    const BoxArray ba_joined = join_boxes_stacked_in_z(ba);
+    // Those of the runs of cells in z that start at the ground are the columns.  A column goes
+    // to the rank that owns its lowest corner cell, which keeps most of the copies to and from
+    // the columns on the rank.
     BoxList bl_col(IndexType::TheCellType());
     BoxList bl_col2d(IndexType::TheCellType());
     Vector<int> pmap;
@@ -2209,6 +2632,65 @@ SurfaceLayer::define_pblh_columns (const int& lev,
 }
 
 /**
+ * Set the PBL height of a refined level from the next coarser level: each column of this
+ * level takes the height of the coarse column that holds it.  Used for a level whose grids do
+ * not run from the ground to the top of the domain in every column (see compute_pblh).
+ *
+ * @param[in] lev Current level (> 0)
+ */
+void
+SurfaceLayer::fill_pblh_from_coarser (const int& lev)
+{
+    AMREX_ALWAYS_ASSERT(lev > 0 && pblh[lev] && pblh[lev-1]);
+    const Geometry& geom_f = m_geom[lev];
+    const Geometry& geom_c = m_geom[lev-1];
+    const IntVect rr(AMREX_D_DECL(static_cast<int>(std::lround(geom_c.CellSize(0) / geom_f.CellSize(0))),
+                                  static_cast<int>(std::lround(geom_c.CellSize(1) / geom_f.CellSize(1))),
+                                  1));
+
+    MultiFab& fine = *pblh[lev];
+    const MultiFab& crse = *pblh[lev-1];
+
+    // Each fine column takes the height of the coarse column that holds it (injection, no
+    // interpolation): the fine height is then exactly the coarse diagnostic, and independent of
+    // the decomposition, at the price of being constant over each block of rr x rr fine columns.
+    // The coarse level's own height varies at that resolution too.  Interpolating would reach
+    // further into the coarse halo than these planar fields hold: a bilinear stencil for a fine
+    // ghost cell at a non-periodic domain boundary wants a second coarse cell outside the
+    // domain, and pblh carries one ghost cell.  A smooth cap would need a wider halo there, or
+    // a one-sided stencil.
+    //
+    // The coarse heights over the boxes of this level, with enough ghost cells to cover theirs.
+    // Ghost cells go first, then the valid cells, so every cell the coarse level owns comes
+    // from the box that owns it.  The estimator writes pblh over its grown box (it clips only
+    // in z), so the coarse ghost cells the first copy reads hold a diagnosed height, outside a
+    // non-periodic domain too.
+    const IntVect ng_f = fine.nGrowVect();
+    const IntVect ng_c(AMREX_D_DECL((ng_f[0] + rr[0] - 1) / rr[0], (ng_f[1] + rr[1] - 1) / rr[1], ng_f[2]));
+    MultiFab crse_on_fine(amrex::coarsen(fine.boxArray(), rr), fine.DistributionMap(), 1, ng_c);
+    crse_on_fine.setVal(zero);
+    for (const IntVect& ng_src : {crse.nGrowVect(), IntVect(0)}) {
+        crse_on_fine.ParallelCopy(crse, 0, 0, 1, elemwiseMin(ng_src, ng_c), ng_c, geom_c.periodicity());
+    }
+
+#ifdef _OPENMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(fine, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box bx = mfi.growntilebox();
+        const Array4<Real> f = fine.array(mfi);
+        const Array4<Real const> c = crse_on_fine.const_array(mfi);
+        const int rx = rr[0];
+        const int ry = rr[1];
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+        {
+            f(i,j,k) = c(amrex::coarsen(i,rx), amrex::coarsen(j,ry), k);
+        });
+    }
+    fill_planar_boundary(lev, fine);
+}
+
+/**
  * Initialize TKE from surface-layer friction velocity.
  *
  * @param[in] lev Current level
@@ -2233,10 +2715,13 @@ SurfaceLayer::init_tke_from_ustar (const int& lev,
     // Handle vertical decomposition by selectively copying into
     // a FArrayBox section on each rank. Then doing a reduce real sum
     // and broadcasting to each rank. No mask since all CC data
+    //
+    // Pinned so the reduction below can read them on the host; the device
+    // still reaches pinned memory, so the loops here are unaffected.
     const int klo = m_geom[lev].Domain().smallEnd(2);
     Box bx_lo = u_star[lev]->boxArray().minimalBox();
-    FArrayBox u_star_lo(bx_lo, 1); u_star_lo.setVal<RunOn::Device>(0);
-    FArrayBox z_surf_lo(bx_lo, 1); z_surf_lo.setVal<RunOn::Device>(0);
+    FArrayBox u_star_lo(bx_lo, 1, The_Pinned_Arena()); u_star_lo.setVal<RunOn::Host>(0);
+    FArrayBox z_surf_lo(bx_lo, 1, The_Pinned_Arena()); z_surf_lo.setVal<RunOn::Host>(0);
     Real* ustar_ptr = u_star_lo.dataPtr();
     Real* zsurf_ptr = z_surf_lo.dataPtr();
     for (MFIter mfi(cons); mfi.isValid(); ++mfi)
@@ -2258,6 +2743,7 @@ SurfaceLayer::init_tke_from_ustar (const int& lev,
                                        + z_phys_arr(i  ,j+1,klo) + z_phys_arr(i+1,j+1,klo) );
         });
     }
+    Gpu::streamSynchronize(); // the fills above are async, the reduction is not
     ParallelDescriptor::ReduceRealSum(ustar_ptr, static_cast<int>(bx_lo.numPts()));
     ParallelDescriptor::ReduceRealSum(zsurf_ptr, static_cast<int>(bx_lo.numPts()));
 
@@ -2307,6 +2793,10 @@ SurfaceLayer::read_custom_roughness (const int& lev,
         if (ParallelDescriptor::IOProcessor()) {
             Print()<<"Reading MOST roughness file at level " << lev << " : " << fname << std::endl;
             std::ifstream file(fname);
+            if (!file.is_open()) {
+                Abort("Could not open the MOST roughness file \"" + fname + "\" given as "
+                      "erf.most.roughness_file_name -- please check the file name in the inputs file");
+            }
             Real value1,value2,value3;
             while(file>>value1>>value2>>value3){
                 m_x.push_back(value1);
@@ -2317,6 +2807,10 @@ SurfaceLayer::read_custom_roughness (const int& lev,
 
             AMREX_ALWAYS_ASSERT(m_x.size() == m_y.size());
             AMREX_ALWAYS_ASSERT(m_x.size() == m_z0.size());
+
+            if (m_x.empty()) {
+                Abort("The MOST roughness file \"" + fname + "\" holds no (x, y, z0) triples");
+            }
         }
 
         // Broadcast the whole domain to every rank
@@ -2332,6 +2826,18 @@ SurfaceLayer::read_custom_roughness (const int& lev,
         ParallelDescriptor::Bcast(m_x.data() , nnode, ioproc);
         ParallelDescriptor::Bcast(m_y.data() , nnode, ioproc);
         ParallelDescriptor::Bcast(m_z0.data(), nnode, ioproc);
+
+        // The loop below indexes the file's values as nodes of this level's grid, so a file
+        // holding fewer values than the grid has nodes would be read past its end
+        {
+            const Box& dom = m_geom[lev].Domain();
+            const int nnode_needed = dom.bigEnd(0) + dom.bigEnd(1) * (dom.length(0)+1) + 1;
+            if (nnode < nnode_needed) {
+                Abort("The MOST roughness file \"" + fname + "\" holds " + std::to_string(nnode) +
+                      " values but the grid at level " + std::to_string(lev) + " needs at least " +
+                      std::to_string(nnode_needed) + " -- is this file written for this grid?");
+            }
+        }
 
         // Copy data to the GPU
         Gpu::DeviceVector<Real> d_x(nnode),d_y(nnode),d_z0(nnode);
@@ -2425,7 +2931,7 @@ SurfaceLayer::read_custom_roughness (const int& lev,
  * @return Vector containing each column in the file as a vector
  */
 amrex::Vector<amrex::Vector<amrex::Real>>
-SurfaceLayer::read_cols(const std::string &fname, const int skip_nlines)
+SurfaceLayer::read_cols (const std::string &fname, const int skip_nlines)
 {
     std::ifstream ifs(fname);
     if (!ifs.is_open())

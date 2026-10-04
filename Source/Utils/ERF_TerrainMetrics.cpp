@@ -6,12 +6,51 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <utility>
 #include <vector>
 
 using namespace amrex;
+
+void
+validate_flat_terrain (int lev,
+                       const MultiFab& z_phys_nd,
+                       const Vector<Real>& z_levels_h)
+{
+    // The comparison is against heights that have been round-tripped through z_phys_nd, so the
+    // threshold has to track the working precision: a hard-wired 1e-10 is far below single-
+    // precision round-off at domain-top magnitudes and would abort on a genuinely flat mesh.
+    // Keep the original (double-precision) threshold, floored at a few hundred ulps.
+    const Real scale = std::max(Real(1.0), std::abs(z_levels_h.back()));
+    const Real rel_tol = std::max(Real(1.0e-10), Real(100.0) * std::numeric_limits<Real>::epsilon());
+    const Real tolerance = rel_tol * scale;
+
+    MultiFab expected(z_phys_nd.boxArray(), z_phys_nd.DistributionMap(), 1, 0);
+    Gpu::DeviceVector<Real> z_levels_d(z_levels_h.size());
+    Gpu::copy(Gpu::hostToDevice, z_levels_h.begin(), z_levels_h.end(), z_levels_d.begin());
+    const Real* z_levels = z_levels_d.data();
+
+    for (MFIter mfi(expected); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.validbox();
+        auto const& expected_arr = expected.array(mfi);
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            expected_arr(i,j,k) = z_levels[k];
+        });
+    }
+
+    MultiFab error(expected.boxArray(), expected.DistributionMap(), 1, 0);
+    MultiFab::Copy(error, expected, 0, 0, 1, 0);
+    MultiFab::Subtract(error, z_phys_nd, 0, 0, 1, 0);
+    const Real max_error = error.norminf(0, 0, false);
+
+    if (max_error > tolerance) {
+        Abort("erf.flat_terrain = true, but z_phys_nd is not horizontally "
+              "flat or does not match the configured vertical spacing at "
+              "level " + std::to_string(lev) + ".");
+    }
+}
 
 /**
  * Define a default z_phys so we have it even if a completely regular grid
@@ -580,11 +619,12 @@ init_which_terrain_grid (int lev,
     // The STF and Sullivan TF transformations need the full column from the surface to
     // the domain top, so on a fine level we build the mesh from the one interpolated
     // from the coarse level instead.  Only a caller that has done that interpolation
-    // (and told us so) may take this path; everyone else still aborts, as before.
+    // (and told us so) may take this path; everyone else still aborts.
     //
     if (lev > 0 && terrain_smoothing != 0) {
         if (fine_terrain == FineTerrain::None) {
-            Abort("Must use terrain_smoothing = 0 when doing multilevel with this initialization");
+            Abort("terrain_smoothing = " + std::to_string(terrain_smoothing) +
+                  " on level > 0 requires setting erf.amr_terrain_refinement (transform or interpolate)");
         }
         init_fine_terrain_grid(lev, geom, z_phys_nd, z_levels_h, fine_terrain, z_phys_interp);
         return;

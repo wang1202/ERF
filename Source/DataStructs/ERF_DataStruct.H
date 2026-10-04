@@ -3,6 +3,7 @@
 
 #include <string>
 #include <iostream>
+#include <cmath>
 
 #include <AMReX_ParmParse.H>
 #include <AMReX_Print.H>
@@ -20,6 +21,13 @@
 #include "ERF_TurbPertStruct.H"
 #include "ERF_RadStruct.H"
 #include "ERF_ShocTransportStruct.H"
+
+/**
+ * Enum of possible plotfile types.
+ */
+AMREX_ENUM(PlotFileType,
+    None, Amrex, Netcdf
+);
 
 /**
  * @brief Indices for map scale factors on mass and face grids.
@@ -120,7 +128,7 @@ AMREX_ENUM(MoistureModelType,
  * @brief Moisture and microphysics model.
  */
 AMREX_ENUM(MoistureType,
-    SAM, SAM_NoIce, SAM_NoPrecip_NoIce, Kessler, Kessler_NoRain, SatAdj, Morrison, Morrison_NoIce, WSM6, WDM6, SuperDroplets, MoistNoCondensation, None
+    SAM, SAM_NoIce, SAM_NoPrecip_NoIce, Kessler, Kessler_NoRain, SatAdj, Morrison, Morrison_NoIce, WSM6, WDM6, SuperDroplets, MoistNoCondensation, SBM, None
 );
 
 /**
@@ -155,6 +163,13 @@ AMREX_ENUM(WindFarmLocType,
  */
 AMREX_ENUM(LandSurfaceType,
     SLM, NOAHMP, None
+);
+
+/**
+ * @brief Urban model.
+ */
+AMREX_ENUM(UrbanType,
+    None
 );
 
 /**
@@ -304,7 +319,7 @@ struct MoistureComponentIndices {
     /**
      * @brief Construct an empty map, i.e. a dry run.
      */
-    MoistureComponentIndices() = default;
+    MoistureComponentIndices () = default;
 
     /**
      * @brief Build the complete index map -- conserved-state components and
@@ -353,6 +368,14 @@ struct MoistureComponentIndices {
             mi.qc         = RhoQ2_comp;
             mi.qr         = RhoQ3_comp;
             mi.rain_accum = 0;
+            break;
+
+        case MoistureType::SBM:
+            // SBM stores the distribution in an auxiliary state.  These two
+            // compact liquid lanes are projections for host compatibility.
+            mi.qv = RhoQ1_comp;
+            mi.qc = RhoQ2_comp;
+            mi.qr = RhoQ3_comp;
             break;
 
         case MoistureType::SAM_NoIce:
@@ -700,12 +723,79 @@ struct SolverChoice {
 
         pp.query_enum_case_insensitive("moisture_model",moisture_type);
 
+        // Test-only M1 failure injections. They remain disabled unless an
+        // integration test explicitly enables the corresponding option.
+        pp.queryAdd("sbm_test_native_qc_write_fault", sbm_test_native_qc_write_fault);
+        pp.queryAdd("sbm_test_carrier_momentum_fault", sbm_test_carrier_momentum_fault);
+        if (moisture_type != MoistureType::SBM &&
+            (sbm_test_native_qc_write_fault || sbm_test_carrier_momentum_fault)) {
+            amrex::Error("SBM test fault-injection options require moisture_model=SBM");
+        }
+
         // Register the moisture data this scheme carries: conserved-state
         // components and qmoist diagnostic slots alike.  MoistureComponentIndices
         // is the one place that mapping lives, and every consumer -- source terms,
         // turbulence closures, and the plotfile/subvolume writers -- queries it
         // instead of testing moisture_type.
         moisture_indices = MoistureComponentIndices::from_moisture_model(moisture_type);
+
+        if (moisture_type == MoistureType::SBM) {
+            pp.queryAdd("sbm_zero_transport_fixture", sbm_zero_transport_fixture);
+            pp.queryAdd("sbm_nbins", sbm_nbins);
+            pp.queryAdd("sbm_moment_mode", sbm_moment_mode);
+            pp.queryAdd("sbm_cloud_rain_split", sbm_cloud_rain_split);
+            pp.queryarr("sbm_edges", sbm_edges);
+            pp.queryarr("sbm_pivots", sbm_pivots);
+            pp.queryarr("sbm_fixture_initial_state", sbm_fixture_initial_state);
+
+            if (!sbm_zero_transport_fixture) {
+                amrex::Error("moisture_model=SBM requires erf.sbm_zero_transport_fixture=true; production spectral transport is not implemented");
+            }
+            if (sbm_nbins < 2 || (sbm_moment_mode != 1 && sbm_moment_mode != 2)) {
+                amrex::Error("SBM requires sbm_nbins >= 2 and sbm_moment_mode equal to 1 or 2");
+            }
+            if (sbm_edges.empty()) {
+                sbm_edges.resize(static_cast<std::size_t>(sbm_nbins + 1));
+                sbm_pivots.resize(static_cast<std::size_t>(sbm_nbins));
+                for (int b = 0; b <= sbm_nbins; ++b) {
+                    const amrex::Real fraction = static_cast<amrex::Real>(b) /
+                                                 static_cast<amrex::Real>(sbm_nbins);
+                    sbm_edges[static_cast<std::size_t>(b)] =
+                        std::pow(amrex::Real(10.0), amrex::Real(-18.0) + amrex::Real(6.0) * fraction);
+                }
+                for (int b = 0; b < sbm_nbins; ++b) {
+                    sbm_pivots[static_cast<std::size_t>(b)] = std::sqrt(
+                        sbm_edges[static_cast<std::size_t>(b)] * sbm_edges[static_cast<std::size_t>(b + 1)]);
+                }
+            } else {
+                sbm_nbins = static_cast<int>(sbm_edges.size()) - 1;
+                if (sbm_nbins < 2) amrex::Error("sbm_edges must define at least two bins");
+                if (sbm_pivots.empty()) {
+                    sbm_pivots.resize(static_cast<std::size_t>(sbm_nbins));
+                    for (int b = 0; b < sbm_nbins; ++b) {
+                        sbm_pivots[static_cast<std::size_t>(b)] = std::sqrt(
+                            sbm_edges[static_cast<std::size_t>(b)] * sbm_edges[static_cast<std::size_t>(b + 1)]);
+                    }
+                }
+            }
+            if (sbm_pivots.size() != static_cast<amrex::Long>(sbm_nbins)) {
+                amrex::Error("sbm_pivots must contain one value per SBM bin");
+            }
+            if (sbm_cloud_rain_split < 0) sbm_cloud_rain_split = sbm_nbins / 2;
+            if (sbm_cloud_rain_split <= 0 || sbm_cloud_rain_split >= sbm_nbins) {
+                amrex::Error("sbm_cloud_rain_split must be strictly inside the liquid bin range");
+            }
+            const int expected_sbm_components = sbm_nbins * (sbm_moment_mode == 2 ? 2 : 1);
+            if (!sbm_fixture_initial_state.empty() &&
+                sbm_fixture_initial_state.size() != static_cast<amrex::Long>(expected_sbm_components)) {
+                amrex::Error("sbm_fixture_initial_state must match the full runtime SBM component count");
+            }
+            for (const amrex::Real value : sbm_fixture_initial_state) {
+                if (!std::isfinite(value) || value < amrex::Real(0.0)) {
+                    amrex::Error("sbm_fixture_initial_state values must be finite and nonnegative");
+                }
+            }
+        }
 
         // Set a default for both dry and moist
         buoyancy_type.resize(max_level+1);
@@ -724,6 +814,16 @@ struct SolverChoice {
         // What type of land surface model to use
         lsm_type = LandSurfaceType::None; // Default
         pp.query_enum_case_insensitive("land_surface_model",lsm_type);
+
+        // What type of urban model to use and whether it is active at the given level
+        urban_type = UrbanType::None;
+        pp.query_enum_case_insensitive("urban_model", urban_type);
+        read_int_string(max_level, "urban_lev_active", urban_enabled_lev, 1);
+        for (int lev = 0; lev <= max_level; ++lev) {
+            if (urban_enabled_lev[lev] != 0 && urban_enabled_lev[lev] != 1) {
+                amrex::Error("urban_lev_active should be 0 or 1");
+            }
+        }
 
         // Will an external ocean coupler supply SST for part or all of the water
         // cells this run? The surface layer needs to know this it in time to select
@@ -766,6 +866,9 @@ struct SolverChoice {
         } else {
             pp.query_enum_case_insensitive("terrain_type",terrain_type);
         }
+
+        // Whether the terrain is flat - this allows planar averages (lsf, nudging) with StaticFittedMesh
+        pp.queryAdd("flat_terrain", flat_terrain);
 
         // Get buildings type
         std::string buildings_type_temp = "";
@@ -836,6 +939,10 @@ struct SolverChoice {
             mesh_type = MeshType::VariableDz;
         }
 
+        if (flat_terrain && terrain_type != TerrainType::StaticFittedMesh) {
+            amrex::Error("erf.flat_terrain requires terrain_type = StaticFittedMesh");
+        }
+
         if ( (moisture_type == MoistureType::SAM                ||
               moisture_type == MoistureType::SAM_NoIce          ||
               moisture_type == MoistureType::SAM_NoPrecip_NoIce   ) &&
@@ -881,6 +988,10 @@ struct SolverChoice {
         // Average the input z-face heights onto the nodes, or reconstruct our own
         pp.queryAdd("avg_grid_faces_to_nodes",avg_grid_faces_to_nodes);
 
+        // Build the ERF vertical grid from the file's own mean layer-thickness profile,
+        // or from a single geometric stretch anchored on the file's first layer?
+        pp.queryAdd("wrfinput_zlevels_from_file",wrfinput_zlevels_from_file);
+
         // Catch the old name for the flag above so the error says what to do
         // rather than silently ignoring the setting.
         if (pp.contains("use_wrf_height_grid")) {
@@ -889,6 +1000,10 @@ struct SolverChoice {
                          "the same meaning (average the input z-face heights "
                          "onto the nodes rather than reconstructing them).");
         }
+
+        // Interpolate atmospheric state from coarse level instead of reading from wrfinput
+        // when creating a finer level from coarse at a later time?
+        pp.queryAdd("interp_atmos_from_coarse", interp_atmos_from_coarse);
 
         // Rebalance wrf state?
         pp.queryAdd("rebalance_wrf_input", rebalance_wrf_input);
@@ -1138,6 +1253,14 @@ struct SolverChoice {
 
         pp.queryAdd("nudging_from_input_sounding", nudging_from_input_sounding);
 
+        // Nudging towards observations at stations; the stations and the
+        // parameters are read by the ObsNudging class, under erf.obs_nudging
+        pp.queryAdd("nudging_from_observations", nudging_from_observations);
+        if (nudging_from_observations && terrain_type == TerrainType::EB) {
+            amrex::Abort("erf.nudging_from_observations does not support erf.terrain_type = EB; "
+                         "use a terrain-fitted mesh or immersed forcing");
+        }
+
         int nudging_u_z1_set = pp.queryAdd("nudging_u_z1", nudging_u_z1);
         int nudging_u_z2_set = pp.queryAdd("nudging_u_z2", nudging_u_z2);
         pp.queryAdd("nudging_t_z1", nudging_t_z1);
@@ -1200,7 +1323,22 @@ struct SolverChoice {
 
         // erf.radiation_model = TwoStream selects the two-stream model; its
         // erf.radiation.* sub-options are read only then.
-        radChoice.init_params(rad_type == RadiationType::TwoStream, max_level, pp_prefix);
+        radChoice.init_params(rad_type == RadiationType::TwoStream, pp_prefix);
+
+        // Noah-MP integrates on the downwelling shortwave, downwelling longwave and solar
+        // zenith angle a radiation model writes into it. Only RRTMGP and TwoStream register
+        // those outputs with the land model (rad_feeds_lsm, ERF::init_stuff), so under any
+        // other choice they are never written and Noah-MP runs with no radiative forcing at
+        // all -- the inputs it reads fall back to zero. That is a legitimate thing to want
+        // in a test, and rarely what anyone running a land model means, so say it at
+        // start-up.
+        if (lsm_type == LandSurfaceType::NOAHMP && !rad_feeds_lsm()) {
+            amrex::Print() << "WARNING: erf.land_surface_model = NOAHMP with erf.radiation_model = "
+                           << amrex::getEnumNameString(rad_type)
+                           << ": only RRTMGP and TwoStream supply the downwelling shortwave, "
+                              "downwelling longwave and solar zenith angle Noah-MP needs. Noah-MP "
+                              "will run with no radiative forcing (zero SWDOWN, GLW and COSZEN).\n";
+        }
 
         vert_implicit_fac.resize(max_level+1);
         for (int lev = 0; lev <= max_level; lev++) {
@@ -1426,6 +1564,17 @@ struct SolverChoice {
                     vert_implicit_fac[lev][0] = zero;
                     vert_implicit_fac[lev][1] = zero;
                     vert_implicit_fac[lev][2] = zero;
+                }
+            }
+        }
+
+        // The EB diffusion path adds no buoyancy, shear or dissipation source for
+        // a prognostic TKE closure
+        if (terrain_type == TerrainType::EB) {
+            for (int lev = 0; lev <= max_level; lev++) {
+                if (turbChoice[lev].use_keqn) {
+                    amrex::Error("erf.terrain_type = EB cannot be used with erf.les_type = Deardorff "
+                                 "or erf.rans_type = kEqn: the EB diffusion path has no TKE sources");
                 }
             }
         }
@@ -1767,6 +1916,8 @@ struct SolverChoice {
             amrex::Print() << "Moisture Model: SuperDroplets" << std::endl;
         } else if (moisture_type == MoistureType::MoistNoCondensation) {
             amrex::Print() << "Moisture Model: MoistNoCondensation" << std::endl;
+        } else if (moisture_type == MoistureType::SBM) {
+            amrex::Print() << "Moisture Model: SBM zero-transport fixture" << std::endl;
         } else {
             amrex::Print() << "Moisture Model: None" << std::endl;
         }
@@ -1783,6 +1934,9 @@ struct SolverChoice {
         } else {
             amrex::Print() << "Terrain Type: None" << std::endl;
         }
+
+        amrex::Print() << "Flat fitted terrain: "
+                       << (flat_terrain ? "true" : "false") << std::endl;
 
         if (buildings_type == BuildingsType::ImmersedForcing) {
             amrex::Print() << "Buildings Type: ImmersedForcing" << std::endl;
@@ -1934,6 +2088,9 @@ struct SolverChoice {
     TerrainType terrain_type = TerrainType::None;
 
     inline static
+    bool flat_terrain = false;
+
+    inline static
     BuildingsType buildings_type = BuildingsType::None;
 
     inline static
@@ -2070,6 +2227,10 @@ struct SolverChoice {
     // Do we use source terms to nudge the solution towards
     //    the time-varying data provided in input sounding files?
     bool nudging_from_input_sounding = false;
+
+    // Do we nudge the solution towards observations at stations (met masts,
+    //    lidars)?  See ERF_ObsNudging.H.
+    bool nudging_from_observations = false;
 
     amrex::Real nudging_u_z1 = amrex::Real(-1.0e36);
     amrex::Real nudging_u_z2 = amrex::Real(1.0e36);
@@ -2220,15 +2381,41 @@ struct SolverChoice {
 
     CouplingType coupling_type;
     MoistureType moisture_type;
+    int sbm_nbins{4};
+    int sbm_moment_mode{1};
+    int sbm_cloud_rain_split{-1};
+    bool sbm_zero_transport_fixture{false};
+    bool sbm_test_native_qc_write_fault{false};
+    bool sbm_test_carrier_momentum_fault{false};
+    amrex::Vector<amrex::Real> sbm_edges;
+    amrex::Vector<amrex::Real> sbm_pivots;
+    amrex::Vector<amrex::Real> sbm_fixture_initial_state;
     WindFarmType windfarm_type;
     WindFarmLocType windfarm_loc_type;
     LandSurfaceType lsm_type;
+    UrbanType urban_type;
+    amrex::Vector<int> urban_enabled_lev;
     RadiationType rad_type;
 
     /** @brief True for the models that run through the IRadiation interface
      *  (RRTMGP, Simple); the two-stream model has its own class. */
     [[nodiscard]] bool rad_uses_interface () const {
         return (rad_type == RadiationType::RRTMGP) || (rad_type == RadiationType::Simple);
+    }
+
+    /** @brief True when the radiation model's outputs feed the land model
+     *  (downwelling shortwave, downwelling longwave, solar zenith angle). RRTMGP
+     *  writes them for any land model through lsm_output_ptrs; the two-stream
+     *  model writes the broadband three for Noah-MP only
+     *  (TwoStreamRadiation::write_land_forcing), since SLM wants the visible /
+     *  near-infrared direct / diffuse split it does not compute. Both register
+     *  the outputs in ERF::init_stuff and write them in ERF::advance_radiation;
+     *  every site that encodes that rule must use this predicate so wiring
+     *  another model in (e.g. Simple, which already runs through the interface)
+     *  is one edit. */
+    [[nodiscard]] bool rad_feeds_lsm () const {
+        return (rad_type == RadiationType::RRTMGP) ||
+               (rad_type == RadiationType::TwoStream && lsm_type == LandSurfaceType::NOAHMP);
     }
 
     // Does an external ocean coupler supply SST? See the query in init_params.
@@ -2274,6 +2461,16 @@ struct SolverChoice {
     // Average the input z-face heights onto the nodes rather than reconstructing them?
     bool avg_grid_faces_to_nodes {false};
 
+    // When the ERF mesh is reconstructed rather than taken from the file
+    // (avg_grid_faces_to_nodes = false), build zlevels_stag from the domain-mean
+    // layer-thickness profile of the wrfinput file.  Set false to recover the older
+    // construction: a single geometric stretch whose first layer is the thickest first
+    // layer in the file and whose ratio is solved for so the column reaches z_top.
+    bool wrfinput_zlevels_from_file {true};
+
+    // Interpolate atmospheric state from coarse when creating finer level at later time?
+    bool interp_atmos_from_coarse {false};
+
     // Use forest canopy model?
     bool do_forest_drag {false};
 
@@ -2316,6 +2513,8 @@ struct SolverChoice {
  * @brief Interpretation used for input sounding profiles.
  * @var SolverChoice::terrain_type
  * @brief Terrain or immersed-boundary representation.
+ * @var SolverChoice::flat_terrain
+ * @brief Permit fixed-index planar averages after validating a flat fitted mesh.
  * @var SolverChoice::buildings_type
  * @brief Building representation.
  * @var SolverChoice::use_real_bcs
@@ -2478,6 +2677,8 @@ struct SolverChoice {
  * @brief Whether spatially varying moisture forcing is enabled.
  * @var SolverChoice::nudging_from_input_sounding
  * @brief Whether solution fields are nudged toward input sounding data.
+ * @var SolverChoice::nudging_from_observations
+ * @brief Whether solution fields are nudged toward observations at stations.
  * @var SolverChoice::use_rotate_surface_flux
  * @brief Whether MOST surface fluxes are rotated with terrain.
  * @var SolverChoice::use_eamxx_shoc

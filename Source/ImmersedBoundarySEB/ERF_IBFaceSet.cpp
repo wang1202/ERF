@@ -252,7 +252,13 @@ IBFaceSet::build (const MultiFab& blanking, const Geometry& geom)
         const int nranks = ParallelDescriptor::NProcs();
         const int nmine = static_cast<int>(mybx.size());
         Vector<int> counts(nranks, 0);
-        ParallelAllGather::AllGather(nmine, counts.data(), ParallelDescriptor::Communicator());
+        if (nranks == 1) {
+            // The non-MPI implementation of AllGather leaves its output
+            // untouched, so populate the single-rank count explicitly.
+            counts[0] = nmine;
+        } else {
+            ParallelAllGather::AllGather(nmine, counts.data(), ParallelDescriptor::Communicator());
+        }
         Vector<Box> allbx(mybx);
         AllGatherBoxes(allbx);
         Vector<int> owner;
@@ -579,7 +585,9 @@ IBFaceSet::compute_ground (Real dt)
     const Real* pkt = d_kth.data(); const Real* prc = d_rhocp.data(); const Real* pth = d_thick.data();
     Real* pS = d_T_slab.data();   Real* pG = d_G.data();
     ParallelFor(m_nface, [=] AMREX_GPU_DEVICE (int f) noexcept {
-        Real T[ibseb::SLAB_MAX_LAYERS];
+        // Zero-initialized: only the first nl entries are ever used, but the
+        // compiler cannot see that through the inlined solve and warns otherwise.
+        Real T[ibseb::SLAB_MAX_LAYERS] = {};
         for (int l = 0; l < nl; ++l) { T[l] = pS[f * nl + l]; }
         const Real dz = pth[f] / nl;
         pG[f] = ibseb::advance_slab_dirichlet(T, pT[f], Tint, pkt[f], prc[f], dz, dt, nl);
@@ -613,7 +621,9 @@ IBFaceSet::solve_balance (Real dt)
     Real* pH = d_H.data(); Real* pin = d_LW_down_in.data(); Real* pnet = d_LW_net.data();
     Real* pres = d_resid.data(); int* pnit = d_niter.data();
     ParallelFor(m_nface, [=] AMREX_GPU_DEVICE (int f) noexcept {
-        Real T[ibseb::SLAB_MAX_LAYERS];
+        // Zero-initialized: only the first nl entries are ever used, but the
+        // compiler cannot see that through the inlined solve and warns otherwise.
+        Real T[ibseb::SLAB_MAX_LAYERS] = {};
         for (int l = 0; l < nl; ++l) { T[l] = pS[f * nl + l]; }
         const Real dz = pth[f] / nl;
         // Conduction the implicit slab step will take for a skin temperature Ts: a Ts - b.

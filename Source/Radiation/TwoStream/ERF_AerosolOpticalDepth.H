@@ -2,6 +2,7 @@
 #define ERF_AEROSOL_OPTICAL_DEPTH_H_
 
 #include <AMReX_GpuControl.H>
+#include <AMReX_Math.H>
 #include <AMReX_FArrayBox.H>
 #include <cmath>
 
@@ -38,10 +39,10 @@
  * @return Clamped aerosol optical depth [0, 100]
  */
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-amrex::Real diagnose_tau_aerosol_constant(amrex::Real tau_aerosol_const)
+amrex::Real diagnose_tau_aerosol_constant (amrex::Real tau_aerosol_const)
 {
     // Guard against invalid input
-    if (!std::isfinite(tau_aerosol_const)) {
+    if (!amrex::Math::isfinite(tau_aerosol_const)) {
         return 0.0;
     }
 
@@ -73,13 +74,13 @@ amrex::Real diagnose_tau_aerosol_constant(amrex::Real tau_aerosol_const)
  * @return Clamped aerosol optical depth [0, 100]
  */
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-amrex::Real diagnose_tau_aerosol_exponential(amrex::Real z_level,
+amrex::Real diagnose_tau_aerosol_exponential (amrex::Real z_level,
                                             amrex::Real dz,
                                             amrex::Real tau_surface,
                                             amrex::Real scale_height_m)
 {
-    if (!std::isfinite(z_level) || !std::isfinite(dz) ||
-        !std::isfinite(tau_surface) || !std::isfinite(scale_height_m)) {
+    if (!amrex::Math::isfinite(z_level) || !amrex::Math::isfinite(dz) ||
+        !amrex::Math::isfinite(tau_surface) || !amrex::Math::isfinite(scale_height_m)) {
         return 0.0;
     }
     if (scale_height_m <= 0.0 || dz <= 0.0) {
@@ -119,7 +120,7 @@ amrex::Real diagnose_tau_aerosol_exponential(amrex::Real z_level,
  * @return Zero
  */
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-amrex::Real diagnose_tau_aerosol_table(int k)
+amrex::Real diagnose_tau_aerosol_table (int k)
 {
     // Future extension: implement per-level table lookup
     // For now, return 0 (no contribution)

@@ -9,7 +9,7 @@ using namespace amrex;
 
 #ifdef ERF_USE_NETCDF
 Box
-read_subdomain_from_wrfinput(int /*lev*/, const std::string& fname, int& ratio)
+read_subdomain_from_wrfinput (int /*lev*/, const std::string& fname, int& ratio)
 {
     int  is, js;
     int  nx, ny, nz;
@@ -127,7 +127,7 @@ read_from_wrfinput (int lev,
     }
     else if (NC_name == "MAPFAC_U" || NC_name == "MAPFAC_V" || NC_name == "MAPFAC_M" ||
              NC_name == "MUB"      || NC_name == "SST"      || NC_name == "LANDMASK"  ||
-             NC_name == "XLAT_V"   || NC_name == "XLONG_U"  || NC_name == "TSK" ||
+             NC_name == "XLAT"     || NC_name == "XLONG"    || NC_name == "TSK" ||
              NC_name == "PSFC"     || NC_name == "IVGTYP"   || NC_name == "ISLTYP" ||
              NC_name == "LAI"      || NC_name == "VEGFRA"   || NC_name == "TMN" ||
              NC_name == "SHDMIN"   || NC_name == "SHDMAX")

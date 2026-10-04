@@ -5,6 +5,7 @@
 
 #include "ERF_NCInterface.H"
 #include <AMReX.H>
+#include <AMReX_FileSystem.H>
 #include <AMReX_Print.H>
 
 #define abort_func amrex::Abort
@@ -25,6 +26,35 @@ void check_nc_error (int ierr)
     if (ierr != NC_NOERR) {
         printf("\n%s\n\n", nc_strerror(ierr));
         abort_func("Encountered NetCDF error; aborting");
+    }
+}
+
+/**
+ * utility function for checking the NetCDF error flag when opening or creating
+ * a file, so that the name of the offending file can be reported
+ *
+ * @param ierr Error flag from NetCDF
+ * @param fname Name of the file that NetCDF was asked to open or create
+ */
+void check_nc_file_error (int ierr, const std::string& fname)
+{
+    if (ierr != NC_NOERR) {
+        printf("\n%s\n\n", nc_strerror(ierr));
+        abort_func("Encountered NetCDF error while accessing the file \"" + fname + "\"; aborting");
+    }
+}
+
+/**
+ * utility function to verify that a file we are about to read actually exists,
+ * since NetCDF itself reports this only as a generic error
+ *
+ * @param fname Name of the file we are about to open for reading
+ */
+void check_nc_file_exists (const std::string& fname)
+{
+    if (!amrex::FileSystem::Exists(fname)) {
+        abort_func("Could not find the NetCDF file \"" + fname + "\" -- please check the file names "
+                   "given in the inputs file; aborting");
     }
 }
 } // namespace
@@ -461,6 +491,7 @@ void NCVar::get_attr (const std::string& name, std::vector<int>& values) const
 //Uncomment for parallel NetCDF
 void NCVar::par_access (const int cmode) const
 {
+    if (amrex::ParallelContext::NProcsAll() == 1) return;
     check_nc_error(nc_var_par_access(ncid, varid, cmode));
 }
 
@@ -546,7 +577,7 @@ int NCGroup::num_attributes () const
     return nattrs;
 }
 
-int NCGroup::num_variables() const
+int NCGroup::num_variables () const
 {
     int nvars;
     check_nc_error(nc_inq(ncid, nullptr, &nvars, nullptr, nullptr));
@@ -555,13 +586,15 @@ int NCGroup::num_variables() const
 
 bool NCGroup::has_group (const std::string& name) const
 {
-    int ierr = nc_inq_ncid(ncid, name.data(), nullptr);
+    int id;
+    int ierr = nc_inq_ncid(ncid, name.data(), &id);
     return (ierr == NC_NOERR);
 }
 
 bool NCGroup::has_dim (const std::string& name) const
 {
-    int ierr = nc_inq_dimid(ncid, name.data(), nullptr);
+    int id;
+    int ierr = nc_inq_dimid(ncid, name.data(), &id);
     return (ierr == NC_NOERR);
 }
 
@@ -642,7 +675,7 @@ void NCGroup::get_attr (const std::string& name, std::vector<float>& values) con
         nc_get_att_float(ncid, NC_GLOBAL, name.data(), values.data()));
 }
 
-void NCGroup::get_attr(const std::string& name, std::vector<int>& values) const
+void NCGroup::get_attr (const std::string& name, std::vector<int>& values) const
 {
     size_t lenp;
     check_nc_error(nc_inq_attlen(ncid, NC_GLOBAL, name.data(), &lenp));
@@ -703,28 +736,40 @@ void NCGroup::exit_def_mode () const { check_nc_error(nc_enddef(ncid)); }
 NCFile NCFile::create (const std::string& name, const int cmode)
 {
     int ncid;
-    check_nc_error(nc_create(name.data(), cmode, &ncid));
+    check_nc_file_error(nc_create(name.data(), cmode, &ncid), name);
     return NCFile(ncid);
 }
 
 NCFile NCFile::open (const std::string& name, const int cmode)
 {
     int ncid;
-    check_nc_error(nc_open(name.data(), cmode, &ncid));
+    check_nc_file_exists(name);
+    check_nc_file_error(nc_open(name.data(), cmode, &ncid), name);
     return NCFile(ncid);
 }
 
 NCFile NCFile::create_par (const std::string& name, const int cmode, MPI_Comm comm, MPI_Info info)
 {
     int ncid;
-    check_nc_error(nc_create_par(name.data(), cmode, comm, info, &ncid));
+    if (amrex::ParallelContext::NProcsAll() > 1) {
+        check_nc_file_error(nc_create_par(name.data(), cmode, comm, info, &ncid), name);
+    } else {
+        // revert to serial file with 1 rank
+        check_nc_file_error(nc_create(name.data(), cmode, &ncid), name);
+    }
     return NCFile(ncid);
 }
 
 NCFile NCFile::open_par (const std::string& name, const int cmode, MPI_Comm comm, MPI_Info info)
 {
     int ncid;
-    check_nc_error(nc_open_par(name.data(), cmode, comm, info, &ncid));
+    check_nc_file_exists(name);
+    if (amrex::ParallelContext::NProcsAll() > 1) {
+        check_nc_file_error(nc_open_par(name.data(), cmode, comm, info, &ncid), name);
+    } else {
+        // revert to serial with 1 rank
+        check_nc_file_error(nc_open(name.data(), cmode, &ncid), name);
+    }
     return NCFile(ncid);
 }
 

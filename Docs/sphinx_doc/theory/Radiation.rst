@@ -249,12 +249,92 @@ is enough to satisfy this. The model aborts with a message naming this input if 
 vertically decomposed grid. The horizontal decomposition is unconstrained, and the results do not
 depend on it or on the ``fabarray.mfiter_tile_size`` tiling.
 
+On a refined run a level is free to cover only part of the column, and that is supported: a
+level whose grids do not reach the domain top or bottom is a *nested patch*, and rather than
+sweeping it ERF interpolates its heating rates and fluxes from its parent -- the same route
+RRTMGP takes (``is_nested_patch``). Nothing needs to be set for this.
+
+The requirement is per box, not per level: the sweep needs a whole column inside one box. Several
+layouts fail it -- a level that stops short of the domain top, a level tagged at different heights
+in different horizontal regions (surface convection in one place, cloud tops in another), or grids
+decomposed in the vertical -- and above level 0 they all take the same route, interpolation from
+the parent. None of them is an error.
+
+Level 0 is the exception, because it has no parent. It always covers the domain, so a box there
+that does not span :math:`z` is decomposed in the vertical, and that is refused at start-up.
+ERF's default ``amr.no_box_split_dir = 2`` already forbids that decomposition, so the refusal is
+a backstop rather than something a normal deck meets.
+
+If you would rather a refinement patch be solved on its own than interpolated, setting
+
+.. code-block:: none
+
+   amr.refine_whole_domain_dir = 2
+
+makes AMReX cluster the tagged cells in the horizontal only and emit refinement boxes that span
+the whole domain in :math:`z`, so every level carries complete columns and every level runs its
+own sweep. A refinement box given explicitly through ``erf.boxN.in_box_lo``/``in_box_hi`` spans
+:math:`z` already when the :math:`z` extent is omitted, since the two-value form defaults to the
+full domain.
+
+Multiple Levels
+--------------------------------------
+
+Every level that carries complete columns runs its own column sweep over its own state, terrain
+and surface properties, and writes its own heating rates into ``qheating_rates[lev]``; a nested
+patch is interpolated from its parent instead. The RhoTheta source applies them at every level. There is no coarse-fine treatment of the radiative fluxes and none is needed in the
+usual sense -- radiation is a source term, not a conserved flux that is refluxed -- but two
+consequences follow and are worth stating plainly:
+
+- **A lateral seam.** Across the edge of a patch, the coarse and the fine solution of the same
+  physical column differ slightly, because they are computed on different grids. For a smooth
+  broadband two-stream model the difference is small, but nothing smooths it. Under
+  ``erf.coupling_type = TwoWay`` (the default) coarse cells underneath a patch have their state
+  replaced by the fine solution at the end of each step (``AverageDown``), so the discrepancy
+  does not accumulate there; under ``OneWay`` there is no such replacement and it does.
+- **No feedback upward.** The fine level's own structure does not influence the coarse level's
+  radiation.
+
+A subcycled fine level calls radiation once per level step, so it runs ``nsubsteps[lev]`` times
+as often as its parent -- twice as often for a refinement ratio of two. This matches the RRTMGP
+path and is physically correct, since the heating is recomputed from the current old state each
+time; there is no call-interval input to reduce it.
+
+The surface energy balance runs on every level. Each level carries its own force-restore
+surface state, evolves it from the fluxes its own sweep computes, and checkpoints it, and the
+diagnostic SEB residual is reported per level. Because the prognostic surface temperature *is*
+the longwave boundary condition, the levels must not be allowed to hold different temperatures
+for one physical surface, so ERF keeps them consistent in three places:
+
+- **A new level starts from its parent.** ``t_sfc`` and ``q_sfc`` are interpolated from the
+  coarse level when a level is created, so a fine level begins from the surface its parent has
+  already reached rather than from ``erf.rad_t_sfc``.
+- **Fine levels are averaged down.** After the finer levels advance, their surface state is
+  averaged onto the coarse level, exactly as the atmospheric state is. This runs under
+  ``erf.coupling_type = TwoWay``; with ``OneWay`` the levels are left to evolve independently,
+  which is what that option asks for everywhere else as well.
+  A level that cannot sweep is skipped: one whose boxes do not span the domain in
+  :math:`z` takes its radiation fields from its parent and never advances a surface state
+  of its own, so averaging its copy down would overwrite the coarse surface underneath the
+  patch with the value it was created with.
+- **A regrid keeps what the surface had reached.** Rebuilding a level reallocates its surface
+  fields, so the pre-regrid values are copied back onto the new grids, with cells the new grids
+  added filled from the parent.
+
+The surface temperature a fine level sees is therefore its parent's wherever the fine level has
+not yet changed it, which is a real limitation: refining does not by itself give the surface
+more structure than the coarse grid resolved. What refinement does give is a surface that
+responds to the fine level's own radiative fluxes.
+
 Limitations
 --------------------------------------
 
-- **Single level.** The sweep has no coarse-fine treatment of the fluxes, and a fine-level box
-  never holds a whole column of its level, so ``erf.radiation_model = TwoStream`` requires
-  ``amr.max_level = 0``. The run stops at start-up with a message saying so.
+- **Refined runs.** Multiple levels are supported; see `Multiple Levels`_ above for the grid
+  requirement, the lateral coarse-fine seam, the absence of feedback from fine to coarse, the
+  subcycled call cadence, and how the surface energy balance is kept consistent between levels.
+  A run with Noah-MP is refined as well: every level hands its own Noah-MP its forcing, and a
+  finer level runs the land model on a land setup file of its own, or else takes its land state
+  from level 0; see `Radiative Forcing of a Land-Surface Model`_.
 - **Sun and site.** The sun, the site and the surface temperature come from the inputs the
   RRTMGP interface reads (``erf.fixed_solar_zenith_angle``, ``erf.fixed_total_solar_irradiance``,
   ``erf.rad_t_sfc``, ``erf.rad_cons_lat``/``lon``, ``erf.rad_orbital_*``, ``start_datetime``),
@@ -262,10 +342,12 @@ Limitations
   over each column, not its average over the radiation interval. Without a fixed zenith angle
   and irradiance the run needs ``start_datetime``, and stops at the first sweep otherwise. The
   surface temperature of the longwave boundary is, in RRTMGP's order, the land-surface model's
-  field, else the surface layer's temperature, else ``erf.rad_t_sfc``; the prognostic surface
+  field, else the surface layer's potential temperature converted to absolute temperature, else
+  ``erf.rad_t_sfc``; the prognostic surface
   energy balance, when on, supplies its own state ahead of the surface layer. The surface
   layer works in potential temperature, so its value is converted to temperature with the
-  Exner function of the lowest cell before it enters the :math:`\sigma T_s^4` emission; with a
+  Exner function evaluated at the physical surface pressure diagnosed from the lowest atmospheric cell
+  before it enters the :math:`\sigma T_s^4` emission; with a
   surface layer present, ``erf.rad_t_sfc`` is the initial value of the prognostic surface
   temperature when the surface energy balance evolves one, and unused otherwise.
 - **Call cadence.** The sweep runs once every slow step, from the old state, and there is no
@@ -274,7 +356,11 @@ Limitations
 - **Diagnostics file.** The diagnostics are off by default. Setting
   ``erf.radiation.diag_enable = true`` writes ``radiation_diag.dat``
   (``erf.radiation.diag_file``) in the run directory, with a ``pre_dycore`` and a
-  ``post_dycore`` row per step. The file is appended to rather than truncated, as ERF's other
+  ``post_dycore`` row per step for every level that sweeps. Each of them appends to the one
+  file and the last column, ``level``, tells the rows apart. A level interpolated from its
+  parent contributes no rows at all -- it runs no sweep, so it has no fluxes of its own to
+  report -- so on a refined run the rows present are those of the sweeping levels, not one
+  set per level in the hierarchy. The file is appended to rather than truncated, as ERF's other
   data logs are, so a rerun in the same directory extends the previous run's rows.
 
 Surface Energy Balance
@@ -284,9 +370,56 @@ The net surface shortwave and longwave fluxes come from the land-surface model w
 them (Noah-MP's absorbed shortwave ``sav + sag`` and, with the sign flipped to absorbed, its net
 longwave ``fira``); otherwise, with ``erf.radiation.seb_use_radiation_fluxes = true``, from the
 two-stream sweep's own surface fluxes in every column; otherwise from the scalar
-``seb_sw_flux_default`` and ``seb_lw_flux_default``. The sensible, latent and ground heat fluxes
-and the deep-soil reservoir values are the scalar defaults unless the land-surface model exposes
-them by name (``grdflx`` for the ground heat flux).
+``seb_sw_flux_default`` and ``seb_lw_flux_default``.
+
+The sensible heat flux :math:`H` and latent heat flux :math:`\text{LE}` come, in order of
+precedence, from a land-surface model field of that name (``hfx``, ``lh``; no land model exposes
+one today); otherwise, with ``erf.radiation.seb_turbulent_flux_source = surface_layer`` (the
+default), from the fluxes the ``zlo`` surface layer applies to the air,
+
+.. math::
+
+   H = c_p \, \overline{\rho w'\theta'}\big|_{\text{sfc}}, \qquad
+   \text{LE} = L_v \, \overline{\rho w' q_v'}\big|_{\text{sfc}},
+
+positive away from the surface -- the same conversion as the ``sensible_heat_flux`` and
+``latent_heat_flux`` 2D outputs, so the ground loses exactly what those report the air gaining;
+otherwise from the scalar ``seb_hfx_default`` and ``seb_lh_default``. The surface layer is the
+source wherever its flux field exists, that is with any diffusion or turbulence closure; the
+defaults apply with ``seb_turbulent_flux_source = defaults``, without a ``zlo`` surface layer, on EB
+terrain (where the surface layer's flux goes to the embedded boundary instead), without diffusion
+or a closure, and for :math:`\text{LE}` without a moisture model. An adiabatic surface layer
+(``erf.most.surf_temp_flux = 0``) has the field and a zero flux, so :math:`H = 0` there rather than
+``seb_hfx_default``; ERF warns at start-up when a nonzero default is replaced this way. With
+``erf.use_rotate_surface_flux`` the surface layer splits its flux over the three faces of the lowest
+cell, and the balance, like the 2D outputs, removes only the vertical-face part, :math:`\cos`
+of the slope times :math:`H` and :math:`\text{LE}`; ERF warns at start-up. The fluxes the balance used are written as the ``seb_hfx`` and ``seb_lh`` 2D
+plotfile variables.
+
+By default the surface layer computes these fluxes from its own surface temperature and moisture
+(``erf.most.surf_temp`` and the like), so the coupling runs one way: the balance loses what the
+surface layer puts into the air, but the flux does not respond to :math:`T_s`. With
+``erf.radiation.seb_surface_layer_uses_skin = true`` it runs both ways. Before it computes its
+fluxes each step, the surface layer sets its land surface temperature to the skin the balance
+reached at the end of the previous step, as a potential temperature,
+
+.. math::
+
+   \theta_s = T_s \left( \frac{p_0}{p_{\text{sfc}}} \right)^{R_d/c_p},
+
+with the surface pressure :math:`p_{\text{sfc}}` diagnosed from the lowest cell (the conversion
+coupled sea-surface temperatures use). A warmer skin then gives a larger :math:`H`, which the
+balance removes. The surface moisture stays the surface layer's own: the balance's :math:`q_s` is a
+soil-water store, not a surface specific humidity. The option needs the prognostic balance,
+``seb_turbulent_flux_source = surface_layer``, a ``zlo`` surface layer in surface-temperature mode
+(``erf.most.surf_temp`` given, no ``erf.most.surf_heating_rate``), no EB terrain, no
+``erf.use_rotate_surface_flux``, and no land-surface or surface model; ERF stops at start-up
+otherwise. On a level that takes its
+radiation from its parent (a nested patch that does not span the column), no skin evolves, and
+the surface layer keeps its own temperature there.
+
+The ground heat flux :math:`G` and the deep-soil reservoir values are the scalar defaults unless
+the land-surface model exposes them by name (``grdflx`` for the ground heat flux).
 
 The surface energy balance residual is defined as the net radiative flux minus the turbulent and
 ground heat fluxes:
@@ -326,6 +459,10 @@ In discretized form (Euler forward step), the update is:
 
 After the update, :math:`T_s` is clamped to physically reasonable bounds [``seb_prognostic_t_min_k``, ``seb_prognostic_t_max_k``].
 
+In the force-restore method the restoring term is the heat conducted into the soil, so it already
+plays the part of :math:`G`. Leave ``seb_grdflx_default`` at 0 with the prognostic mode: a nonzero
+value removes that heat a second time, and ERF prints a warning when it is set.
+
 Surface Moisture Evolution
 ---------------------------
 
@@ -347,12 +484,70 @@ In discretized form:
 
 After the update, :math:`q_s` is clamped to [``seb_prognostic_q_min``, ``seb_prognostic_q_max``].
 
-Noah-MP Precedence and Double-Counting Safeguard
+External Surface-Temperature Provider Ownership
 -------------------------------------------------
 
-When Noah-MP is active at a particular level, the SEB prognostic update is automatically skipped at that level,
-and Noah-MP's own surface prognostics (which include soil heat conduction and explicit soil moisture layers)
-are used instead. This prevents double-counting of surface energy and moisture evolution.
+TwoStream advances its prognostic surface state only when TwoStream owns the longwave surface-temperature
+boundary. If an authoritative external or LSM surface-temperature provider owns that boundary at a level, the
+TwoStream prognostic update is skipped there, preventing an unused shadow state from being evolved alongside
+the provider. Noah-MP's ``t_sfc`` field and SLM's ``tsurf`` field supplied through the canonical SurfaceModel
+radiation input are examples of external providers. The simplified prognostic state does not override either
+provider.
+
+The per-column temperature resolver retains its existing fallback order: valid external/LSM absolute
+temperature, valid prognostic SEB absolute temperature when offered, valid SurfaceLayer potential temperature
+converted to absolute temperature, then the scalar ``erf.rad_t_sfc`` fallback.
+
+.. _sec:TwoStreamLandForcing:
+
+Radiative Forcing of a Land-Surface Model
+-------------------------------------------------
+
+With ``erf.land_surface_model = NOAHMP`` the two-stream model supplies the radiation Noah-MP
+integrates on, as RRTMGP does. After each column sweep it stores, per column,
+
+- ``SWDOWN``: the total downwelling shortwave at the surface, direct plus diffuse [W/m^2] --
+  the incident flux, not the net, since Noah-MP applies its own albedo;
+- ``GLW``: the downwelling longwave at the surface [W/m^2];
+- ``COSZEN``: the cosine of the solar zenith angle of that sweep, floored at zero.
+
+The fluxes are the surface-interface values of ``rad_fluxes`` (components 1 and 3 at the lowest
+interface), after any clear/cloudy blending, so they are the same fluxes that heat the
+atmosphere. They are copied into Noah-MP's ``sw_flux_dn``, ``lw_flux_dn`` and
+``cos_zenith_angle`` fields every step, since the sweep runs every step; the land model runs
+after the dycore and so always sees the current step's radiation. Those fields are part of the
+land model's checkpointed data, and a restarted run refills them before its first land step.
+Until a sweep has run on a level the stored fields hold the land model's undefined sentinel
+rather than zero, so a copy made before one is caught by Noah-MP's missing-input check
+instead of being taken as a dark, 0 K sky.
+The two-stream model is broadband, so the visible / near-infrared direct / diffuse split that
+RRTMGP also provides is not written; Noah-MP does not read it. SLM does, so the two-stream model
+does not feed SLM.
+
+In the other direction the sweep reads Noah-MP's surface: its broadband ``albedo``
+(reflected over incident shortwave, so the shortwave the sweep reflects at the ground is the
+shortwave Noah-MP reflects -- not ``sfc_alb_dir_vis``, the visible direct-beam band of the four
+RRTMGP takes, which over vegetation is several times smaller), its emissivity ``sfc_emis`` and
+its skin temperature ``t_sfc``. Each is taken column by column where Noah-MP holds a value.
+Noah-MP leaves its undefined placeholder over open water and sea ice, in the albedo at night, and
+everywhere before its first step, which runs after the first radiation call; those columns take
+``erf.radiation.surface_albedo_sw``, ``erf.radiation.surface_emissivity_lw`` and the
+surface-layer or ``erf.rad_t_sfc`` temperature. With ``erf.radiation.seb_enable`` the balance's
+inputs from Noah-MP (the absorbed shortwave ``sav + sag``, the net longwave ``-fira``, the ground
+flux ``grdflx`` and the 2 m humidity) follow the same rule and fall back to the ``seb_*_default``
+constants, so a column Noah-MP did not compute no longer carries the placeholder into the
+balance. Noah-MP exposes no ``hfx`` or ``lh`` field, but over land the surface layer applies
+Noah-MP's fluxes (it takes :math:`u_*` and :math:`\theta_*` from them), so with the default
+``seb_turbulent_flux_source = surface_layer`` the balance removes Noah-MP's :math:`H` and
+:math:`\text{LE}` over land and the surface layer's own over water.
+
+On a refined run every level hands its own Noah-MP its forcing. A level whose boxes span the
+domain in z writes the fluxes of its own sweep. A nested patch, which does not sweep, takes
+its parent's, interpolated (piecewise constant) with the rest of its radiation fields. A
+finer level runs Noah-MP on that forcing only if it has a land setup file of its own; otherwise
+it takes its land state from level 0 (see :doc:`../CouplingToNoahMP`). Without a land model, or with SLM, the two-stream model
+stores nothing extra and its results are unchanged. The case
+``Exec/RegTests/NoahMP_Ideal/inputs_noahmp_twostream`` exercises the coupling.
 
 Cloud Fraction Diagnosis
 --------------------------------

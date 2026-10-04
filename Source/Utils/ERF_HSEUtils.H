@@ -1,6 +1,8 @@
 #ifndef ERF_HSEUTIL_H_
 #define ERF_HSEUTIL_H_
 
+#include <AMReX_Math.H>
+
 #include "ERF_MicrophysicsUtils.H"
 #include "ERF_Constants.H"
 #include "ERF_EOS.H"
@@ -59,12 +61,12 @@ namespace HSEutils
         // convergence test below evaluate to false on the very first pass, so we
         // would silently return the initial guess and leave, e.g., an all-zero
         // base state.  Trap that here rather than propagating it downstream.
-        if (!(P > amrex::Real(0)) || !(rd > amrex::Real(0)) || !std::isfinite(F)) {
+        if (!(P > amrex::Real(0)) || !(rd > amrex::Real(0)) || !amrex::Math::isfinite(F)) {
             AMREX_DEVICE_PRINTF("ERROR: HSE Newton started from an invalid state: P = %e, rd = %e, F = %e\n",
                                 double(P), double(rd), double(F));
             AMREX_DEVICE_PRINTF("       Check the surface pressure/temperature used to seed the integration%s\n", "");
         }
-        AMREX_ALWAYS_ASSERT(P > amrex::Real(0) && rd > amrex::Real(0) && std::isfinite(F));
+        AMREX_ALWAYS_ASSERT(P > amrex::Real(0) && rd > amrex::Real(0) && amrex::Math::isfinite(F));
 
         int iter=0;
         int max_iter=20;
@@ -475,8 +477,8 @@ Real vapor_mixing_ratio (const Real p_b, const Real T_b, const Real RH, const bo
 
 AMREX_FORCE_INLINE
 AMREX_GPU_HOST_DEVICE
-Real compute_F_for_temp_in_zone(const Real T_b, const Real p_b, const Real q_t, const Real eq_pot_temp,
-                                const bool use_empirical, const int which_zone, const Real scaled_height)
+Real compute_F_for_temp_in_zone (const Real T_b, const Real p_b, const Real q_t, const Real eq_pot_temp,
+                                 const bool use_empirical, const int which_zone, const Real scaled_height)
 {
     Real fac = Cp_d + Cp_l*q_t;
     Real RH  = compute_relative_humidity(p_b, T_b, use_empirical, which_zone, scaled_height);
@@ -672,12 +674,12 @@ Real compute_p_k_in_zone (Real &p_k, const Real p_k_minus_1, Real &theta_k, Real
 AMREX_FORCE_INLINE
 AMREX_GPU_HOST_DEVICE
 void
-init_isentropic_hse_no_terrain(Real *theta, Real* r, Real* p, Real *q_v,
-                               const Real& dz, const int& khi, const Real q_t,
-                               const Real eq_pot_temp, const bool use_empirical,
-                               const bool T_from_theta = false,
-                               const Real z_tr_1 = -one, const Real z_tr_2 = -one,
-                               const Real theta_0 = amrex::Real(300), const Real theta_tr = amrex::Real(300), const Real T_tr = amrex::Real(300))
+init_isentropic_hse_no_terrain (Real *theta, Real* r, Real* p, Real *q_v,
+                                const Real& dz, const int& khi, const Real q_t,
+                                const Real eq_pot_temp, const bool use_empirical,
+                                const bool T_from_theta = false,
+                                const Real z_tr_1 = -one, const Real z_tr_2 = -one,
+                                const Real theta_0 = amrex::Real(300), const Real theta_tr = amrex::Real(300), const Real T_tr = amrex::Real(300))
 {
     // theta_0, theta_tr and T_tr are used only when T_from_theta is set. Their
     // defaults are still physical temperatures: compute_theta is inlined into

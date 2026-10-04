@@ -66,9 +66,25 @@ public:
           const amrex::BoxArray& ba,
           amrex::MultiFab* cons_in) override
     {
-        // Ensure the boxes span klo -> khi
+        // Check for nested patches: fine levels that don't reach the model top
+        // These need special handling since radiation requires complete atmospheric columns
         int klo = geom.Domain().smallEnd(2);
         int khi = geom.Domain().bigEnd(2);
+
+        // Detect nested patches: a nested fine level doesn't span the full domain vertically.
+        // Use ba.minimalBox() which gives the bounding box of all grids on this level.
+        // If that box doesn't reach the domain top or bottom, it's a nested patch.
+        amrex::Box minimal_box = ba.minimalBox();
+        bool is_nested_patch = (minimal_box.smallEnd(2) > klo) || (minimal_box.bigEnd(2) < khi);
+
+        // Update the nested patch flag - must be set/cleared on every Init call
+        // so that levels that stop being nested after regrid will resume radiation computation
+        m_is_nested_patch = is_nested_patch;
+
+        // Skip radiation on nested patches - heating rates will be interpolated from coarser level
+        if (is_nested_patch) {
+            return;
+        }
 
         // Reset vector of offsets for columnar data
         m_nlay = geom.Domain().length(2);
@@ -78,6 +94,8 @@ public:
         m_col_offsets.resize(int(ba.size()));
         for (amrex::MFIter mfi(*cons_in); mfi.isValid(); ++mfi) {
             const amrex::Box& vbx = mfi.validbox();
+            // This assertion catches true vertical MPI decomposition (individual boxes that don't
+            // span the full domain height). The nested patch case is handled above by returning early.
             AMREX_ALWAYS_ASSERT_WITH_MESSAGE((klo == vbx.smallEnd(2)) &&
                                              (khi == vbx.bigEnd(2)),
                                              "Vertical decomposition with radiation is not allowed.");
@@ -97,6 +115,14 @@ public:
         // grow back. It is zero only when m_ncol is zero, and a rank with no columns
         // does no radiation work.
         m_ncol_chunk = amrex::min(m_ncol, m_ncol_chunk_requested);
+
+        // NOTE: the buffers are deliberately NOT allocated here.  set_grids() allocates them
+        //       at the top of every Run() that actually updates radiation, and finalize_impl()
+        //       frees them again at the end of it, which is what keeps only one level's worth
+        //       of RRTMGP working memory resident at a time (see RRTMGP_Memory_Reduction.md).
+        //       Allocating here as well would hold every level's buffers from the moment that
+        //       level is created until its first Run, so the whole hierarchy would be live
+        //       simultaneously at startup -- the peak the chunking exists to avoid.
     };
 
     virtual
@@ -110,22 +136,40 @@ public:
          amrex::MultiFab* cons_in,
          amrex::iMultiFab* lmask,
          amrex::MultiFab*  t_surf,
-         amrex::Vector<amrex::MultiFab*>& lsm_input_ptrs,
-         amrex::Vector<amrex::MultiFab*>& lsm_output_ptrs,
+         const amrex::Vector<const amrex::MultiFab*>& lsm_input_ptrs,
+         const amrex::Vector<amrex::MultiFab*>& lsm_output_ptrs,
          amrex::MultiFab* qheating_rates,
          amrex::MultiFab* rad_fluxes,
          amrex::MultiFab* z_phys,
          amrex::MultiFab* lat_ptr,
          amrex::MultiFab* lon_ptr,
-         const bool updated_lsm) override
+         const bool updated_lsm,
+         amrex::Real& declin,
+         amrex::Real& calday) override
     {
+        // Skip radiation computation on nested patches - heating rates will be
+        // filled via interpolation from coarser level in ERF::FillPatch
+        if (m_is_nested_patch) {
+            return;
+        }
+
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_nlay == geom.Domain().length(2),
+            "Radiation: m_nlay (" + std::to_string(m_nlay) +
+            ") doesn't match domain vertical extent (" +
+            std::to_string(geom.Domain().length(2)) + ")");
+
         set_grids(level, step, time, dt, ba, geom,
                   cons_in, lmask, t_surf,
                   lsm_input_ptrs, qheating_rates,
                   rad_fluxes, z_phys, lat_ptr, lon_ptr,
                   updated_lsm);
         rad_run_impl(lsm_output_ptrs);
+        declin = m_declin;
+        calday = m_calday;
     }
+
+    bool radiation_updated () const override { return m_update_rad && !m_is_nested_patch; }
 
     // Set the grid info for columnar data in KOKKOS
     void
@@ -138,7 +182,7 @@ public:
                amrex::MultiFab* cons_in,
                amrex::iMultiFab* lmask,
                amrex::MultiFab*  t_surf,
-               amrex::Vector<amrex::MultiFab*>& lsm_input_ptrs,
+               const amrex::Vector<const amrex::MultiFab*>& lsm_input_ptrs,
                amrex::MultiFab* qheating_rates,
                amrex::MultiFab* rad_fluxes,
                amrex::MultiFab* z_phys,
@@ -156,13 +200,13 @@ public:
 
     // Fill KOKKOS Views from AMReX MultiFabs
     void
-    mf_to_kokkos_buffers(amrex::iMultiFab* lmask,
+    mf_to_kokkos_buffers (amrex::iMultiFab* lmask,
                          amrex::MultiFab*  t_surf,
-                         amrex::Vector<amrex::MultiFab*>& lsm_input_ptrs);
+                         const amrex::Vector<const amrex::MultiFab*>& lsm_input_ptrs);
 
     // Fill AMReX MultiFabs from KOKKOS Views
     void
-    kokkos_buffers_to_mf (amrex::Vector<amrex::MultiFab*>& lsm_output_ptrs);
+    kokkos_buffers_to_mf (const amrex::Vector<amrex::MultiFab*>& lsm_output_ptrs);
 
     // Write the rrtmgp fluxes
     void
@@ -178,11 +222,11 @@ public:
 
     // Finalize the implementation
     void
-    finalize_impl (amrex::Vector<amrex::MultiFab*>& lsm_output_ptrs);
+    finalize_impl (const amrex::Vector<amrex::MultiFab*>& lsm_output_ptrs);
 
     // Wrapper for implementation steps
     void
-    rad_run_impl (amrex::Vector<amrex::MultiFab*>& lsm_output_ptrs)
+    rad_run_impl (const amrex::Vector<amrex::MultiFab*>& lsm_output_ptrs)
     {
         if (m_update_rad) {
             amrex::Print() << "Radiation advancing level " << m_lev << " at (YY-MM-DD SS) " << m_orbital_year << '-'
@@ -210,6 +254,12 @@ public:
         return m_lsm_output_names;
     }
 
+    // Check if this is a nested patch (doesn't reach model top)
+    bool is_nested_patch () const override
+    {
+        return m_is_nested_patch;
+    }
+
     // Populate datalog structures
     void
     populateDatalogMF ();
@@ -223,6 +273,9 @@ private:
 
     // Process interface vars from ERF/AMReX
     //===================================================================================
+
+    // True if this level is a nested patch that doesn't reach model top
+    bool m_is_nested_patch = false;
 
     // Grid level
     int m_lev;
@@ -269,6 +322,7 @@ private:
 
     // T surf if no LSM is available
     amrex::Real m_rad_t_sfc = -1;
+    amrex::Real m_rdOcp = RdoCp;
 
     // Pointer to the CC conserved vars
     amrex::MultiFab* m_cons_in = nullptr;
@@ -373,6 +427,9 @@ private:
     // Fixed solar zenith angle to use for shortwave calculations
     // This is only used if a positive value is supplied
     amrex::Real m_fixed_solar_zenith_angle = -amrex::Real(9999.);
+
+    amrex::Real m_declin = 0.0;
+    amrex::Real m_calday = 0.0;
 
     // Dimensions to be read from lookup data
     int m_nswbands;

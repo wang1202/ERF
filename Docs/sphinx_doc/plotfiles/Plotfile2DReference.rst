@@ -110,7 +110,7 @@ configuration and runtime details that cannot be inferred from metadata alone.
      - ``SurfaceLayer``
      - ``K``
      - ``FillMinus999WhenUnavailable``
-     - Surface temperature from the surface layer
+     - Surface potential temperature from the surface layer
    * - ``q_surf``
      - ``SurfaceLayer``
      - ``kg/kg``
@@ -126,6 +126,26 @@ configuration and runtime details that cannot be inferred from metadata alone.
      - ``W/m^2``
      - ``FillMinus999WhenUnavailable``
      - Outgoing longwave radiation at the model top
+   * - ``seb_t_sfc``
+     - ``Radiation``
+     - ``K``
+     - ``FillMinus999WhenUnavailable``
+     - Prognostic surface temperature from the two-stream simplified surface energy balance
+   * - ``seb_q_sfc``
+     - ``Radiation``
+     - ``kg/kg``
+     - ``FillMinus999WhenUnavailable``
+     - Prognostic surface specific humidity from the two-stream simplified surface energy balance
+   * - ``seb_hfx``
+     - ``Radiation``
+     - ``W/m^2``
+     - ``FillMinus999WhenUnavailable``
+     - Sensible heat flux in the two-stream simplified surface energy balance
+   * - ``seb_lh``
+     - ``Radiation``
+     - ``W/m^2``
+     - ``FillMinus999WhenUnavailable``
+     - Latent heat flux in the two-stream simplified surface energy balance
    * - ``sens_flux``
      - ``SurfaceFlux``
      - ``kg K m^-2 s^-1``
@@ -455,6 +475,20 @@ The selection contract and the value written after selection are separate:
    * - ``OLR``
      - Selectable: fixed request name.
      - Value: radiation output; ``-999`` when the radiation source is absent.
+   * - ``seb_t_sfc``, ``seb_q_sfc``
+     - Selectable: fixed request names.
+     - Value: the two-stream simplified surface energy balance's own prognostic surface
+       state, which is distinct from Noah-MP's ``t_sfc`` and from the surface layer's
+       ``t_surf``. ``-999`` unless the two-stream solver is running with
+       ``erf.radiation.seb_enable = true``.
+   * - ``seb_hfx``, ``seb_lh``
+     - Selectable: fixed request names.
+     - Value: the sensible and latent heat fluxes the two-stream surface energy balance
+       used at its last update, positive away from the surface. With
+       ``erf.radiation.seb_turbulent_flux_source = surface_layer`` (the default) they
+       equal ``sensible_heat_flux`` and ``latent_heat_flux`` wherever no land-surface
+       model supplies them. ``-999`` unless the two-stream solver is running with
+       ``erf.radiation.seb_enable = true``.
    * - ``sens_flux``, ``laten_flux``
      - Selectable: fixed request names.
      - Value: legacy conservative surface flux outputs.
