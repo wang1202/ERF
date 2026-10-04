@@ -76,7 +76,18 @@ public:
         // Whether the configured radiation model writes Noah-MP's radiation inputs
         // (SWDOWN, GLW, COSZEN); see the first-land-step check in Advance_With_State.
         m_radiation_feeds_lsm = sc.rad_feeds_lsm();
+        m_radiation_model_name = amrex::getEnumNameString(sc.rad_type);
+        // A run initialized from WRF or metgrid files names a finer level's file with
+        // erf.nc_init_file_<lev>; an idealized one has none (see Init).
+        m_idealized_init = (sc.init_type != InitType::WRFInput &&
+                            sc.init_type != InitType::Metgrid);
     }
+
+    // Whether this level runs the Noah-MP driver on a land setup file of its own (level 0
+    // always does), as opposed to taking its land state from level 0 (interp_from_lev0).
+    // Set in Init.
+    [[nodiscard]] bool
+    Runs_Own_Land_Driver () const override { return m_has_nc_file; }
 
     // Initialize data structures
     void
@@ -418,8 +429,11 @@ private:
     // Update status
     bool m_updated = false;
 
-    // Do we have a nc init file?
+    // Does this level run the driver on a land setup file of its own? (See Init.)
     bool m_has_nc_file = false;
+
+    // Not initialized from WRF or metgrid files (set in Define).
+    bool m_idealized_init = false;
 
     // Set once a land step has seen valid radiation inputs (or warned that a model
     // that never writes them is in use), so the check in Advance_With_State (a global
@@ -441,9 +455,11 @@ private:
     // its rad_freq_in_steps schedule). Set by Advance_With_State.
     int m_first_advance_nstep = -1;
 
-    // True when the configured radiation model writes the radiation inputs (RRTMGP), so
-    // an input still missing on the first land step is a broken coupling, not a
-    // configuration without radiation. Set in Define.
+    // True when the configured radiation model writes the radiation inputs (RRTMGP, or
+    // TwoStream), so an input still missing on the first land step is a broken coupling,
+    // not a configuration without radiation. Set in Define, with the model's name for the
+    // messages.
     bool m_radiation_feeds_lsm = false;
+    std::string m_radiation_model_name;
 };
 #endif

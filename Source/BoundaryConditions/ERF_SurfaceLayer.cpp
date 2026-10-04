@@ -61,6 +61,12 @@ SurfaceLayer::update_fluxes (const int& lev,
         get_lsm_tsurf(lev);
     }
 
+    // An external skin temperature (the two-stream surface energy balance's) owns
+    // the land surface temperature; last, so it replaces what was written above.
+    if (zlo && lev < static_cast<int>(m_skin_tsurf_lev.size()) && m_skin_tsurf_lev[lev]) {
+        fill_tsurf_with_skin_temperature(lev, cons_in, z_phys_nd);
+    }
+
     // Update qsurf with qsat over sea
     if (use_moisture) {
         fill_qsurf_with_qsat(lev, cons_in, z_phys_nd);
@@ -2298,6 +2304,103 @@ SurfaceLayer::fill_tsurf_with_coupled_sst (const int& lev,
 }
 
 /**
+ * Overwrite the land surface temperature with an external absolute skin
+ * temperature, converted to potential temperature at the surface pressure.
+ *
+ * @param[in] lev       Current level
+ * @param[in] cons_in   Conserved state (surface pressure from the lowest cell)
+ * @param[in] z_phys_nd Nodal heights, or nullptr on a flat mesh
+ */
+void
+SurfaceLayer::fill_tsurf_with_skin_temperature (const int& lev,
+                                                const MultiFab& cons_in,
+                                                const std::unique_ptr<MultiFab>& z_phys_nd)
+{
+    const MultiFab& skin = *m_skin_tsurf_lev[lev];
+    // Indexed with the MFIter of t_surf, so the layouts must agree: both are the
+    // level's grids flattened to the surface for planar terrain.
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+        skin.boxArray() == t_surf[lev]->boxArray() &&
+        skin.DistributionMap() == t_surf[lev]->DistributionMap(),
+        "Skin temperature layout does not match the surface-layer layout.");
+
+    const int klo = m_geom[lev].Domain().smallEnd(2);
+    const Real dz = m_geom[lev].CellSize(2);
+    const bool moist = use_moisture;
+    const Real rdOcp = m_rdOcp;
+    // As in fill_tsurf_with_coupled_sst: a moist run whose state lacks the vapour
+    // component aborts below rather than reading past the components.
+    const bool have_rho_qv = cons_in.nComp() > RhoQ1_comp;
+    amrex::Gpu::DeviceScalar<int> d_conversion_failed(0);
+    int* conversion_failed = d_conversion_failed.dataPtr();
+
+    for (MFIter mfi(*t_surf[lev]); mfi.isValid(); ++mfi)
+    {
+        Box gtbx = mfi.growntilebox();
+        if (gtbx.smallEnd(2) != klo ||
+            !m_planar_bndry[lev].is_surface_copy(mfi.index())) {
+            continue;
+        }
+        gtbx &= t_surf[lev]->fabbox(mfi.index());
+        if (gtbx.isEmpty()) { continue; }
+
+        // The skin is written on valid cells only, so the halo takes the nearest
+        // valid column; fill_planar_boundary in update_fluxes then fills the
+        // interior and periodic ghosts.
+        const Box vbx = mfi.validbox();
+        const int i_lo = vbx.smallEnd(0); const int i_hi = vbx.bigEnd(0);
+        const int j_lo = vbx.smallEnd(1); const int j_hi = vbx.bigEnd(1);
+
+        auto t_surf_arr = t_surf[lev]->array(mfi);
+        auto lmask_arr  = (m_lmask_lev[lev][0]) ? m_lmask_lev[lev][0]->array(mfi) :
+                                                  Array4<int> {};
+        const auto skin_arr = skin.const_array(mfi);
+        const auto cons_arr = cons_in.const_array(mfi);
+        const auto z_arr    = (z_phys_nd) ? z_phys_nd->const_array(mfi) :
+                                            Array4<const Real> {};
+
+        ParallelFor(gtbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
+        {
+            const int li = amrex::min(amrex::max(i, i_lo), i_hi);
+            const int lj = amrex::min(amrex::max(j, j_lo), j_hi);
+            const int is_land = (lmask_arr) ? lmask_arr(li,lj,0) : 1;
+            if (!is_land) { return; }
+
+            const Real rho = cons_arr(li,lj,klo,Rho_comp);
+            const Real rho_theta = cons_arr(li,lj,klo,RhoTheta_comp);
+            if (moist && !have_rho_qv) {
+                amrex::Gpu::Atomic::Max(conversion_failed, 1);
+                return;
+            }
+            const Real qv = moist ? cons_arr(li,lj,klo,RhoQ1_comp) / rho : Real(0.0);
+            const Real delta_z = z_arr
+                ? Compute_Z_AtCellCenter(li,lj,klo,z_arr) -
+                  Compute_Z_AtWFace(li,lj,klo,z_arr)
+                : myhalf*dz;
+            const Real pressure = erf_surface_temperature::pressure_at_boundary_from_cell(
+                rho, rho_theta, qv, delta_z);
+            Real theta = t_surf_arr(i,j,k);
+            if (amrex::Math::isfinite(qv) &&
+                erf_surface_temperature::temperature_to_theta(
+                    skin_arr(li,lj,k), pressure, rdOcp, theta)) {
+                t_surf_arr(i,j,k) = theta;
+            } else {
+                amrex::Gpu::Atomic::Max(conversion_failed, 1);
+            }
+        });
+    }
+    amrex::Gpu::streamSynchronize();
+    int conversion_failed_host = d_conversion_failed.dataValue();
+    amrex::ParallelDescriptor::ReduceIntMax(conversion_failed_host);
+    if (conversion_failed_host != 0) {
+        amrex::Abort("SurfaceLayer fill_tsurf_with_skin_temperature: failed to convert the "
+                     "skin temperature to potential temperature (non-finite or non-positive "
+                     "skin temperature, density or pressure, or a moist state without "
+                     "water vapour).");
+    }
+}
+
+/**
  * Update PBL height using the configured estimator.
  *
  * @param[in] lev Current level
@@ -2361,6 +2464,20 @@ SurfaceLayer::compute_pblh (const int& lev,
         define_pblh_columns(lev, cons.boxArray(), cons.DistributionMap());
     }
     const PBLHColumns& cols = m_pblh_columns[lev];
+
+    // A refined level whose grids do not run from the ground to the top of the domain in every
+    // column cannot diagnose the boundary layer there: a level that ends below the top would
+    // return a height capped by its grids, and a level that does not reach the ground has no
+    // column to scan (it was left at zero).  Such a level takes the PBL height of the next
+    // coarser level at each of its columns.  Levels are updated coarse to fine, so that height
+    // is the one set at the start of the enclosing coarse step: with subcycling, the later fine
+    // substeps read a coarse height up to one coarse step old.  A refined level that spans the
+    // full height diagnoses its own.
+    if (lev > 0 && !cols.full_height && m_face.coordDir() == 2 && m_face.isLow() &&
+        m_terrain_type != TerrainType::EB) {
+        fill_pblh_from_coarser(lev);
+        return;
+    }
 
     if (!cols.needed) {
         est.compute_pblh(m_geom[lev], z_phys_cc, pblh[lev].get(), cons, lmask, moisture_indices);
@@ -2463,8 +2580,15 @@ SurfaceLayer::define_pblh_columns (const int& lev,
     cols.dm = dm;
 
     const int k_ground = m_geom[lev].Domain().smallEnd(2);
+    const int k_top    = m_geom[lev].Domain().bigEnd(2);
     for (int ib = 0; ib < ba.size(); ++ib) {
         if (ba[ib].smallEnd(2) != k_ground) { cols.needed = true; }
+    }
+
+    // The runs of cells in z, each as one box
+    const BoxArray ba_joined = join_boxes_stacked_in_z(ba);
+    for (int ib = 0; ib < ba_joined.size(); ++ib) {
+        if (ba_joined[ib].smallEnd(2) != k_ground || ba_joined[ib].bigEnd(2) != k_top) { cols.full_height = false; }
     }
     if (!cols.needed) { return; }
 
@@ -2477,10 +2601,9 @@ SurfaceLayer::define_pblh_columns (const int& lev,
               "(amr.max_grid_size_z) and refined regions that reach the ground.");
     }
 
-    // The runs of cells in z, each as one box; those that start at the ground are the columns.
-    // A column goes to the rank that owns its lowest corner cell, which keeps most of the
-    // copies to and from the columns on the rank.
-    const BoxArray ba_joined = join_boxes_stacked_in_z(ba);
+    // Those of the runs of cells in z that start at the ground are the columns.  A column goes
+    // to the rank that owns its lowest corner cell, which keeps most of the copies to and from
+    // the columns on the rank.
     BoxList bl_col(IndexType::TheCellType());
     BoxList bl_col2d(IndexType::TheCellType());
     Vector<int> pmap;
@@ -2506,6 +2629,65 @@ SurfaceLayer::define_pblh_columns (const int& lev,
     // compute_pblh builds on the columns are temporaries.
     cols.hold_col.define(cols.ba_col, cols.dm_col, 1, 0, MFInfo().SetAlloc(false));
     cols.hold_col2d.define(cols.ba_col2d, cols.dm_col, 1, 0, MFInfo().SetAlloc(false));
+}
+
+/**
+ * Set the PBL height of a refined level from the next coarser level: each column of this
+ * level takes the height of the coarse column that holds it.  Used for a level whose grids do
+ * not run from the ground to the top of the domain in every column (see compute_pblh).
+ *
+ * @param[in] lev Current level (> 0)
+ */
+void
+SurfaceLayer::fill_pblh_from_coarser (const int& lev)
+{
+    AMREX_ALWAYS_ASSERT(lev > 0 && pblh[lev] && pblh[lev-1]);
+    const Geometry& geom_f = m_geom[lev];
+    const Geometry& geom_c = m_geom[lev-1];
+    const IntVect rr(AMREX_D_DECL(static_cast<int>(std::lround(geom_c.CellSize(0) / geom_f.CellSize(0))),
+                                  static_cast<int>(std::lround(geom_c.CellSize(1) / geom_f.CellSize(1))),
+                                  1));
+
+    MultiFab& fine = *pblh[lev];
+    const MultiFab& crse = *pblh[lev-1];
+
+    // Each fine column takes the height of the coarse column that holds it (injection, no
+    // interpolation): the fine height is then exactly the coarse diagnostic, and independent of
+    // the decomposition, at the price of being constant over each block of rr x rr fine columns.
+    // The coarse level's own height varies at that resolution too.  Interpolating would reach
+    // further into the coarse halo than these planar fields hold: a bilinear stencil for a fine
+    // ghost cell at a non-periodic domain boundary wants a second coarse cell outside the
+    // domain, and pblh carries one ghost cell.  A smooth cap would need a wider halo there, or
+    // a one-sided stencil.
+    //
+    // The coarse heights over the boxes of this level, with enough ghost cells to cover theirs.
+    // Ghost cells go first, then the valid cells, so every cell the coarse level owns comes
+    // from the box that owns it.  The estimator writes pblh over its grown box (it clips only
+    // in z), so the coarse ghost cells the first copy reads hold a diagnosed height, outside a
+    // non-periodic domain too.
+    const IntVect ng_f = fine.nGrowVect();
+    const IntVect ng_c(AMREX_D_DECL((ng_f[0] + rr[0] - 1) / rr[0], (ng_f[1] + rr[1] - 1) / rr[1], ng_f[2]));
+    MultiFab crse_on_fine(amrex::coarsen(fine.boxArray(), rr), fine.DistributionMap(), 1, ng_c);
+    crse_on_fine.setVal(zero);
+    for (const IntVect& ng_src : {crse.nGrowVect(), IntVect(0)}) {
+        crse_on_fine.ParallelCopy(crse, 0, 0, 1, elemwiseMin(ng_src, ng_c), ng_c, geom_c.periodicity());
+    }
+
+#ifdef _OPENMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(fine, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box bx = mfi.growntilebox();
+        const Array4<Real> f = fine.array(mfi);
+        const Array4<Real const> c = crse_on_fine.const_array(mfi);
+        const int rx = rr[0];
+        const int ry = rr[1];
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+        {
+            f(i,j,k) = c(amrex::coarsen(i,rx), amrex::coarsen(j,ry), k);
+        });
+    }
+    fill_planar_boundary(lev, fine);
 }
 
 /**
@@ -2611,6 +2793,10 @@ SurfaceLayer::read_custom_roughness (const int& lev,
         if (ParallelDescriptor::IOProcessor()) {
             Print()<<"Reading MOST roughness file at level " << lev << " : " << fname << std::endl;
             std::ifstream file(fname);
+            if (!file.is_open()) {
+                Abort("Could not open the MOST roughness file \"" + fname + "\" given as "
+                      "erf.most.roughness_file_name -- please check the file name in the inputs file");
+            }
             Real value1,value2,value3;
             while(file>>value1>>value2>>value3){
                 m_x.push_back(value1);
@@ -2621,6 +2807,10 @@ SurfaceLayer::read_custom_roughness (const int& lev,
 
             AMREX_ALWAYS_ASSERT(m_x.size() == m_y.size());
             AMREX_ALWAYS_ASSERT(m_x.size() == m_z0.size());
+
+            if (m_x.empty()) {
+                Abort("The MOST roughness file \"" + fname + "\" holds no (x, y, z0) triples");
+            }
         }
 
         // Broadcast the whole domain to every rank
@@ -2636,6 +2826,18 @@ SurfaceLayer::read_custom_roughness (const int& lev,
         ParallelDescriptor::Bcast(m_x.data() , nnode, ioproc);
         ParallelDescriptor::Bcast(m_y.data() , nnode, ioproc);
         ParallelDescriptor::Bcast(m_z0.data(), nnode, ioproc);
+
+        // The loop below indexes the file's values as nodes of this level's grid, so a file
+        // holding fewer values than the grid has nodes would be read past its end
+        {
+            const Box& dom = m_geom[lev].Domain();
+            const int nnode_needed = dom.bigEnd(0) + dom.bigEnd(1) * (dom.length(0)+1) + 1;
+            if (nnode < nnode_needed) {
+                Abort("The MOST roughness file \"" + fname + "\" holds " + std::to_string(nnode) +
+                      " values but the grid at level " + std::to_string(lev) + " needs at least " +
+                      std::to_string(nnode_needed) + " -- is this file written for this grid?");
+            }
+        }
 
         // Copy data to the GPU
         Gpu::DeviceVector<Real> d_x(nnode),d_y(nnode),d_z0(nnode);
@@ -2729,7 +2931,7 @@ SurfaceLayer::read_custom_roughness (const int& lev,
  * @return Vector containing each column in the file as a vector
  */
 amrex::Vector<amrex::Vector<amrex::Real>>
-SurfaceLayer::read_cols(const std::string &fname, const int skip_nlines)
+SurfaceLayer::read_cols (const std::string &fname, const int skip_nlines)
 {
     std::ifstream ifs(fname);
     if (!ifs.is_open())

@@ -132,12 +132,7 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
     // *******************************************************************************************
     init_stuff(lev, ba, dm, lev_new, lev_old, base_state[lev], z_phys_nd[lev]);
     if (auxiliary_inert_tracer) {
-        AMREX_ALWAYS_ASSERT(detJ_cc[lev] != nullptr);
-        AMREX_ALWAYS_ASSERT(mapfac[lev][MapFacType::m_x] != nullptr);
-        AMREX_ALWAYS_ASSERT(mapfac[lev][MapFacType::m_y] != nullptr);
-        auxiliary_inert_tracer->define(lev, ba, dm, *detJ_cc[lev],
-                                       *mapfac[lev][MapFacType::m_x],
-                                       *mapfac[lev][MapFacType::m_y]);
+        auxiliary_inert_tracer->define(lev, ba, dm);
     }
     if (sbm_state_manager) {
         sbm_state_manager->define(lev, ba, dm);
@@ -308,6 +303,15 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
     // Initialize the non-cons auxiliary tracer only after the host atmospheric
     // density has been initialized from the selected problem configuration.
     if (auxiliary_inert_tracer) {
+        AMREX_ALWAYS_ASSERT(detJ_cc[lev] != nullptr);
+        AMREX_ALWAYS_ASSERT(mapfac[lev][MapFacType::m_x] != nullptr);
+        AMREX_ALWAYS_ASSERT(mapfac[lev][MapFacType::m_y] != nullptr);
+        std::string measure_diagnostic;
+        if (!auxiliary_inert_tracer->rebuild_static_measure(
+                lev, *detJ_cc[lev], *mapfac[lev][MapFacType::m_x],
+                *mapfac[lev][MapFacType::m_y], measure_diagnostic)) {
+            amrex::Abort("M2 auxiliary inert tracer static measure: " + measure_diagnostic);
+        }
         auxiliary_inert_tracer->initialize(lev, lev_new[Vars::cons], geom[lev]);
     }
 
@@ -621,6 +625,23 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
         }
         init_zphys(lev, time);
         update_terrain_arrays(lev);
+
+        // The telescoping detJ average-down above (after the first
+        // init_zphys/update_terrain_arrays call) ran before this level's terrain was
+        // read from its file, when detJ_cc[lev] still held the init_stuff placeholder
+        // of one -- so it stamped 1.0 into the coarse detJ under this level's
+        // footprint. Repeat it now that the real fine detJ exists: AverageDownTo
+        // weights (rho S) by detJ_cc before averaging and divides by the coarse detJ
+        // afterwards, so a coarse detJ that is not the average of the fine one
+        // (let alone a placeholder ~9x too large) scales every covered coarse cell
+        // wrongly on the first two-level step.
+        if ( (SolverChoice::mesh_type != MeshType::ConstantDz) &&
+             (solverChoice.coupling_type == CouplingType::TwoWay) ) {
+            for (int crse_lev = lev-1; crse_lev >= 0; crse_lev--) {
+                average_down(*detJ_cc[crse_lev+1], *detJ_cc[crse_lev], 0, 1, refRatio(crse_lev));
+            }
+        }
+
         make_physbcs(lev);
 
         dz_min[lev] = (*detJ_cc[lev]).min(0) * geom[lev].CellSize(2);
@@ -1318,17 +1339,29 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
     // then indexed with an MFIter over the new grids -- an out-of-bounds device read on the
     // level's first step after the regrid.
     //
-    // At lev > 0 this is cheap and lossless: NOAHMP::Advance calls interp_from_lev0 every
-    // step, so a fine level carries no prognostic state of its own.  At level 0 the state
-    // lives in the per-box Fortran NoahmpIO_type objects, which Init() rebuilds from the land
-    // file and for which no redistribution onto a new decomposition exists -- so refuse
-    // rather than silently cold-start the soil column.  (Level 0 is only ever remade from
-    // ERF::restart, not from regrid, which starts at lbase+1.)
+    // At lev > 0 this is cheap and lossless when the level takes its land state from level 0:
+    // NOAHMP::Advance calls interp_from_lev0 every step, so such a level carries no
+    // prognostic state of its own.  A level that runs the driver on a land setup file of its
+    // own (level 0 always; a finer level with erf.nc_init_file_<lev>, or in an idealized run
+    // with ERF_SETUP_FILE_0<lev+1> in namelist.erf) keeps its state in the per-box Fortran
+    // NoahmpIO_type objects, for which no redistribution onto a new decomposition exists.
+    // At level 0 Init() would rebuild them from the land file, silently cold-starting the
+    // soil column.  At a finer level the driver's block array cannot even be reallocated
+    // (NoahmpIO_vector::resize stops with the generic "Noah-MP fatal error", its reason on
+    // standard error).  Refuse in both cases, naming the cause.  (Level 0 is only ever
+    // remade from ERF::restart, not from regrid, which starts at lbase+1.)
     // ********************************************************************************************
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
         !((lev == 0) && (solverChoice.lsm_type == LandSurfaceType::NOAHMP)),
         "RemakeLevel at level 0 would cold-start the Noah-MP soil state: "
         "NoahmpIO_type redistribution onto a new DistributionMapping is not implemented");
+    if (lev > 0 && solverChoice.lsm_type == LandSurfaceType::NOAHMP && lsm.Runs_Own_Land_Driver(lev)) {
+        Abort("Regridding level " + std::to_string(lev) + " would rebuild its Noah-MP land "
+              "state: the level runs the land model on a setup file of its own, and "
+              "NoahmpIO_type redistribution onto new grids is not implemented. Keep that "
+              "level's grids fixed (a refinement box that does not move, or erf.regrid_int "
+              "< 0), or drop its setup file so it takes its land state from level 0.");
+    }
 
     // Rebuild SLM arrays after the atmospheric arrays have been remade. The SLM transfer
     // path preserves its existing state while rebuilding fields on the new grids; ERF's

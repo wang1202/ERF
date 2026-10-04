@@ -319,7 +319,7 @@ struct MoistureComponentIndices {
     /**
      * @brief Construct an empty map, i.e. a dry run.
      */
-    MoistureComponentIndices() = default;
+    MoistureComponentIndices () = default;
 
     /**
      * @brief Build the complete index map -- conserved-state components and
@@ -993,6 +993,10 @@ struct SolverChoice {
         // Average the input z-face heights onto the nodes, or reconstruct our own
         pp.queryAdd("avg_grid_faces_to_nodes",avg_grid_faces_to_nodes);
 
+        // Build the ERF vertical grid from the file's own mean layer-thickness profile,
+        // or from a single geometric stretch anchored on the file's first layer?
+        pp.queryAdd("wrfinput_zlevels_from_file",wrfinput_zlevels_from_file);
+
         // Catch the old name for the flag above so the error says what to do
         // rather than silently ignoring the setting.
         if (pp.contains("use_wrf_height_grid")) {
@@ -1327,17 +1331,18 @@ struct SolverChoice {
         radChoice.init_params(rad_type == RadiationType::TwoStream, pp_prefix);
 
         // Noah-MP integrates on the downwelling shortwave, downwelling longwave and solar
-        // zenith angle a radiation model writes into it. Only RRTMGP registers those
-        // outputs with the land model (rad_feeds_lsm, ERF::init_stuff), so under any other
-        // choice they are never written and Noah-MP runs with no radiative forcing at all
-        // -- the inputs it reads fall back to zero. That is a legitimate thing to want in a
-        // test, and rarely what anyone running a land model means, so say it at start-up.
+        // zenith angle a radiation model writes into it. Only RRTMGP and TwoStream register
+        // those outputs with the land model (rad_feeds_lsm, ERF::init_stuff), so under any
+        // other choice they are never written and Noah-MP runs with no radiative forcing at
+        // all -- the inputs it reads fall back to zero. That is a legitimate thing to want
+        // in a test, and rarely what anyone running a land model means, so say it at
+        // start-up.
         if (lsm_type == LandSurfaceType::NOAHMP && !rad_feeds_lsm()) {
             amrex::Print() << "WARNING: erf.land_surface_model = NOAHMP with erf.radiation_model = "
                            << amrex::getEnumNameString(rad_type)
-                           << ": only RRTMGP supplies the downwelling shortwave, downwelling "
-                              "longwave and solar zenith angle Noah-MP needs. Noah-MP will run "
-                              "with no radiative forcing (zero SWDOWN, GLW and COSZEN).\n";
+                           << ": only RRTMGP and TwoStream supply the downwelling shortwave, "
+                              "downwelling longwave and solar zenith angle Noah-MP needs. Noah-MP "
+                              "will run with no radiative forcing (zero SWDOWN, GLW and COSZEN).\n";
         }
 
         vert_implicit_fac.resize(max_level+1);
@@ -2403,14 +2408,19 @@ struct SolverChoice {
         return (rad_type == RadiationType::RRTMGP) || (rad_type == RadiationType::Simple);
     }
 
-    /** @brief True for the radiation models whose outputs feed the land model
-     *  (downwelling shortwave, downwelling longwave, solar zenith angle). Only
-     *  RRTMGP registers those outputs (ERF::init_stuff) and only RRTMGP's are
-     *  gated into lsm_output_ptrs (ERF::advance_radiation); every site that
-     *  encodes that rule must use this predicate so wiring another model in
-     *  (e.g. Simple, which already runs through the interface) is one edit. */
+    /** @brief True when the radiation model's outputs feed the land model
+     *  (downwelling shortwave, downwelling longwave, solar zenith angle). RRTMGP
+     *  writes them for any land model through lsm_output_ptrs; the two-stream
+     *  model writes the broadband three for Noah-MP only
+     *  (TwoStreamRadiation::write_land_forcing), since SLM wants the visible /
+     *  near-infrared direct / diffuse split it does not compute. Both register
+     *  the outputs in ERF::init_stuff and write them in ERF::advance_radiation;
+     *  every site that encodes that rule must use this predicate so wiring
+     *  another model in (e.g. Simple, which already runs through the interface)
+     *  is one edit. */
     [[nodiscard]] bool rad_feeds_lsm () const {
-        return (rad_type == RadiationType::RRTMGP);
+        return (rad_type == RadiationType::RRTMGP) ||
+               (rad_type == RadiationType::TwoStream && lsm_type == LandSurfaceType::NOAHMP);
     }
 
     // Does an external ocean coupler supply SST? See the query in init_params.
@@ -2458,6 +2468,13 @@ struct SolverChoice {
 
     // Average the input z-face heights onto the nodes rather than reconstructing them?
     bool avg_grid_faces_to_nodes {false};
+
+    // When the ERF mesh is reconstructed rather than taken from the file
+    // (avg_grid_faces_to_nodes = false), build zlevels_stag from the domain-mean
+    // layer-thickness profile of the wrfinput file.  Set false to recover the older
+    // construction: a single geometric stretch whose first layer is the thickest first
+    // layer in the file and whose ratio is solved for so the column reaches z_top.
+    bool wrfinput_zlevels_from_file {true};
 
     // Interpolate atmospheric state from coarse when creating finer level at later time?
     bool interp_atmos_from_coarse {false};
