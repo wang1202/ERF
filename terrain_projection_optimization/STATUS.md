@@ -1,6 +1,6 @@
 # Current experiment status
 
-Updated 2026-10-07.
+Updated 2026-10-07 15:46 MDT.
 
 ## Remote branch
 
@@ -38,6 +38,13 @@ check, both were pending: control due to unavailable/reserved H100 nodes and
 candidate due to priority. Neither has started, so there are no new runtime,
 speedup, or numerical-equivalence results yet.
 
+The scheduler's current start-time forecast is candidate 18949428 at
+2026-10-08 14:01 and control 18949177 at 2026-10-08 15:01 (cluster-local
+time; estimates can move). The queue assigned separate H100 nodes. Until they
+start, non-FFT versus FFT performance remains unknown; multigrid may reduce
+communication and iterations, but it is not guaranteed to beat this
+single-GPU FFT-preconditioned solve.
+
 ## Findings and limits
 
 The existing terrain path does not support disabling FFT by setting
@@ -55,10 +62,13 @@ branch is being remeasured from the same checkpoint.
 
 ## Next steps
 
-1. Monitor both jobs through H100 preflight and simulation completion.
-2. Compare solver time and full-step time at identical simulated intervals.
-3. Check residual/divergence, primary flow fields, turbulence statistics,
-   and surface diagnostics before accepting any speedup.
+1. Monitor both jobs through H100 preflight and simulation completion; check
+   their runtime environment and executable hashes.
+2. Run `benchmarks/summarize_logs.py` on the matched logs to compare mature
+   step and solver time, residuals, cycles/iterations, and post-projection
+   divergence.
+3. Compare native profiles, surface diagnostics, and plotfile fields before
+   accepting any speedup.
 4. If the multigrid path is numerically valid and faster, extend the run for
    statistical validation; if not, preserve GMRES+FFT and test another
    tolerance-preserving optimization.
