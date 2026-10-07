@@ -24,7 +24,7 @@ export OMP_NUM_THREADS=4
 export OMP_PLACES=cores
 export OMP_PROC_BIND=close
 
-EXECUTABLE=/kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/MyBuildTerrainOpt/Exec/erf_exec
+EXECUTABLE="$SLURM_SUBMIT_DIR/erf_exec"
 
 {
     date -Is
