@@ -3,6 +3,12 @@
  */
 #include "ERF.H"
 #include "ERF_Utils.H"
+#include "ERF_SolverUtils.H"
+
+#include <AMReX_MLMG.H>
+#if (AMREX_SPACEDIM == 3)
+#include <AMReX_MLTerrainPoisson.H>
+#endif
 
 using namespace amrex;
 
@@ -148,6 +154,18 @@ void ERF::project_initial_velocity (int lev, double time, double l_dt)
 void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFab>& mom_mf)
 {
     BL_PROFILE("ERF::project_momenta()");
+
+    // Keep the existing GMRES+FFT solver as the default. The experimental
+    // multigrid path is opt-in through erf.terrain_poisson_solver = mlmg.
+    static const std::string terrain_poisson_solver = [] () {
+        std::string choice = "gmres_fft";
+        ParmParse pp("erf");
+        pp.query("terrain_poisson_solver", choice);
+        if (choice != "gmres_fft" && choice != "mlmg") {
+            amrex::Abort("erf.terrain_poisson_solver must be gmres_fft or mlmg");
+        }
+        return choice;
+    } ();
     Real l_dt = static_cast<Real>(l_dt_d);
     //
     // If at lev > 0 we must first fill the momenta at the c/f interface with interpolated coarse values
@@ -680,9 +698,7 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
 
         if (solverChoice.terrain_type != TerrainType::EB) {
 
-#ifdef ERF_USE_FFT
         Box my_region(subdomains[lev][isub].minimalBox());
-#endif
 
         // ****************************************************************************
         // No terrain or grid stretching
@@ -720,16 +736,85 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         // General terrain
         // ****************************************************************************
         else if (solverChoice.mesh_type == MeshType::VariableDz) {
-#ifdef ERF_USE_FFT
-            bool boxes_make_rectangle = (my_region.numPts() == subdomains[lev][isub].numPts());
-            if (!boxes_make_rectangle) {
-                amrex::Abort("FFT preconditioner for GMRES won't work unless the union of boxes is rectangular");
-            } else {
-                solve_with_gmres(lev, my_region, rhs_sub[0], phi_sub[0], fluxes_sub[0], ax_sub, ay_sub, az_sub, dJ_sub, znd_sub);
-            }
+            if (terrain_poisson_solver == "mlmg") {
+#if (AMREX_SPACEDIM == 3)
+                if (lev != 0) {
+                    amrex::Abort("MLTerrainPoisson currently supports only a single AMR level");
+                }
+                if (solverChoice.use_real_bcs) {
+                    amrex::Abort("MLTerrainPoisson currently supports homogeneous boundary conditions only");
+                }
+                bool full_domain = (subdomains[lev].size() == 1) &&
+                                   (my_region == Geom(lev).Domain()) &&
+                                   (rhs_sub[0].boxArray().numPts() == Geom(lev).Domain().numPts());
+                if (!full_domain) {
+                    amrex::Abort("MLTerrainPoisson requires one subdomain covering the full level domain");
+                }
+
+                Vector<Geometry> ml_geom{Geom(lev)};
+                Vector<BoxArray> ml_grids{rhs_sub[0].boxArray()};
+                Vector<DistributionMapping> ml_dmap{rhs_sub[0].DistributionMap()};
+
+                LPInfo lpinfo;
+                MLTerrainPoisson terrain_op(ml_geom, ml_grids, ml_dmap, lpinfo);
+                terrain_op.setDomainBC(get_lo_projection_bc(Geom(lev), domain_bc_type),
+                                       get_hi_projection_bc(Geom(lev), domain_bc_type));
+                terrain_op.setLevelBC(0, nullptr);
+                terrain_op.setZPhys(0, znd_sub);
+                Array<MultiFab const*,AMREX_SPACEDIM> terrain_areas{
+                    &ax_sub, &ay_sub, &az_sub
+                };
+                terrain_op.setAreas(0, terrain_areas);
+                terrain_op.setDetJ(0, dJ_sub);
+
+                MLMG mlmg(terrain_op);
+                mlmg.setMaxIter(200);
+                mlmg.setVerbose(mg_verbose);
+                mlmg.setBottomVerbose(0);
+                mlmg.solve(GetVecOfPtrs(phi_sub), GetVecOfConstPtrs(rhs_sub),
+                           solverChoice.poisson_reltol, solverChoice.poisson_abstol);
+                mlmg.getFluxes(GetVecOfArrOfPtrs(fluxes_sub));
+
+                // Match the map-factor treatment used by the GMRES terrain path.
+                for (MFIter mfi(phi_sub[0]); mfi.isValid(); ++mfi)
+                {
+                    Box xbx = mfi.nodaltilebox(0);
+                    Box ybx = mfi.nodaltilebox(1);
+                    const Array4<Real      >& fx_ar = fluxes_sub[0][0].array(mfi);
+                    const Array4<Real      >& fy_ar = fluxes_sub[0][1].array(mfi);
+                    const Array4<Real const>& mf_ux = mapfac[lev][MapFacType::u_x]->const_array(mfi);
+                    const Array4<Real const>& mf_vy = mapfac[lev][MapFacType::v_y]->const_array(mfi);
+                    ParallelFor(xbx,ybx,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    {
+                        fx_ar(i,j,k) *= mf_ux(i,j,0);
+                    },
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    {
+                        fy_ar(i,j,k) *= mf_vy(i,j,0);
+                    });
+                }
+
+                ImposeBCsOnPhi(lev, phi_sub[0], my_region);
+                if (mg_verbose > 0) {
+                    amrex::Print() << "MLTerrainPoisson iterations: " << mlmg.getNumIters() << std::endl;
+                }
 #else
-            amrex::Abort("Rebuild with USE_FFT = TRUE so you can use the FFT preconditioner for GMRES");
+                amrex::Abort("MLTerrainPoisson is available only in 3D builds");
 #endif
+            } else {
+#ifdef ERF_USE_FFT
+                bool boxes_make_rectangle = (my_region.numPts() == subdomains[lev][isub].numPts());
+                if (!boxes_make_rectangle) {
+                    amrex::Abort("FFT preconditioner for GMRES won't work unless the union of boxes is rectangular");
+                } else {
+                    solve_with_gmres(lev, my_region, rhs_sub[0], phi_sub[0], fluxes_sub[0],
+                                     ax_sub, ay_sub, az_sub, dJ_sub, znd_sub);
+                }
+#else
+                amrex::Abort("Rebuild with USE_FFT = TRUE so you can use the FFT preconditioner for GMRES");
+#endif
+            }
 
             //
             // Restore ax,ay,ax to their original definitions
