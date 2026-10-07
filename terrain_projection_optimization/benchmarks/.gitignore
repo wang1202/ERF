@@ -1,0 +1,16 @@
+/baseline_gmres_fft/slurm-*.out
+/baseline_gmres_fft/runtime_environment.txt
+/baseline_gmres_fft/chk*
+/baseline_gmres_fft/plt*
+/baseline_gmres_fft/surf
+/baseline_gmres_fft/mean
+/baseline_gmres_fft/flux
+/baseline_gmres_fft/subgrid
+/candidate_mlmg/slurm-*.out
+/candidate_mlmg/runtime_environment.txt
+/candidate_mlmg/chk*
+/candidate_mlmg/plt*
+/candidate_mlmg/surf
+/candidate_mlmg/mean
+/candidate_mlmg/flux
+/candidate_mlmg/subgrid

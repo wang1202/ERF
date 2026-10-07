@@ -1,0 +1,144 @@
+# ------------------  INPUTS TO MAIN PROGRAM  -------------------
+#max_step = 49599
+stop_time = 9000.0
+# stop_time = 50400.
+erf.use_fft = 1
+erf.terrain_poisson_solver = mlmg
+erf.anelastic = 1
+
+# Disable FPE trap - incompatible with HDF5/NetCDF library initialization
+# HDF5 tests for NaN/Inf during init which triggers FPE traps
+amrex.fpe_trap_invalid = 0
+amrex.the_arena_is_managed = true
+
+fabarray.mfiter_tile_size = 1200 1200 1200
+
+# PROBLEM SIZE & GEOMETRY
+geometry.prob_extent =  3600     3600    1000
+amr.n_cell           =    360       360      200
+
+geometry.is_periodic = 1 1 0
+
+zlo.type = "surface_layer"
+erf.most.roughness_type_land = "constant"
+erf.most.z0              = 0.1
+erf.most.zref            = 5
+erf.most.surf_temp       = 299.48
+zhi.type = "SlipWall"
+zhi.theta_grad  = 0.003
+
+erf.dycore_horiz_adv_type    = WENOZ5
+erf.dycore_vert_adv_type     = WENOZ5
+erf.dryscal_horiz_adv_type   = WENOZ5
+erf.dryscal_vert_adv_type    = WENOZ5
+
+# TIME STEP CONTROL
+# erf.fixed_dt = 2.0  # fixed time step depending on grid resolution
+erf.cfl      = 0.6
+erf.dt_max_initial = 0.01
+
+# DIAGNOSTICS & VERBOSITY
+erf.sum_interval   = 1       # timesteps between computing mass
+erf.v              = 1       # verbosity in ERF.cpp
+amr.v              = 1       # verbosity in Amr.cpp
+
+# CHECKPOINT FILES
+erf.check_file      = chk        # root name of checkpoint file
+erf.check_int = -1
+
+# REFINEMENT / REGRIDDING
+#amr.max_level       = 0       # maximum level number allowed
+amr.max_level = 0
+amr.ref_ratio = 4
+erf.refinement_indicators = box1
+erf.box1.max_level = 1
+erf.box1.in_box_lo =  0.   0.  0.
+erf.box1.in_box_hi = 2400. 2400. 100.
+erf.coupling_type = "TwoWay"
+
+# PLOTFILES
+erf.plot_file_1     = plt        # prefix of plotfile name
+erf.plot_int_1 = -1
+erf.plot_vars_1 = density x_velocity y_velocity z_velocity theta rhoKE pert_pres pressure z_phys Tau31 Tau32 hfx3
+
+# PROFILE
+erf.profile_int = 50
+erf.profiles_xy   = true
+erf.destag_profiles = true
+erf.data_log = "surf" "mean" "flux" "subgrid"
+
+# SOLVER CHOICE
+erf.use_gravity = true
+
+erf.molec_diff_type = "None"
+erf.les_type  = "Deardorff"
+erf.Ck        = 0.1  # Coefficient in Moeng1984, Eqn. 19
+erf.Ce        = 0.7  # Note: Ce_lcoeff = C_e - 1.9*C_k
+erf.Ce_wall   = 3.9  # To account for "wall effects"
+# erf.theta_ref = 300.0 # don't specify for variable theta when diagnosing stability
+# Initial conditions from Beare et al. 2006
+prob.KE_0            = 0.4 # [m2/s2]
+prob.KE_decay_height = 250. # [m]
+prob.KE_decay_order  = 3
+prob.T_0_Pert_Mag    = 0.1 # [K]
+prob.pert_ref_height = 50. # [m]
+
+# INITIALIZATION WITH ATM DATA
+erf.init_type = "Input_Sounding"
+erf.input_sounding_file = "input_sounding_file"
+erf.nudging_from_input_sounding = true
+erf.nudging_u = false
+erf.nudging_t = true
+erf.nudging_q = false
+erf.tau_nudging = 5.0
+erf.nudging_t_z1 = 211.15
+erf.nudging_t_z2 = 1000.0
+
+#erf.forest_file = erf_forest_def
+# ----------------------------------
+# FOREST CANOPY - GRIDDED NETCDF MODE
+# ----------------------------------
+erf.do_forest_drag = 1
+erf.forest_biophysics       = 1
+erf.forest_biophysics_heat  = 1
+erf.forest_leaf_theta_fixed  = 301.08    # K — bypass bisection, theta = 301, exner = 0.99566
+#erf.forest_biophysics_sw = 1
+#erf.forest_biophysics_lw = 1
+#erf.forest_sw_radiation  = 600.0   # W/m², set in inputs file
+#erf.forest_lw_down_top   = 350.0   # W/m², set in inputs file
+erf.forest_lai_file    = "/kfs2/projects/iclass/aaronwang/new_h_lai/canopy_lai_mean_periodic.nc"
+erf.forest_height_file = "/kfs2/projects/iclass/aaronwang/new_h_lai/canopy_height_mean_periodic.nc"
+erf.forest_cd     = 0.15
+erf.forest_tree_type = 2
+erf.forest_laimax = 0.4
+
+# Higher values of perturbations lead to instability
+# Instability seems to be coming from BC
+prob.U_0_Pert_Mag = 0.1
+prob.V_0_Pert_Mag = 0.1 #
+prob.W_0_Pert_Mag = 0.0
+
+erf.rayleigh_damp_U = false
+erf.rayleigh_damp_V = false
+erf.rayleigh_damp_W = false
+erf.rayleigh_damp_T = false
+erf.rayleigh_zdamp = 0.0
+
+erf.use_coriolis = true
+erf.latitude = 34.34
+erf.abl_driver_type = "GeostrophicWind"
+erf.abl_geo_wind = 0. 6.8000 0.
+
+erf.terrain_type = StaticFittedMesh
+erf.terrain_file_name_nc = "/kfs2/projects/iclass/aaronwang/new_h_lai/agl_height_periodic_nodal_361x361.nc"
+erf.terrain_smoothing = 1
+max_step = 100000
+erf.anelastic_type = RK2
+amr.no_box_split_dir = 2
+erf.mg_v = 2
+erf.plot_per_1 = 600.
+erf.check_per = 1800.
+erf.restart = /kfs2/projects/erf/aaronwang/ERF/MyBuild/Exec/TerrainToleranceValidation/common_checkpoint
+erf.poisson_reltol = 1.e-8
+erf.poisson_abstol = 1.e-8
+amrex.use_gpu_aware_mpi = 0
