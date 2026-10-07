@@ -1,6 +1,6 @@
 # Current experiment status
 
-Updated 2026-10-07 15:46 MDT.
+Updated 2026-10-07 16:02 MDT.
 
 ## Remote branch
 
@@ -38,12 +38,12 @@ check, both were pending: control due to unavailable/reserved H100 nodes and
 candidate due to priority. Neither has started, so there are no new runtime,
 speedup, or numerical-equivalence results yet.
 
-The scheduler's current start-time forecast is candidate 18949428 at
-2026-10-08 14:01 and control 18949177 at 2026-10-08 15:01 (cluster-local
-time; estimates can move). The queue assigned separate H100 nodes. Until they
-start, non-FFT versus FFT performance remains unknown; multigrid may reduce
-communication and iterations, but it is not guaranteed to beat this
-single-GPU FFT-preconditioned solve.
+The scheduler's current start-time forecast is control 18949177 at
+2026-10-07 22:21 and candidate 18949428 at 2026-10-07 23:20 (MDT; estimates
+can move). The queue assigned separate H100 nodes. Until they start, non-FFT
+versus FFT performance remains unknown; multigrid may reduce communication
+and iterations, but it is not guaranteed to beat this single-GPU
+FFT-preconditioned solve.
 
 ## Findings and limits
 
