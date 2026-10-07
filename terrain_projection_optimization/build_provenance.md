@@ -21,3 +21,20 @@ Build completed successfully at 2026-10-07 15:23:31 MDT with the copied MyBuildT
 The initial module load reported that cray-mpich/8.1.28 and cray-libsci/23.12.5 were unavailable by module name. CMake still configured with the explicit Cray wrapper and library paths in the copied script, and the complete build succeeded. Third-party CUDA/Fortran warnings were non-fatal.
 
 The runtime GPU, driver, loaded libraries, and input/checkpoint hashes are captured by the Slurm preflight in the case directory.
+
+## Experimental candidate build
+
+The MLTerrainPoisson integration was added in ERF commit 5960a55 and built
+incrementally against the same CMake configuration and AMReX commit. The
+single changed ERF translation unit compiled, and the erf_exec target linked
+successfully after restoring the CUDA 12.9 and Cray libfabric paths used by
+the clean build environment.
+
+- Candidate executable: terrain_projection_optimization/benchmarks/candidate_mlmg/erf_exec
+- Candidate SHA256: a43448f05279913c37e1252b14632fc694d96e7a0f3bb27337cd30a32d46d5d2
+- Candidate source commit: 5960a55
+- Link check: nm confirms MLTerrainPoisson constructor, setZPhys, setAreas, and setDetJ symbols are present.
+
+The login node has no GPU driver library, so its ldd output reports
+libcuda.so.1 as unavailable. The H100 job performs the authoritative ldd and
+nvidia-smi preflight before launching each case.
