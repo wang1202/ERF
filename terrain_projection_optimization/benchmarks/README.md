@@ -9,7 +9,12 @@ The job script requests one H100 and uses the same MPI/CUDA runtime settings as 
 Each case runs a private executable copy, with its SHA256 recorded by the Slurm preflight. When both logs exist, summarize matched interval throughput, solver time, iteration/cycle counts, residuals, and post-projection divergence with:
 
 ```bash
-python3 summarize_logs.py baseline_gmres_fft/slurm-18949177.out candidate_mlmg/slurm-18949428.out --output log_metrics.json
+python3 summarize_logs.py baseline_gmres_fft/slurm-18949177.out candidate_mlmg/slurm-18953921.out --output log_metrics.json
 ```
 
 The parser uses the later half of each run for mature timing, matching the established terrain-validation metrics. Native `surf`, `mean`, `flux`, and `subgrid` diagnostics plus plotfiles support field and LES-statistics comparisons. A measured speedup remains provisional until divergence, boundary-flux behavior, velocity and thermodynamic fields, turbulence statistics, and surface proxies are reviewed.
+
+The first candidate attempt, job 18949428, exposed an unsupported generic flux
+call after the first solve. The source now calls MLTerrainPoisson's supported
+`compFlux` method; the corrected rerun is job 18953921. The failed attempt's
+artifacts are retained locally under `candidate_mlmg/attempts/18949428/`.

@@ -38,3 +38,20 @@ the clean build environment.
 The login node has no GPU driver library, so its ldd output reports
 libcuda.so.1 as unavailable. The H100 job performs the authoritative ldd and
 nvidia-smi preflight before launching each case.
+
+
+## Corrected candidate build and runtime attempt
+
+The first candidate executable (SHA256
+`a43448f05279913c37e1252b14632fc694d96e7a0f3bb27337cd30a32d46d5d2`) was
+built from source commit `5960a55`. Job 18949428 ran on an NVIDIA H100 80GB
+with driver 550.54.15, converged the first projection in two MLMG cycles, and
+then aborted because this AMReX MLTerrainPoisson implementation does not
+provide the generic `MLMG::getFluxes` method.
+
+Source commit `33e6b4c` replaces that call with the operator's supported
+`MLTerrainPoisson::compFlux` face-flux calculation. The incremental CUDA
+rebuild and executable link succeeded. Corrected candidate executable SHA256:
+`9a6eaf213c4f596c6301ed103e77fcc3ca1768e60e2e704f5dd1a7a7b11b2101`.
+Retry job 18953921 was submitted with this executable and is pending; its
+Slurm preflight will capture the runtime libraries, GPU, and executable hash.
