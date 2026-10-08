@@ -129,3 +129,7 @@ At 07:32:48 UTC, retry job 18954908 was RUNNING at 27m36s and had logged all fou
 ### Corrected field self-check: second pass started — 2026-10-08 07:38 UTC
 
 At 07:38:35 UTC, job 18954908 remained RUNNING at 33m24s. The log confirms the first aggregate pass processed all four snapshots, then the second pass started at 7200 s; the remaining three second-pass snapshots and final self-comparison are pending. Slurm accounting showed active CPU and disk reads, about 9.1 GB peak RSS, with no reported error. This corrects the initial 07:32 wording, which incorrectly described both passes as complete. Candidate 18953921 remains priority-pending and field comparison 18954684 remains dependency-pending.
+
+### 30-minute poll and second self-check pass — 2026-10-08 07:43 UTC
+
+Candidate watcher poll at 07:42:26 UTC found job 18953921 still PENDING for Priority; the current provisional start remains 12:40 UTC. Field watcher poll at 07:41:28 UTC found job 18954684 still PENDING on its after-success dependency. Corrected self-check 18954908 was RUNNING at 38m06s and has begun its second identical-input aggregate pass, processing the 7200 s plotfield; the other second-pass snapshots and final zero-difference outputs remain pending. Slurm accounting showed about 53m49s CPU, 9.1 GB peak RSS, and 15.1 GB disk reads, with no reported error. The previously overstated 07:32 pass count is corrected in the prior status section.
