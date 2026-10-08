@@ -92,3 +92,7 @@ The control-only field self-check 18954682 has now processed all four plot snaps
 ### Self-check aggregation stage — 2026-10-08 06:35 UTC
 
 At 06:35:40 UTC, control self-check 18954682 remained RUNNING at 32m35s elapsed. Its log shows the control-side field aggregation reached all four plot times and the second aggregation (the identical control input supplied as the candidate for the self-test) has begun at 7200 s. The self-check has not yet returned its zero-difference summaries or exited. Candidate 18953921 remains PENDING for Priority; no candidate performance or numerical metrics are available.
+
+### 30-minute scheduler and field-QA checkpoint — 2026-10-08 06:42 UTC
+
+The candidate watcher recorded job 18953921 PENDING for Priority at 06:42:25 UTC; its provisional start estimate moved earlier from 12:25:43 to 12:10:00 UTC. The field-analysis watcher recorded job 18954684 PENDING on its `afterok:18953921` dependency at 06:41:28 UTC. Control self-check 18954682 remained RUNNING at 39m46s; its second, identical-input field aggregation had processed snapshots at 7200 and 7800.133 s. Slurm accounting showed active CPU and disk reads, about 9.1 GiB peak resident memory, and no error/exit status. Candidate performance, residual, divergence, and matched-field results remain pending.
