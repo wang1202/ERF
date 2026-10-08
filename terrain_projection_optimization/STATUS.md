@@ -72,3 +72,11 @@ The control output coverage is verified: plotfiles at 7200, 7800.133, 8400.469, 
 A new comparison tool reuses the existing terrain analysis code for time-weighted native profiles and surface proxies, physical-volume AGL/terrain field statistics, PDFs, and spectra. Its control self-check is Slurm job 18954682, currently RUNNING on a shared CPU node; the first plotfield completed. Final matched field analysis is job 18954684 on the shared partition (8 CPUs, 64 GB), submitted with `afterok:18953921`, so it will run only if the candidate succeeds. A second detached tmux watcher records and publishes its terminal analysis result.
 
 Source inspection confirms the MLTerrainPoisson flux kernel explicitly sets Neumann boundary-face flux to zero; runtime projection/divergence results remain pending. The field comparison is limited to the 30-minute single trajectory and is descriptive, not a statistical-equivalence test.
+
+## Monitoring update — 2026-10-08 06:23 UTC
+
+- Corrected MLMG candidate job 18953921 is still PENDING for scheduler priority. The current provisional start estimate is 2026-10-08 12:25:43 UTC and may move.
+- Control field-pipeline self-check 18954682 is RUNNING (20m31s elapsed at this check). Its log confirms plotfields at 7200, 7800.133, and 8400.469 s have been processed; the 9000 s snapshot and final self-comparison are pending.
+- Candidate field comparison 18954684 remains PENDING on `afterok:18953921`.
+- Both detached 30-minute tmux watchers are alive. Their latest polls were 06:12:24 UTC (candidate) and 06:11:28 UTC (field analysis); next polls are due around 06:42 and 06:41 UTC.
+- No corrected-candidate performance, residual, divergence, or field-difference result exists yet. The self-check is still validating the analysis pipeline, not measuring the MLMG candidate.
