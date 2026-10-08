@@ -12,7 +12,7 @@ END={"COMPLETED","FAILED","CANCELLED","TIMEOUT","NODE_FAIL","OUT_OF_MEMORY","PRE
 
 def run(args):
  try:
-  p=subprocess.run(args,text=True,capture_output=True,timeout=45)
+  p=subprocess.run(args,text=True,capture_output=True,timeout=180)
   return p.returncode,p.stdout.strip(),p.stderr.strip()
  except Exception as e: return 127,"",str(e)
 
@@ -58,6 +58,26 @@ def finish(event):
   lines += ["- Mature-window step time: "+str(cand.get("mature_step_wall_s_mean"))+" s/step.","- Step speedup vs control: "+str(cmp.get("step_speedup_candidate_vs_baseline"))+"x.","- Solver speedup vs control: "+str(cmp.get("solve_speedup_candidate_vs_baseline"))+"x.","- Median GMRES iterations: "+str(sol.get("gmres_iterations_median"))+".","- Median MLMG cycles: "+str(sol.get("mlmg_cycles_median"))+".","- Maximum post-projection divergence L-infinity: "+str(sol.get("post_projection_max_divergence_linf"))+".","- Maximum post-projection divergence unnormalized L2: "+str(sol.get("post_projection_max_divergence_l2"))+".","- Field statistics and boundary-flux checks remain required."]
  else: lines += ["","Performance parsing did not complete:",str(r.get("performance_analysis_error","unknown"))]
  M.write_text("\n".join(lines)+"\n")
+ publish_candidate()
+
+def publish_candidate():
+ files=[
+  "terrain_projection_optimization/monitoring/job_"+J+".jsonl",
+  "terrain_projection_optimization/monitoring/job_"+J+"_analysis.json",
+  "terrain_projection_optimization/monitoring/job_"+J+"_analysis.md",
+ ]
+ rc,out,err=run(["git","-C",str(R),"add","--",*files])
+ if rc:
+  print("Could not stage candidate results: "+(err or out),flush=True); return
+ _,names,_=run(["git","-C",str(R),"diff","--cached","--name-only"])
+ if not set(names.splitlines()).issubset(set(files)):
+  run(["git","-C",str(R),"reset","--",*files])
+  print("Skipped candidate result commit due to unrelated staged files.",flush=True); return
+ rc,out,err=run(["git","-C",str(R),"commit","-m","docs: record corrected terrain MLMG run"])
+ if rc:
+  print("Candidate result commit failed: "+(err or out),flush=True); return
+ rc,out,err=run(["git","-C",str(R),"push","origin","terrain_opt"])
+ print("Candidate result push exit="+str(rc)+" "+(out or err),flush=True)
 
 def main():
  print("Monitoring job "+J+" every 30 minutes; events: "+str(E),flush=True)

@@ -1,0 +1,3 @@
+field-selfcheck-*.out
+field-analysis-*.out
+__pycache__/
