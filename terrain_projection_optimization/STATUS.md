@@ -121,6 +121,11 @@ Self-check retry 18954908 was RUNNING at 13m59s as of 07:19:11 UTC. The correcte
 
 Self-check retry 18954908 was RUNNING at 21m21s on x1008c0s0b0n1. Its corrected identical-input pass had processed 7200, 7800.133, and 8400.469 s snapshots; the final 9000 s snapshot and zero-difference outputs are pending. Slurm accounting showed about 29m21s CPU, 9.1 GB peak RSS, and 9.4 GB disk reads within the allocation. Candidate 18953921 remains priority-pending with a provisional 12:40 UTC start; field comparison 18954684 remains dependency-pending. A terminal-state watcher is being added for this self-check so its final QA outcome is published automatically.
 
-### Corrected field self-check: all snapshots processed — 2026-10-08 07:32 UTC
+### Corrected field self-check: first aggregate pass complete — 2026-10-08 07:32 UTC
 
-At 07:32:48 UTC, retry job 18954908 was RUNNING at 27m36s and had logged all four control snapshots (7200, 7800.133, 8400.469, and 9000 s) in both identical-input aggregation passes. Final regional/PDF/spectral comparisons and the success marker had not yet appeared. Slurm accounting showed active CPU and disk reads, about 9.1 GB peak RSS, and no reported error. Candidate 18953921 remained PENDING for Priority; field comparison 18954684 remained dependency-pending. The detached self-check watcher will publish its terminal result.
+At 07:32:48 UTC, retry job 18954908 was RUNNING at 27m36s and had logged all four control snapshots (7200, 7800.133, 8400.469, and 9000 s) in the first identical-input aggregation pass; the second pass was not yet complete. Final regional/PDF/spectral comparisons and the success marker had not yet appeared. Slurm accounting showed active CPU and disk reads, about 9.1 GB peak RSS, and no reported error. Candidate 18953921 remained PENDING for Priority; field comparison 18954684 remained dependency-pending. The detached self-check watcher will publish its terminal result.
+
+
+### Corrected field self-check: second pass started — 2026-10-08 07:38 UTC
+
+At 07:38:35 UTC, job 18954908 remained RUNNING at 33m24s. The log confirms the first aggregate pass processed all four snapshots, then the second pass started at 7200 s; the remaining three second-pass snapshots and final self-comparison are pending. Slurm accounting showed active CPU and disk reads, about 9.1 GB peak RSS, with no reported error. This corrects the initial 07:32 wording, which incorrectly described both passes as complete. Candidate 18953921 remains priority-pending and field comparison 18954684 remains dependency-pending.
