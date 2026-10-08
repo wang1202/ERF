@@ -41,6 +41,41 @@ def write_csv(path, rows):
         return
     sc.write_csv(path, scrub(rows))
 
+def compare_spectra(reference, candidate):
+    reference_by_key = {
+        (item["agl_height_m"], item["quantity"]): item
+        for item in reference
+    }
+    candidate_by_key = {
+        (item["agl_height_m"], item["quantity"]): item
+        for item in candidate
+    }
+    if reference_by_key.keys() != candidate_by_key.keys():
+        raise ValueError("Spectrum schema differs")
+    rows, summary = [], []
+    for key, a in reference_by_key.items():
+        b = candidate_by_key[key]
+        wave_a = a["wavenumber_cycles_per_m"]
+        wave_b = b["wavenumber_cycles_per_m"]
+        power_a, power_b = a["shell_power"], b["shell_power"]
+        if wave_a != wave_b:
+            raise ValueError("Spectral bins differ")
+        if len(power_a) != len(wave_a) or len(power_b) != len(wave_b):
+            raise ValueError("Spectral power and wavenumber lengths differ")
+        for k, x, y in zip(wave_a, power_a, power_b):
+            rows.append({"agl_height_m": key[0], "quantity": key[1],
+                         "wavenumber_cycles_per_m": k,
+                         "reference_shell_power": x, "candidate_shell_power": y,
+                         "difference": y - x})
+        summary.append({
+            "agl_height_m": key[0], "quantity": key[1],
+            "reference_total_power": math.fsum(power_a),
+            "candidate_total_power": math.fsum(power_b),
+            "reference_high_wavenumber_fraction": a["high_wavenumber_fraction"],
+            "candidate_high_wavenumber_fraction": b["high_wavenumber_fraction"],
+        })
+    return rows, summary
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--control", type=Path, required=True)
@@ -154,26 +189,7 @@ def main():
     write_csv(out / "field_pdf_bins.csv", pdf_rows)
     write_csv(out / "field_pdf_summary.csv", pdf_summary)
 
-    spectral_rows, spectral_summary = [], []
-    cspec = {(x["agl_height_m"], x["quantity"]): x for x in cf["spectra"]}
-    nspec = {(x["agl_height_m"], x["quantity"]): x for x in nf["spectra"]}
-    if cspec.keys() != nspec.keys():
-        raise ValueError("Spectrum schema differs")
-    for key, a in cspec.items():
-        b = nspec[key]
-        if a["wavenumber_cycles_per_m"] != b["wavenumber_cycles_per_m"]:
-            raise ValueError("Spectral bins differ")
-        for k, x, y in zip(a["wavenumber_cycles_per_m"], a["shell_power"], b["shell_power"]):
-            spectral_rows.append({"agl_height_m": key[0], "quantity": key[1],
-                                  "wavenumber_cycles_per_m": k,
-                                  "reference_shell_power": x, "candidate_shell_power": y,
-                                  "difference": y - x})
-        spectral_summary.append({
-            "agl_height_m": key[0], "quantity": key[1],
-            "reference_total_power": a["total_power"], "candidate_total_power": b["total_power"],
-            "reference_high_wavenumber_fraction": a["high_wavenumber_power"] / a["total_power"] if a["total_power"] else 0.0,
-            "candidate_high_wavenumber_fraction": b["high_wavenumber_power"] / b["total_power"] if b["total_power"] else 0.0,
-        })
+    spectral_rows, spectral_summary = compare_spectra(cf["spectra"], nf["spectra"])
     write_csv(out / "field_spectral_bins.csv", spectral_rows)
     write_csv(out / "field_spectral_summary.csv", spectral_summary)
 
