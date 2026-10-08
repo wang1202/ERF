@@ -76,24 +76,32 @@ def compare_spectra(reference, candidate):
         })
     return rows, summary
 
+def validate_parameter_differences(control_params, candidate_params, self_compare=False):
+    differences = {
+        key: [control_params.get(key), candidate_params.get(key)]
+        for key in sorted(control_params.keys() | candidate_params.keys())
+        if control_params.get(key) != candidate_params.get(key)
+    }
+    expected = {} if self_compare else {"erf.terrain_poisson_solver": [None, "mlmg"]}
+    if differences != expected:
+        mode = "self-comparison" if self_compare else "control/candidate comparison"
+        raise ValueError("Unexpected " + mode + " input differences: " + str(differences))
+    return differences
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--control", type=Path, required=True)
     ap.add_argument("--candidate", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
+    ap.add_argument("--self-compare", action="store_true",
+                    help="Require identical inputs for a pipeline self-check")
     args = ap.parse_args()
     control, candidate, out = args.control.resolve(), args.candidate.resolve(), args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
     control_params = vc.params(control / "inputs_canopy")
     candidate_params = vc.params(candidate / "inputs_canopy")
-    parameter_differences = {
-        key: [control_params.get(key), candidate_params.get(key)]
-        for key in sorted(control_params.keys() | candidate_params.keys())
-        if control_params.get(key) != candidate_params.get(key)
-    }
-    expected_differences = {"erf.terrain_poisson_solver": [None, "mlmg"]}
-    if parameter_differences != expected_differences:
-        raise ValueError("Unexpected control/candidate input differences: " + str(parameter_differences))
+    parameter_differences = validate_parameter_differences(
+        control_params, candidate_params, self_compare=args.self_compare)
 
     # Native profile diagnostics are independently time-weighted on their actual common support.
     cp, npf = sc.profiles([control]), sc.profiles([candidate])

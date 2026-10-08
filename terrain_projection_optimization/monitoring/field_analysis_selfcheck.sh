@@ -17,5 +17,5 @@ trap 'rm -rf "$TEST_OUT"' EXIT
 PYTHON=/home/wang1202/.conda-envs/metpy/bin/python3
 ROOT=/kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization
 BASELINE="$ROOT/benchmarks/baseline_gmres_fft"
-"$PYTHON" "$ROOT/monitoring/compare_field_runs.py" --control "$BASELINE" --candidate "$BASELINE" --output "$TEST_OUT"
+"$PYTHON" "$ROOT/monitoring/compare_field_runs.py" --control "$BASELINE" --candidate "$BASELINE" --output "$TEST_OUT" --self-compare
 echo "Control self-comparison passed; generated outputs in temporary directory and removed."
