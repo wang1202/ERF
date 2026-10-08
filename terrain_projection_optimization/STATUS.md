@@ -116,3 +116,7 @@ The candidate watcher recorded job 18953921 PENDING for Priority at 07:12:26 UTC
 ### Corrected field QA progress — 2026-10-08 07:19 UTC
 
 Self-check retry 18954908 was RUNNING at 13m59s as of 07:19:11 UTC. The corrected log has advanced through plot snapshots at 7200 and 7800.133 s, with no reported error; Slurm accounting showed about 19m15s CPU time and 8.9 GB peak RSS within the 8-CPU/64-GB allocation. Candidate 18953921 remains PENDING for Priority with a 12:40 UTC provisional start. Field comparison 18954684 remains dependency-pending. The full self-check and all candidate performance/numerical results are still pending.
+
+### Corrected field self-check progress — 2026-10-08 07:26 UTC
+
+Self-check retry 18954908 was RUNNING at 21m21s on x1008c0s0b0n1. Its corrected identical-input pass had processed 7200, 7800.133, and 8400.469 s snapshots; the final 9000 s snapshot and zero-difference outputs are pending. Slurm accounting showed about 29m21s CPU, 9.1 GB peak RSS, and 9.4 GB disk reads within the allocation. Candidate 18953921 remains priority-pending with a provisional 12:40 UTC start; field comparison 18954684 remains dependency-pending. A terminal-state watcher is being added for this self-check so its final QA outcome is published automatically.

@@ -7,3 +7,5 @@ Native field comparisons use `compare_field_runs.py` and the existing terrain st
 The control-only pipeline check uses `field_analysis_selfcheck.sh` (Slurm job 18954682). Full candidate field analysis is queued as job 18954684 by `field_analysis_job.sh` with dependency `afterok:18953921`, on the shared CPU partition (8 CPUs, 64 GB). The detached `terrainopt-field-monitor` session polls that analysis job every 30 minutes, appends its state, and commits/pushes the report and CSV artifacts to `terrain_opt` when it terminates.
 
 The cluster blocks user crontabs, so detached tmux sessions provide the recurring checks while the login environment remains available. Inspect them with `tmux capture-pane -pt terrainopt-monitor` and `tmux capture-pane -pt terrainopt-field-monitor`.
+
+The control pipeline self-check (currently job 18954908) uses `monitor_selfcheck_job.py` in the detached tmux session `terrainopt-selfcheck-monitor`. It polls every 30 minutes and publishes the terminal Slurm state, pass-marker check, and final log excerpt to `terrain_opt`.
