@@ -180,3 +180,11 @@ The local terrain_opt branch contains three commits beyond origin/terrain_opt, w
 ### 30-minute poll and remote sync restored — 2026-10-08 08:44 UTC
 
 The field-analysis watcher recorded job 18954684 PENDING on its dependency at 08:41:28 UTC and committed event 8962232. Candidate watcher job 18953921 remained PENDING for Priority at 08:42:29 UTC and committed event 8d85866. Slurm's current provisional candidate start is 10:40 UTC. The candidate watcher's push completed successfully; `git ls-remote` verifies `origin/terrain_opt` at 8d858660a1c3dbcf324c5b31cd96b9224bf43a6f, matching the local branch. The temporary push-retry session has been stopped; both 30-minute job pollers remain active. Next polls are due around 09:11–09:12 UTC. Candidate performance, residual, divergence, and matched-field results are still unavailable while it remains queued.
+
+### 30-minute polling checkpoint — 2026-10-08 09:13 UTC
+
+Candidate job 18953921 remained PENDING for Priority at 09:12:52 UTC; Slurms
+
+### 30-minute polling checkpoint — 2026-10-08 09:13 UTC
+
+Candidate job 18953921 remained PENDING for Priority at 09:12:52 UTC; the latest Slurm provisional start estimate is 10:40 UTC on x3108c0s13b0n0. Dependent field-analysis job 18954684 remained PENDING at 09:12:04 UTC. Both poll events were committed locally as 92ba141 and 75b6686, respectively. Their bounded HTTPS pushes timed out; origin/terrain_opt still resolves to 8d858660a1c3dbcf324c5b31cd96b9224bf43a6f, leaving the local branch three commits ahead. Both 30-minute watchers remain active. The candidate has not started, so no new runtime, solver, divergence, or matched-field results are available; the successful control pipeline self-check remains the latest validation result. Next polls are expected around 09:42–09:43 UTC.
