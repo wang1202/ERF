@@ -80,3 +80,7 @@ Source inspection confirms the MLTerrainPoisson flux kernel explicitly sets Neum
 - Candidate field comparison 18954684 remains PENDING on `afterok:18953921`.
 - Both detached 30-minute tmux watchers are alive. Their latest polls were 06:12:24 UTC (candidate) and 06:11:28 UTC (field analysis); next polls are due around 06:42 and 06:41 UTC.
 - No corrected-candidate performance, residual, divergence, or field-difference result exists yet. The self-check is still validating the analysis pipeline, not measuring the MLMG candidate.
+
+### Candidate integrity and QA resource check — 2026-10-08 06:28 UTC
+
+The queued candidate executable still hashes to `9a6eaf213c4f596c6301ed103e77fcc3ca1768e60e2e704f5dd1a7a7b11b2101`; the control executable hashes to `0c4b71b2441b1d0e4ed78216e8ce3e8e5aadab546a35d6380336ea82402d482b`. A fresh input diff shows only `erf.terrain_poisson_solver` differs (`mlmg` in the candidate). Slurm job 18953921 still points to the candidate directory and requests one H100, 16 CPUs, and a 4-hour limit. At 06:28 UTC, control self-check 18954682 had run 25m06s, remained RUNNING, and had logged three of four plot snapshots; its latest accounting showed about 8.9 GiB resident memory, within its 64 GiB allocation. Candidate performance and numerical results remain unavailable until the queued run executes.
