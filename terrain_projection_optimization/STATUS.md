@@ -168,3 +168,7 @@ Corrected candidate job 18953921 remains PENDING for scheduler priority; Slurm's
 ### 30-minute polling checkpoint — 2026-10-08 08:12 UTC
 
 The candidate watcher recorded job 18953921 PENDING for Priority at 08:12:27 UTC; the provisional start estimate remains 12:25:43 UTC. The field-analysis watcher recorded job 18954684 PENDING on its after-success dependency at 08:11:28 UTC. Both jobs remain in the queue, and both detached polling sessions are active. The successful control self-check remains the only new validation result; the MLMG candidate has not started, so candidate speed, residual, divergence, and matched-field comparisons are still pending.
+
+### Monitoring and publisher update — 2026-10-08 08:21 UTC
+
+Candidate job 18953921 remains PENDING for scheduler priority. Slurm moved its provisional start estimate earlier to 10:40 UTC; this estimate may still change. Dependent field-analysis job 18954684 remains PENDING on the candidate's successful completion. The candidate and field pollers were upgraded and restarted without resetting their cadence; they will now commit each 30-minute scheduler event and make a bounded push attempt. The next scheduled checks are around 08:41–08:42 UTC. Both pollers and the remote-push retry session are active. Validation passed for Python compilation, the cadence-preservation calculation, and `git diff --check`. No candidate performance, residual, divergence, or matched-field result is available yet.
