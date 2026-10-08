@@ -723,12 +723,12 @@ struct SolverChoice {
 
         pp.query_enum_case_insensitive("moisture_model",moisture_type);
 
-        // Test-only M1 failure injections. They remain disabled unless an
+        // Test-only SBM failure injections. They remain disabled unless an
         // integration test explicitly enables the corresponding option.
         pp.queryAdd("sbm_test_native_qc_write_fault", sbm_test_native_qc_write_fault);
-        pp.queryAdd("sbm_test_carrier_momentum_fault", sbm_test_carrier_momentum_fault);
+        pp.queryAdd("sbm_test_donor_cfl_fault", sbm_test_donor_cfl_fault);
         if (moisture_type != MoistureType::SBM &&
-            (sbm_test_native_qc_write_fault || sbm_test_carrier_momentum_fault)) {
+            (sbm_test_native_qc_write_fault || sbm_test_donor_cfl_fault)) {
             amrex::Error("SBM test fault-injection options require moisture_model=SBM");
         }
 
@@ -740,7 +740,13 @@ struct SolverChoice {
         moisture_indices = MoistureComponentIndices::from_moisture_model(moisture_type);
 
         if (moisture_type == MoistureType::SBM) {
-            pp.queryAdd("sbm_zero_transport_fixture", sbm_zero_transport_fixture);
+            if (pp.contains("sbm_zero_transport_fixture")) {
+                bool legacy_zero_transport = false;
+                pp.get("sbm_zero_transport_fixture", legacy_zero_transport);
+                if (legacy_zero_transport) {
+                    amrex::Error("erf.sbm_zero_transport_fixture=true is obsolete; M3 advances the mapped spectral state, so remove this option");
+                }
+            }
             pp.queryAdd("sbm_nbins", sbm_nbins);
             pp.queryAdd("sbm_moment_mode", sbm_moment_mode);
             pp.queryAdd("sbm_cloud_rain_split", sbm_cloud_rain_split);
@@ -748,9 +754,6 @@ struct SolverChoice {
             pp.queryarr("sbm_pivots", sbm_pivots);
             pp.queryarr("sbm_fixture_initial_state", sbm_fixture_initial_state);
 
-            if (!sbm_zero_transport_fixture) {
-                amrex::Error("moisture_model=SBM requires erf.sbm_zero_transport_fixture=true; production spectral transport is not implemented");
-            }
             if (sbm_nbins < 2 || (sbm_moment_mode != 1 && sbm_moment_mode != 2)) {
                 amrex::Error("SBM requires sbm_nbins >= 2 and sbm_moment_mode equal to 1 or 2");
             }
@@ -1038,15 +1041,24 @@ struct SolverChoice {
         // *******************************************************************************
 
         read_int_string(max_level, "anelastic", anelastic, 0);
-        read_int_string(max_level, "fixed_density", fixed_density, 0);
+        const bool fixed_density_given =
+            read_int_string(max_level, "fixed_density", fixed_density, 0);
         read_int_string(max_level, "project_initial_velocity", project_initial_velocity, 0);
 
+        // The anelastic equations hold the density at its base-state value, so
+        // fixed_density is forced to 1 at every anelastic level; a user value of 0
+        // there is ignored, and we say so rather than drop it silently.
         bool any_anelastic = false;
         bool any_compress  = false;
         for (int i = 0; i <= max_level; ++i) {
             if (anelastic[i] == 1) {
+                if (fixed_density_given && fixed_density[i] == 0) {
+                    amrex::Print() << "WARNING: erf.fixed_density = 0 is ignored at level " << i
+                                   << " because erf.anelastic = 1 there; the anelastic equations"
+                                   << " always hold the density fixed in time." << std::endl;
+                }
                 project_initial_velocity[i] = 1;
-                fixed_density[i]            = 1; // We default to true but are allowed to override below
+                fixed_density[i]            = 1; // Always fixed when anelastic
                 buoyancy_type[i]            = 3; // (This isn't actually used when anelastic is set)
                 any_anelastic               = true;
             } else {
@@ -1196,12 +1208,36 @@ struct SolverChoice {
         pp.queryAdd("if_stability_correction",if_stability_correction);
         pp.queryAdd("if_ws_floor",if_ws_floor);
         pp.queryAdd("if_damp_alpha",if_damp_alpha);
+        // Opt-in WRF-style bounds on the wall law (erf-model/ERF#4016): the wind floor behind the
+        // friction velocity of its stability estimate, and the cap on psi_m in the momentum law as
+        // a fraction of ln(z/z0); 0 and 1 (the defaults) turn them off
+        pp.queryAdd("if_stability_wind_floor",if_stability_wind_floor);
+        pp.queryAdd("if_psi_cap_factor",if_psi_cap_factor);
+        if (!(if_stability_wind_floor >= zero)) {
+            amrex::Abort("erf.if_stability_wind_floor must be >= 0 [m/s] (0 leaves the wind as it is)");
+        }
+        if (!(if_psi_cap_factor > zero && if_psi_cap_factor <= one)) {
+            amrex::Abort("erf.if_psi_cap_factor must be in (0, 1] (1 caps psi at ln(z/z0))");
+        }
+        // Say so when a bound is set and the wall law's stability estimate is in use
+        if ((terrain_type == TerrainType::ImmersedForcing || buildings_type == BuildingsType::ImmersedForcing) &&
+            (if_use_most || if_surf_temp_flux != amrex::Real(1e-8) || if_Olen_in != amrex::Real(1e-8)) &&
+            (if_psi_cap_factor < one || if_stability_wind_floor > zero))
+        {
+            amrex::Print() << "Immersed wall law: erf.if_psi_cap_factor = " << if_psi_cap_factor
+                           << ", erf.if_stability_wind_floor = " << if_stability_wind_floor
+                           << " m/s (WRF-style bounds; the defaults 1 and 0 turn them off)\n";
+        }
 
         if ((if_init_surf_temp > zero        && if_surf_temp_flux != amrex::Real(1e-8)) ||
             (if_init_surf_temp > zero        && if_Olen_in        != amrex::Real(1e-8)) ||
             (if_Olen_in != amrex::Real(1e-8) && if_surf_temp_flux != amrex::Real(1e-8)))
         {
             amrex::Error("Can only specify one of init_surf_temp, surf_temp_flux, or Olen");
+        }
+        if (if_Olen_in == zero &&
+            (terrain_type == TerrainType::ImmersedForcing || buildings_type == BuildingsType::ImmersedForcing)) {
+            amrex::Abort("erf.if_Olen = 0 is not an Obukhov length: give a nonzero length [m] (a large |L| is near neutral)");
         }
 
         // Flag to do MOST rotations with terrain
@@ -1922,7 +1958,7 @@ struct SolverChoice {
         } else if (moisture_type == MoistureType::MoistNoCondensation) {
             amrex::Print() << "Moisture Model: MoistNoCondensation" << std::endl;
         } else if (moisture_type == MoistureType::SBM) {
-            amrex::Print() << "Moisture Model: SBM zero-transport fixture" << std::endl;
+            amrex::Print() << "Moisture Model: SBM mapped spectral advection (M3)" << std::endl;
         } else {
             amrex::Print() << "Moisture Model: None" << std::endl;
         }
@@ -2060,8 +2096,9 @@ struct SolverChoice {
      * @param string_to_read ParmParse key to read.
      * @param vec_to_fill Destination vector with one entry per level.
      * @param default_int Default value used when the key is absent.
+     * @return True if the key was present in the inputs.
      */
-    void read_int_string (int max_level, const char* string_to_read,
+    bool read_int_string (int max_level, const char* string_to_read,
                           amrex::Vector<int>& vec_to_fill, int default_int)
     {
         amrex::ParmParse pp("erf");
@@ -2081,6 +2118,7 @@ struct SolverChoice {
         } else {
             for (int i = 0; i <= max_level; ++i) vec_to_fill[i] = temp[i];
         }
+        return (nvals > 0);
     }
 
     inline static
@@ -2196,6 +2234,8 @@ struct SolverChoice {
     bool        if_stability_correction  = false;
     amrex::Real if_ws_floor              = 0.001;  // [m/s]
     amrex::Real if_damp_alpha            = 0.5;    // [-]
+    amrex::Real if_stability_wind_floor  = amrex::Real(0.0);  // [m/s]
+    amrex::Real if_psi_cap_factor        = amrex::Real(1.0);  // [-]
 
     // This defaults to true but can be set to false for moving terrain cases only
     bool        use_lagged_delta_rt   = true;
@@ -2389,9 +2429,8 @@ struct SolverChoice {
     int sbm_nbins{4};
     int sbm_moment_mode{1};
     int sbm_cloud_rain_split{-1};
-    bool sbm_zero_transport_fixture{false};
     bool sbm_test_native_qc_write_fault{false};
-    bool sbm_test_carrier_momentum_fault{false};
+    bool sbm_test_donor_cfl_fault{false};
     amrex::Vector<amrex::Real> sbm_edges;
     amrex::Vector<amrex::Real> sbm_pivots;
     amrex::Vector<amrex::Real> sbm_fixture_initial_state;
@@ -2550,7 +2589,7 @@ struct SolverChoice {
  * @var SolverChoice::anelastic_type
  * @brief Per-level two-stage scheme used by the anelastic integrator.
  * @var SolverChoice::fixed_density
- * @brief Per-level flag selecting fixed-density treatment.
+ * @brief Per-level flag selecting fixed-density treatment; always 1 at an anelastic level.
  * @var SolverChoice::project_initial_velocity
  * @brief Per-level flag for projecting the initial velocity.
  * @var SolverChoice::buoyancy_type
@@ -2640,9 +2679,13 @@ struct SolverChoice {
  * @var SolverChoice::if_stability_correction
  * @brief Whether immersed-forcing stability corrections are enabled.
  * @var SolverChoice::if_ws_floor
- * @brief Wind-speed floor for immersed-forcing MOST [m/s].
+ * @brief Wind-speed floor [m/s] in the per-step change limit of the building wall-law forcing.
  * @var SolverChoice::if_damp_alpha
  * @brief Immersed-forcing damping coefficient.
+ * @var SolverChoice::if_stability_wind_floor
+ * @brief Wind-speed floor [m/s] behind the friction velocity of the wall law's stability estimate (0: none).
+ * @var SolverChoice::if_psi_cap_factor
+ * @brief Cap on psi_m in the immersed momentum wall law as a fraction of ln(z/z0) (1: none).
  * @var SolverChoice::use_lagged_delta_rt
  * @brief Whether to use lagged delta terms for moving terrain.
  * @var SolverChoice::rebalance_wrf_input
