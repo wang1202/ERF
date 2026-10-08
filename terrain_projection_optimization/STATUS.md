@@ -84,3 +84,7 @@ Source inspection confirms the MLTerrainPoisson flux kernel explicitly sets Neum
 ### Candidate integrity and QA resource check — 2026-10-08 06:28 UTC
 
 The queued candidate executable still hashes to `9a6eaf213c4f596c6301ed103e77fcc3ca1768e60e2e704f5dd1a7a7b11b2101`; the control executable hashes to `0c4b71b2441b1d0e4ed78216e8ce3e8e5aadab546a35d6380336ea82402d482b`. A fresh input diff shows only `erf.terrain_poisson_solver` differs (`mlmg` in the candidate). Slurm job 18953921 still points to the candidate directory and requests one H100, 16 CPUs, and a 4-hour limit. At 06:28 UTC, control self-check 18954682 had run 25m06s, remained RUNNING, and had logged three of four plot snapshots; its latest accounting showed about 8.9 GiB resident memory, within its 64 GiB allocation. Candidate performance and numerical results remain unavailable until the queued run executes.
+
+### Control field self-check progress — 2026-10-08 06:32 UTC
+
+The control-only field self-check 18954682 has now processed all four plot snapshots through 9000 s. At 06:32:58 UTC it was still RUNNING after 29m50s, so the profile/statistics self-comparison has not yet produced a terminal result. Slurm accounting showed active CPU and disk reads, with peak resident memory about 8.9 GiB against 64 GiB requested. Candidate job 18953921 remained PENDING for Priority with a provisional 12:25:43 UTC start; field comparison 18954684 remained PENDING on its after-success dependency. No candidate performance or numerical result is available yet.
