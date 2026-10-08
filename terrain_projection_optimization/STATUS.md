@@ -96,3 +96,7 @@ At 06:35:40 UTC, control self-check 18954682 remained RUNNING at 32m35s elapsed.
 ### 30-minute scheduler and field-QA checkpoint — 2026-10-08 06:42 UTC
 
 The candidate watcher recorded job 18953921 PENDING for Priority at 06:42:25 UTC; its provisional start estimate moved earlier from 12:25:43 to 12:10:00 UTC. The field-analysis watcher recorded job 18954684 PENDING on its `afterok:18953921` dependency at 06:41:28 UTC. Control self-check 18954682 remained RUNNING at 39m46s; its second, identical-input field aggregation had processed snapshots at 7200 and 7800.133 s. Slurm accounting showed active CPU and disk reads, about 9.1 GiB peak resident memory, and no error/exit status. Candidate performance, residual, divergence, and matched-field results remain pending.
+
+### Control self-check progress — 2026-10-08 06:48 UTC
+
+At 06:48:15 UTC, QA job 18954682 was RUNNING at 45m14s. Its identical-input aggregation pass had processed the 7200, 7800.133, and 8400.469 s plot snapshots; the final 9000 s snapshot and self-comparison summaries remain pending. Slurm accounting showed about 1h03m CPU time, 9.1 GB peak RSS, and increasing disk reads, within its 8-CPU/64-GB allocation. Corrected candidate 18953921 remained PENDING for Priority with a 12:10 UTC provisional start; dependent field analysis 18954684 remained pending. No candidate numerical or performance result is available.
