@@ -1,74 +1,56 @@
 # Current experiment status
 
-Updated 2026-10-07 16:02 MDT.
+Updated 2026-10-07 21:10 MDT.
 
 ## Remote branch
 
 The work is on wang1202/ERF:terrain_opt, based on remote development at
-e50b1611bc987a5188160dfa5aa5061232080859. The branch includes the requested
-agent instructions, copied MyBuildTerrainOpt/cmake.sh, the AMReX
+`e50b1611bc987a5188160dfa5aa5061232080859`. The branch includes the requested
+agent instructions, copied `MyBuildTerrainOpt/cmake.sh`, the AMReX
 MLTerrainPoisson pin, and reproducible benchmark decks. The experimental
-solver is committed as 5960a55.
+solver remains opt-in; GMRES+FFT is the default.
 
 ## Builds
 
-The clean Release CUDA build completed successfully at 15:23 MDT. Build
-provenance and the control executable hash are in build_provenance.md. ERF and
-AMReX, including MLTerrainPoisson, compiled and linked.
+The clean Release CUDA build succeeded. A follow-up rebuild also succeeded
+after replacing the unsupported MLMG flux query with
+`MLTerrainPoisson::compFlux`, which provides the terrain-aware face fluxes
+needed by ERF's momentum correction.
 
-The experimental MLTerrainPoisson path is opt-in through
-erf.terrain_poisson_solver = mlmg. The default remains GMRES+FFT. The
-incremental candidate compile and erf_exec link succeeded with the same build
-configuration. Runtime guards require 3D, level 0, a full-domain single
-subdomain, and homogeneous BCs; the current case satisfies these requirements.
+- Control executable SHA256: `0c4b71b2441b1d0e4ed78216e8ce3e8e5aadab546a35d6380336ea82402d482b`
+- Corrected candidate executable SHA256: `9a6eaf213c4f596c6301ed103e77fcc3ca1768e60e2e704f5dd1a7a7b11b2101`
 
-## Benchmark status
+## Benchmark results
 
-The control executable is pinned in
-benchmarks/baseline_gmres_fft/erf_exec with SHA256
-0c4b71b2441b1d0e4ed78216e8ce3e8e5aadab546a35d6380336ea82402d482b.
-The candidate executable is pinned in
-benchmarks/candidate_mlmg/erf_exec with SHA256
-a43448f05279913c37e1252b14632fc694d96e7a0f3bb27337cd30a32d46d5d2.
+Control job 18949177 completed successfully on one H100 (30m41s Slurm
+elapsed), covering model time 7200 to 9000 s in 2195 steps. Mature-half
+measurements from `benchmarks/summarize_logs.py`:
 
-Both cases use the same read-only 7200 s checkpoint and stop at 9000 s with
-relative and absolute Poisson tolerances of 1e-8. Control job 18949177 and
-candidate job 18949428 are submitted to gpu-h100s. At the latest scheduler
-check, both were pending: control due to unavailable/reserved H100 nodes and
-candidate due to priority. Neither has started, so there are no new runtime,
-speedup, or numerical-equivalence results yet.
+- 0.81736 s/step and 3632 simulated seconds per wall hour.
+- Median 19 GMRES iterations; solver work averaged 0.67414 s/step, or 82.48%
+of measured step time.
+- Median relative GMRES residual 8.20e-9. Maximum post-projection divergence
+was 1.79e-9 in L-infinity and 1.26e-7 in the unnormalized L2 norm.
+- No warnings or errors were found in the completed control log.
 
-The scheduler's current start-time forecast is control 18949177 at
-2026-10-07 22:21 and candidate 18949428 at 2026-10-07 23:20 (MDT; estimates
-can move). The queue assigned separate H100 nodes. Until they start, non-FFT
-versus FFT performance remains unknown; multigrid may reduce communication
-and iterations, but it is not guaranteed to beat this single-GPU
-FFT-preconditioned solve.
+Candidate job 18949428 failed after its first projection. MLMG converged in
+two cycles (reported absolute residual 3.17e-9), then the generic
+`MLMG::getFluxes` call reached AMReX's unimplemented `MLLinOp::getFluxes`
+abort. That failed attempt's log, preflight, backtrace, and partial outputs
+are preserved under `benchmarks/candidate_mlmg/attempts/18949428/`. It provides
+no candidate speed or post-projection divergence result.
 
-## Findings and limits
-
-The existing terrain path does not support disabling FFT by setting
-erf.use_fft = 0; the new AMReX MLTerrainPoisson multigrid solver is the
-non-FFT alternative being tested.
-
-MLTerrainPoisson supports homogeneous boundary conditions and sets Neumann
-face flux to zero. ERF's terrain boundary treatment can retain slope-related
-cross-term flux at those faces, so boundary flux, post-projection divergence,
-and LES-field differences remain required acceptance checks.
-
-The older strict campaign measured 0.811332 s/step and median 19 GMRES
-iterations on ERF commit b0123b8. That is historical context only; this
-branch is being remeasured from the same checkpoint.
+The candidate now calls `MLTerrainPoisson::compFlux`; its corrected binary is
+ready for a clean rerun. Performance and numerical equivalence remain unknown
+until that run and field/statistics checks complete. The solver's homogeneous
+Neumann flux behavior still requires explicit boundary-flux validation.
 
 ## Next steps
 
-1. Monitor both jobs through H100 preflight and simulation completion; check
-   their runtime environment and executable hashes.
-2. Run `benchmarks/summarize_logs.py` on the matched logs to compare mature
-   step and solver time, residuals, cycles/iterations, and post-projection
-   divergence.
-3. Compare native profiles, surface diagnostics, and plotfile fields before
-   accepting any speedup.
-4. If the multigrid path is numerically valid and faster, extend the run for
-   statistical validation; if not, preserve GMRES+FFT and test another
-   tolerance-preserving optimization.
+1. Resubmit the corrected candidate against the completed control interval.
+2. Compare mature step and solver time, residuals, cycles, and post-projection
+divergence using `benchmarks/summarize_logs.py`.
+3. Compare native profiles, surface diagnostics, plotfile fields, and boundary
+flux behavior before accepting any speedup.
+4. Extend the run for statistical validation only if the candidate is both
+faster and numerically acceptable.

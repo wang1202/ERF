@@ -14,7 +14,7 @@ P = {
     "gmres_time": re.compile(rf"GMRES: Solve Time = ({N})"),
     "solve": re.compile(rf"Time in solve ({N})"),
     "mg_init": re.compile(rf"MLMG: Initial residual \(resid0\) = ({N})"),
-    "mg_final": re.compile(rf"MLMG: Final Iter\. (\d+) resid, resid/resid0 = ({N}), ({N})"),
+    "mg_final": re.compile(rf"MLMG: Final Iter\. (\d+) resid, resid/(?:resid0|bnorm) = ({N}), ({N})"),
     "mg_cycles": re.compile(r"MLTerrainPoisson iterations: (\d+)"),
     "div_before": re.compile(rf"Max/L2 norm of divergence before solve(?: in subdomain \d+)? at level \d+ : ({N}) ({N})"),
     "div_after": re.compile(rf"Max/L2 norm of divergence after\s+solve at level \d+ : ({N}) ({N})"),

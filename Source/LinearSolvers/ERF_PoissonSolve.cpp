@@ -773,7 +773,13 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
                 mlmg.setBottomVerbose(0);
                 mlmg.solve(GetVecOfPtrs(phi_sub), GetVecOfConstPtrs(rhs_sub),
                            solverChoice.poisson_reltol, solverChoice.poisson_abstol);
-                mlmg.getFluxes(GetVecOfArrOfPtrs(fluxes_sub));
+                // MLTerrainPoisson implements compFlux directly; it does not
+                // implement the generic MLLinOp getFluxes interface.
+                Array<MultiFab*,AMREX_SPACEDIM> terrain_fluxes{
+                    &fluxes_sub[0][0], &fluxes_sub[0][1], &fluxes_sub[0][2]
+                };
+                terrain_op.compFlux(lev, terrain_fluxes, phi_sub[0],
+                                    MLTerrainPoisson::Location::FaceCenter);
 
                 // Match the map-factor treatment used by the GMRES terrain path.
                 for (MFIter mfi(phi_sub[0]); mfi.isValid(); ++mfi)
