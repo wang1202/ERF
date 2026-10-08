@@ -72,12 +72,18 @@ def publish(event):
         section.extend(output[-30:] or ["No Slurm output was captured."])
         section.extend(["```", ""])
         STATUS.write_text(current + "\n".join(section))
-    paths = [str(EVENTS.relative_to(REPO)), str(LOG.relative_to(REPO)),
-             str(STATUS.relative_to(REPO))]
+    paths = [str(EVENTS.relative_to(REPO)), str(STATUS.relative_to(REPO))]
     rc, out, err = run(["git", "-C", str(REPO), "add", "--", *paths])
     if rc:
         print("Could not stage self-check result: " + (err or out), flush=True)
         return
+    if LOG.is_file():
+        log_path = str(LOG.relative_to(REPO))
+        rc, out, err = run(["git", "-C", str(REPO), "add", "-f", "--", log_path])
+        if rc:
+            print("Could not stage self-check log: " + (err or out), flush=True)
+            return
+        paths.append(log_path)
     _, staged_text, _ = run(["git", "-C", str(REPO), "diff", "--cached", "--name-only"])
     staged = set(staged_text.splitlines())
     if not staged.issubset(set(paths)):

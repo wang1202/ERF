@@ -133,3 +133,30 @@ At 07:38:35 UTC, job 18954908 remained RUNNING at 33m24s. The log confirms the f
 ### 30-minute poll and second self-check pass — 2026-10-08 07:43 UTC
 
 Candidate watcher poll at 07:42:26 UTC found job 18953921 still PENDING for Priority; the current provisional start remains 12:40 UTC. Field watcher poll at 07:41:28 UTC found job 18954684 still PENDING on its after-success dependency. Corrected self-check 18954908 was RUNNING at 38m06s and has begun its second identical-input aggregate pass, processing the 7200 s plotfield; the other second-pass snapshots and final zero-difference outputs remain pending. Slurm accounting showed about 53m49s CPU, 9.1 GB peak RSS, and 15.1 GB disk reads, with no reported error. The previously overstated 07:32 pass count is corrected in the prior status section.
+
+
+### Control field self-check job 18954908
+
+State: COMPLETED; exit code: 0:0; elapsed: 00:50:31; recorded 2026-10-08T07:57:21+00:00 UTC.
+Self-comparison pass marker present: True.
+Slurm output: `terrain_projection_optimization/monitoring/field-selfcheck-18954908.out`.
+
+Final log excerpt:
+
+```text
+Fields processed: 7200.0 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt08876
+Fields processed: 7800.133192763082 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt09615
+Fields processed: 8400.468817454577 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt10344
+Fields processed: 9000.0 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt11071
+Fields processed: 7200.0 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt08876
+Fields processed: 7800.133192763082 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt09615
+Fields processed: 8400.468817454577 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt10344
+Fields processed: 9000.0 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt11071
+/tmp/terrainopt-field-selfcheck.aQmeij/field_analysis.md
+Control self-comparison passed; generated outputs in temporary directory and removed.
+```
+
+
+### Self-check terminal record and publisher fix — 2026-10-08 07:58 UTC
+
+Slurm job 18954908 completed at 07:56:46 UTC with exit code 0 after 50m31s. Its log confirms both identical-input passes processed all four plot snapshots and printed the pipeline success marker after writing a temporary `field_analysis.md`; the self-check trap removed temporary analysis files, so this verifies end-to-end pipeline completion but does not retain numeric zero-difference CSVs. The terminal watcher initially staged the event and status but did not commit because it passed an ignored `field-selfcheck-*.out` path to ordinary `git add`. The watcher now force-adds that explicit output file, and the terminal event, status, and Slurm log are being committed directly.

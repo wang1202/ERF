@@ -1,0 +1,10 @@
+Fields processed: 7200.0 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt08876
+Fields processed: 7800.133192763082 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt09615
+Fields processed: 8400.468817454577 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt10344
+Fields processed: 9000.0 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt11071
+Fields processed: 7200.0 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt08876
+Fields processed: 7800.133192763082 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt09615
+Fields processed: 8400.468817454577 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt10344
+Fields processed: 9000.0 /kfs2/projects/erf/aaronwang/ERF/TerrainOptRemote/terrain_projection_optimization/benchmarks/baseline_gmres_fft/plt11071
+/tmp/terrainopt-field-selfcheck.aQmeij/field_analysis.md
+Control self-comparison passed; generated outputs in temporary directory and removed.
