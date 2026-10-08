@@ -88,3 +88,7 @@ The queued candidate executable still hashes to `9a6eaf213c4f596c6301ed103e77fcc
 ### Control field self-check progress — 2026-10-08 06:32 UTC
 
 The control-only field self-check 18954682 has now processed all four plot snapshots through 9000 s. At 06:32:58 UTC it was still RUNNING after 29m50s, so the profile/statistics self-comparison has not yet produced a terminal result. Slurm accounting showed active CPU and disk reads, with peak resident memory about 8.9 GiB against 64 GiB requested. Candidate job 18953921 remained PENDING for Priority with a provisional 12:25:43 UTC start; field comparison 18954684 remained PENDING on its after-success dependency. No candidate performance or numerical result is available yet.
+
+### Self-check aggregation stage — 2026-10-08 06:35 UTC
+
+At 06:35:40 UTC, control self-check 18954682 remained RUNNING at 32m35s elapsed. Its log shows the control-side field aggregation reached all four plot times and the second aggregation (the identical control input supplied as the candidate for the self-test) has begun at 7200 s. The self-check has not yet returned its zero-difference summaries or exited. Candidate 18953921 remains PENDING for Priority; no candidate performance or numerical metrics are available.
