@@ -56,3 +56,8 @@ divergence using `benchmarks/summarize_logs.py`.
 flux behavior before accepting any speedup.
 4. Extend the run for statistical validation only if the candidate is both
 faster and numerically acceptable.
+
+
+## 30-minute monitoring
+
+The detached tmux session `terrainopt-monitor` polls Slurm every 1,800 seconds for corrected candidate job 18953921 and appends scheduler snapshots to `terrain_projection_optimization/monitoring/job_18953921.jsonl`. The first check at 2026-10-08 05:48 UTC found the job pending for priority. When the job reaches a terminal state, the watcher waits for its log to settle, runs the existing control-versus-candidate performance parser, and writes a JSON comparison and Markdown readout in the monitoring folder. Field statistics and boundary-flux validation still require review after the run. The cluster blocks user crontabs, so this persistent tmux session is used for the recurring checks.
