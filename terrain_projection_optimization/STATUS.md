@@ -164,3 +164,7 @@ Slurm job 18954908 completed at 07:56:46 UTC with exit code 0 after 50m31s. Its 
 ### Monitoring checkpoint — 2026-10-08 08:04 UTC
 
 Corrected candidate job 18953921 remains PENDING for scheduler priority; Slurm's provisional start estimate is 12:25:43 UTC and may move. Dependent native-field comparison 18954684 remains PENDING on `afterok:18953921`. Both detached 30-minute tmux watchers are active; their latest recorded polls are 07:42:26 UTC and 07:41:28 UTC, with the next checks due around 08:12 and 08:11 UTC. Control pipeline self-check 18954908 completed successfully (exit 0, 50m31s); its temporary self-comparison outputs were removed after the end-to-end pass. Candidate performance, residual, divergence, and matched-field results remain unavailable.
+
+### 30-minute polling checkpoint — 2026-10-08 08:12 UTC
+
+The candidate watcher recorded job 18953921 PENDING for Priority at 08:12:27 UTC; the provisional start estimate remains 12:25:43 UTC. The field-analysis watcher recorded job 18954684 PENDING on its after-success dependency at 08:11:28 UTC. Both jobs remain in the queue, and both detached polling sessions are active. The successful control self-check remains the only new validation result; the MLMG candidate has not started, so candidate speed, residual, divergence, and matched-field comparisons are still pending.
