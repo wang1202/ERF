@@ -112,3 +112,7 @@ The first retry, job 18954895, failed in 4 seconds because the self-check intent
 ### 30-minute poll and corrected QA retry — 2026-10-08 07:12 UTC
 
 The candidate watcher recorded job 18953921 PENDING for Priority at 07:12:26 UTC; its current provisional start estimate is 12:40 UTC. The field watcher recorded job 18954684 PENDING on its `afterok:18953921` dependency at 07:11:28 UTC. Corrected self-check 18954908 was RUNNING at 7m31s on x1008c0s0b0n1, with no immediate error; its log shows the first control plotfield at 7200 s entering field processing. Previous self-check failures and fixes are detailed above. No candidate performance or numerical output is available yet.
+
+### Corrected field QA progress — 2026-10-08 07:19 UTC
+
+Self-check retry 18954908 was RUNNING at 13m59s as of 07:19:11 UTC. The corrected log has advanced through plot snapshots at 7200 and 7800.133 s, with no reported error; Slurm accounting showed about 19m15s CPU time and 8.9 GB peak RSS within the 8-CPU/64-GB allocation. Candidate 18953921 remains PENDING for Priority with a 12:40 UTC provisional start. Field comparison 18954684 remains dependency-pending. The full self-check and all candidate performance/numerical results are still pending.
