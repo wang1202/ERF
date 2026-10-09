@@ -33,7 +33,8 @@ inline constexpr Real terrain_mlmg_compatibility_tolerance () noexcept
 
 inline bool terrain_mlmg_compatibility_mean_exceeds (Real mean) noexcept
 {
-    return amrex::Math::abs(mean) > terrain_mlmg_compatibility_tolerance();
+    return !amrex::Math::isfinite(mean) ||
+           amrex::Math::abs(mean) > terrain_mlmg_compatibility_tolerance();
 }
 
 /**
