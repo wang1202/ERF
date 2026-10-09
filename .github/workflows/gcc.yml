@@ -5,9 +5,10 @@ on:
     branches: [development]
   pull_request:
     types: [opened, synchronize, reopened]
+  workflow_dispatch:
 
 concurrency:
-  group: ${{ github.event.pull_request.number || github.ref }}-${{ github.head_ref }}-linux-gcc
+  group: ${{ github.event.pull_request.number || github.ref }}-${{ github.head_ref || github.sha }}-linux-gcc
   cancel-in-progress: ${{ github.ref != 'refs/heads/development' }}
 
 jobs:
@@ -17,6 +18,7 @@ jobs:
     timeout-minutes: 120
     # env: {CXXFLAGS: "-fno-operator-names -Werror -Wall -Wextra -Wpedantic -Wnull-dereference -Wfloat-conversion -Wshadow -Woverloaded-virtual"}
     strategy:
+      fail-fast: false
       matrix:
         particles: [OFF, ON]
         particles_precision: [DOUBLE, SINGLE]
@@ -44,13 +46,14 @@ jobs:
     - name: Install CCache
       run: Submodules/AMReX/.github/workflows/dependencies/dependencies_ccache.sh
 
-    - name: Set Up Cache
-      uses: actions/cache@v6
+    # ccache per matrix variant, written only from development; see ci.yml for how it works.
+    - name: Restore Cache
+      uses: actions/cache/restore@v6
       with:
         path: ~/.cache/ccache
-        key: ccache-${{ github.workflow }}-${{ github.job }}-git-${{ github.sha }}
+        key: ccache-${{ github.workflow }}-${{ github.job }}-${{ matrix.mesh_precision }}-${{ matrix.particles }}-git-${{ github.sha }}
         restore-keys: |
-             ccache-${{ github.workflow }}-${{ github.job }}-git-
+             ccache-${{ github.workflow }}-${{ github.job }}-${{ matrix.mesh_precision }}-${{ matrix.particles }}-git-
 
     - name: Configure Project and Generate Build System
       run: |
@@ -77,14 +80,28 @@ jobs:
       run: |
         export CCACHE_COMPRESS=1
         export CCACHE_COMPRESSLEVEL=10
-        export CCACHE_MAXSIZE=300M
+        export CCACHE_MAXSIZE=600M
         ccache -z
+        build_start=$(date +%s)
 
         cmake --build ${{runner.workspace}}/ERF/build --parallel 2 --verbose \
         2>&1 | tee -a ${{runner.workspace}}/build-output.txt;
 
-        ccache -s
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        # Keep only what this build used: ccache touches an object on every hit, so
+        # anything older than the build is stale. Without this the cache fills with
+        # objects from superseded commits, hits its cap, and evicts live objects.
+        ccache --evict-older-than "$(( $(date +%s) - build_start + 120 ))s"
+        ccache -s | tee -a "$GITHUB_STEP_SUMMARY"
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
         du -hs ~/.cache/ccache
+
+    - name: Save Cache
+      if: always() && github.ref_name == github.event.repository.default_branch
+      uses: actions/cache/save@v6
+      with:
+        path: ~/.cache/ccache
+        key: ccache-${{ github.workflow }}-${{ github.job }}-${{ matrix.mesh_precision }}-${{ matrix.particles }}-git-${{ github.sha }}
 
     - name: Report
       run: |
@@ -96,7 +113,8 @@ jobs:
         exit ${return}
 
     - name: GNUmake Compile and Link
-      if: matrix.particles == 'OFF' && matrix.particles_precision == 'DOUBLE' && matrix.mesh_precision == 'DOUBLE'
+      # Merge tier only: a second, uncached full compile that checks the Makefile build, not the code.
+      if: github.event_name != 'pull_request' && matrix.particles == 'OFF' && matrix.particles_precision == 'DOUBLE' && matrix.mesh_precision == 'DOUBLE'
       run: |
         make -C Exec -j2 USE_NETCDF=FALSE USE_PARTICLES=FALSE
 

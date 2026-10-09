@@ -65,6 +65,11 @@ Real ERF::change_max     = Real(1.1);
 double ERF::dt_max_initial = static_cast<double>(bogus_large_value);
 double ERF:: dt_max        = 1.0e9;
 
+// Explicit eddy-diffusion time-step check (ERF::ComputeDt)
+bool ERF::diffusive_dt_check = false;
+bool ERF::diffusive_dt_limit = false;
+Real ERF::diffusive_cfl      = myhalf;
+
 int  ERF::fixed_mri_dt_ratio = 0;
 
 // Dictate verbosity in screen output
@@ -414,6 +419,7 @@ ERF::set_surface_layer_skin (int lev)
     if (solverChoice.rad_type != RadiationType::TwoStream ||
         !solverChoice.radChoice.seb_surface_layer_uses_skin) {
         surface_layer->set_skin_temperature(lev, nullptr);
+        surface_layer->set_skin_moisture(lev, nullptr);
         return;
     }
     // The initial update_fluxes runs inside InitData_post, before InitData's own call.
@@ -429,10 +435,19 @@ ERF::set_surface_layer_skin (int lev)
             m_skin_uncoupled_warned[lev] = 1;
         }
         surface_layer->set_skin_temperature(lev, nullptr);
+        surface_layer->set_skin_moisture(lev, nullptr);
         return;
     }
     m_skin_uncoupled_warned[lev] = 0;
     surface_layer->set_skin_temperature(lev, two_stream_rad.seb_t_sfc(lev));
+    // With erf.radiation.seb_surface_layer_uses_moisture, also what the surface's mixing
+    // ratio is formed from: the balance's current soil water and, with a soil type, the
+    // soil's resistance (and with a vegetation type the canopy's too); nullptr when off.
+    const RadChoice& rc = solverChoice.radChoice;
+    const NoahMPVegetationParams* veg = (rc.seb_vegetation_type != 0)
+                                      ? noahmp_vegetation_params(rc.seb_vegetation_type) : nullptr;
+    surface_layer->set_skin_moisture(lev, two_stream_rad.seb_surface_moisture(lev),
+                                     rc.seb_soil_type != 0, veg ? veg->hs : Real(0.0));
 }
 
 // Start-up checks of the two-stream balance's coupling with the zlo surface layer, run
@@ -484,6 +499,13 @@ ERF::check_seb_surface_layer ()
     const std::string conflict = surface_layer->skin_temperature_conflict();
     if (!conflict.empty()) {
         Abort("erf.radiation.seb_surface_layer_uses_skin = true cannot be used: " + conflict);
+    }
+    if (rc.seb_surface_layer_uses_moisture) {
+        const std::string moisture_conflict = surface_layer->skin_moisture_conflict();
+        if (!moisture_conflict.empty()) {
+            Abort("erf.radiation.seb_surface_layer_uses_moisture = true cannot be used: " +
+                  moisture_conflict);
+        }
     }
     if (solverChoice.lsm_type != LandSurfaceType::None || m_SurfaceModel) {
         Abort("erf.radiation.seb_surface_layer_uses_skin = true cannot be used with a land-surface "
@@ -1114,7 +1136,8 @@ ERF::InitData_post ()
                  (solverChoice.vert_implicit_fac[lev][1] > 0) ||
                  (solverChoice.vert_implicit_fac[lev][2] > 0) )
             {
-                Warning("Doing implicit solve for u, v, and w with terrain at level " << lev << " -- this has not been tested");
+                Warning("Doing implicit solve for u, v, and w with terrain at level " + std::to_string(lev) +
+                        " -- this has not been tested");
             }
         }
     }
@@ -1919,6 +1942,22 @@ ERF::InitData_post ()
                                                                  (static_cast<int>(ori) == Orientation::zlo())
                                                                      ? m_SurfaceModel.get() : nullptr);
             m_SurfaceLayer[ori]->set_surface_layer_faces(surface_layer_faces);
+            // The two-stream balance's land roughness (Noah-MP's tables), where erf.most.z0
+            // is not given; before the levels below take z0. seb_land_roughness is -1 when
+            // it is not derived, and positive when it is (RadChoice::init_params).
+            if (static_cast<int>(ori) == Orientation::zlo() &&
+                solverChoice.rad_type == RadiationType::TwoStream &&
+                solverChoice.radChoice.seb_land_roughness > 0.0) {
+                const Real z0 = solverChoice.radChoice.seb_land_roughness;
+                const bool taken = m_SurfaceLayer[ori]->set_default_roughness(z0);
+                Print() << "NOTE: the zlo surface layer's land roughness is "
+                        << m_SurfaceLayer[ori]->roughness() << " m"
+                        << (taken ? ", from Noah-MP's tables for the surface energy balance's "
+                                    "soil and vegetation"
+                                  : " as given (erf.most.z0); Noah-MP's tables for the surface "
+                                    "energy balance's soil and vegetation give " + std::to_string(z0))
+                        << ".\n";
+            }
             m_SurfaceLayer[ori]->set_coupled_sst_active(solverChoice.use_coupled_sst &&
                                                         static_cast<int>(ori) == Orientation::zlo());
 
@@ -3098,34 +3137,6 @@ ERF::restart ()
     restore_base_state_params_on_restart();
 #endif
 
-    // Force regrid on level 0 if more procs than boxes are requested
-    regrid_level_0_on_restart = ( regrid_level_0_on_restart ||
-                                  grids[0].size() < ParallelDescriptor::NProcs() );
-
-    if (regrid_level_0_on_restart) {
-        //
-        // Coarsening before we split the grids ensures that each resulting
-        // grid will have an even number of cells in each direction.
-        //
-        BoxArray new_ba(amrex::coarsen(Geom(0).Domain(),2));
-        //
-        // Now split up into list of grids within max_grid_size[0] limit.
-        //
-        new_ba.maxSize(max_grid_size[0]/2);
-        //
-        // Now refine these boxes back to level zero
-        //
-        new_ba.refine(2);
-
-        if (refine_grid_layout) {
-            ChopGrids(0, new_ba, ParallelDescriptor::NProcs());
-        }
-
-        if (new_ba != grids[0]) {
-            DistributionMapping new_dm(new_ba);
-            RemakeLevel(0,static_cast<Real>(t_new[0]),new_ba,new_dm);
-        }
-    }
 
 #ifdef ERF_USE_PARTICLES
     // We call this here without knowing whether the particles have already been initialized or not
@@ -3405,6 +3416,19 @@ ERF::ReadParameters ()
         pp.queryAdd("change_max", change_max);
         pp.queryAdd("dt_max_initial", dt_max_initial);
         pp.queryAdd("dt_max", dt_max);
+
+        // Explicit eddy-diffusion time-step check
+        const bool diffusive_cfl_given = pp.contains("diffusive_cfl");
+        pp.queryAdd("diffusive_dt_check", diffusive_dt_check);
+        pp.queryAdd("diffusive_dt_limit", diffusive_dt_limit);
+        pp.queryAdd("diffusive_cfl", diffusive_cfl);
+        if (!(diffusive_cfl > zero && diffusive_cfl <= one)) {
+            Abort("erf.diffusive_cfl must be in (0, 1]");
+        }
+        if (diffusive_cfl_given && !diffusive_dt_check && !diffusive_dt_limit) {
+            Abort("erf.diffusive_cfl is used only with erf.diffusive_dt_check = true "
+                  "or erf.diffusive_dt_limit = true");
+        }
 
         fixed_dt.resize(max_level+1,-one);
         fixed_fast_dt.resize(max_level+1,-one);
@@ -4069,6 +4093,21 @@ void
 ERF::ParameterSanityChecks ()
 {
     AMREX_ALWAYS_ASSERT(cfl > zero || fixed_dt[0] > zero);
+
+    if (diffusive_dt_limit) {
+        if (fixed_dt[0] > zero) {
+            Abort("erf.diffusive_dt_limit = true cannot change erf.fixed_dt; "
+                  "remove one of them (erf.diffusive_dt_check still reports the Fourier number)");
+        }
+        bool any_kturb = false;
+        for (int lev = 0; lev <= max_level; ++lev) {
+            any_kturb = any_kturb || solverChoice.turbChoice[lev].use_kturb;
+        }
+        if (!any_kturb) {
+            Abort("erf.diffusive_dt_limit = true needs an eddy-diffusivity closure "
+                  "(erf.les_type, erf.rans_type or erf.pbl_type)");
+        }
+    }
 
     // We don't allow use_real_bcs to be true if init_type is not either InitType::WRFInput or InitType::Metgrid
     AMREX_ALWAYS_ASSERT( !solverChoice.use_real_bcs ||
