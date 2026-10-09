@@ -6,7 +6,67 @@
 
 #include "AMReX_LO_BCTYPES.H"
 
+#include <string>
+
 using namespace amrex;
+
+/**
+ * Default solver for the terrain Poisson equation. Keep the established
+ * GMRES+FFT implementation as the default until the MLMG path is validated
+ * for broader ERF configurations.
+ */
+inline constexpr char const* terrain_poisson_solver_default () noexcept
+{
+    return "gmres_fft";
+}
+
+/**
+ * Return an actionable error for an unsupported terrain Poisson solver name.
+ */
+inline std::string
+terrain_poisson_solver_choice_error (std::string const& choice)
+{
+    if (choice != "gmres_fft" && choice != "mlmg") {
+        return "erf.terrain_poisson_solver must be gmres_fft or mlmg";
+    }
+    return {};
+}
+
+/**
+ * Validate runtime conditions required by the experimental terrain MLMG
+ * projection. Boolean arguments keep this check independent of ERF's solver
+ * configuration types and make its diagnostics directly unit-testable.
+ */
+inline std::string
+terrain_mlmg_configuration_error (int lev, bool is_3d, bool variable_dz,
+                                  bool static_fitted_terrain, bool use_real_bcs,
+                                  bool full_domain)
+{
+    if (!is_3d) {
+        return "erf.terrain_poisson_solver=mlmg requires a 3D ERF build (AMREX_SPACEDIM=3)";
+    }
+    if (!variable_dz) {
+        return "erf.terrain_poisson_solver=mlmg requires erf.mesh_type=VariableDz; "
+               "flat ConstantDz/StretchedDz meshes are unsupported";
+    }
+    if (!static_fitted_terrain) {
+        return "erf.terrain_poisson_solver=mlmg requires erf.terrain_type=StaticFittedMesh; "
+               "moving terrain, EB, and immersed terrain are unsupported";
+    }
+    if (use_real_bcs) {
+        return "erf.terrain_poisson_solver=mlmg does not support erf.use_real_bcs=true; "
+               "use homogeneous projection boundary conditions";
+    }
+    if (lev != 0) {
+        return "erf.terrain_poisson_solver=mlmg supports level 0 only; set amr.max_level=0 "
+               "or select erf.terrain_poisson_solver=gmres_fft";
+    }
+    if (!full_domain) {
+        return "erf.terrain_poisson_solver=mlmg requires exactly one ERF subdomain covering "
+               "the complete level-0 domain; use a full-domain rectangular layout";
+    }
+    return {};
+}
 
 /**
  * Define the domain boundary conditions for the (optional) Poisson solve
@@ -34,6 +94,24 @@ get_lo_projection_bc (Geometry const& lev_geom,
             }
         }
     }
+    return r;
+}
+
+/**
+ * Define low-side projection BCs for the terrain MLMG operator. ERF's legacy
+ * terrain projection imposes zero correction flux at zlo even if the physical
+ * velocity boundary is outflow, so preserve that terrain-specific convention.
+ */
+inline Array<LinOpBCType,AMREX_SPACEDIM>
+get_lo_terrain_projection_bc (Geometry const& lev_geom,
+                              Array<std::string,2*AMREX_SPACEDIM> l_domain_bc_type)
+{
+    auto r = get_lo_projection_bc(lev_geom, l_domain_bc_type);
+#if (AMREX_SPACEDIM == 3)
+    if (!lev_geom.isPeriodic(2)) {
+        r[2] = LinOpBCType::Neumann;
+    }
+#endif
     return r;
 }
 

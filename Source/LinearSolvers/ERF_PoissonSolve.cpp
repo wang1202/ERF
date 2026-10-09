@@ -158,14 +158,51 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
     // Keep the existing GMRES+FFT solver as the default. The experimental
     // multigrid path is opt-in through erf.terrain_poisson_solver = mlmg.
     static const std::string terrain_poisson_solver = [] () {
-        std::string choice = "gmres_fft";
+        std::string choice = terrain_poisson_solver_default();
         ParmParse pp("erf");
         pp.query("terrain_poisson_solver", choice);
-        if (choice != "gmres_fft" && choice != "mlmg") {
-            amrex::Abort("erf.terrain_poisson_solver must be gmres_fft or mlmg");
+        const std::string error = terrain_poisson_solver_choice_error(choice);
+        if (!error.empty()) {
+            amrex::Abort(error);
         }
         return choice;
     } ();
+
+    if (terrain_poisson_solver == "mlmg") {
+        const Box domain = geom[lev].Domain();
+        bool full_domain = false;
+        if (subdomains[lev].size() == 1) {
+            const Box subdomain_bounds(subdomains[lev][0].minimalBox());
+            full_domain = (subdomain_bounds == domain) &&
+                          (subdomains[lev][0].numPts() == domain.numPts()) &&
+                          (grids[lev].numPts() == domain.numPts());
+        }
+        const std::string error = terrain_mlmg_configuration_error(
+            lev, AMREX_SPACEDIM == 3,
+            solverChoice.mesh_type == MeshType::VariableDz,
+            solverChoice.terrain_type == TerrainType::StaticFittedMesh,
+            solverChoice.use_real_bcs, full_domain);
+        if (!error.empty()) {
+            amrex::Abort(error);
+        }
+    }
+
+#ifndef ERF_USE_FFT
+    if (terrain_poisson_solver == "gmres_fft" &&
+        solverChoice.mesh_type == MeshType::VariableDz) {
+        amrex::Abort("erf.terrain_poisson_solver=gmres_fft requires an FFT-enabled build; "
+                     "set erf.terrain_poisson_solver=mlmg for the experimental non-FFT solver");
+    }
+#endif
+
+    // Print the chosen terrain solver once, when multigrid verbosity is enabled.
+    static bool printed_terrain_solver = false;
+    if (solverChoice.mesh_type == MeshType::VariableDz && mg_verbose > 0 &&
+        !printed_terrain_solver) {
+        amrex::Print() << "Terrain Poisson solver: " << terrain_poisson_solver << std::endl;
+        printed_terrain_solver = true;
+    }
+
     Real l_dt = static_cast<Real>(l_dt_d);
     //
     // If at lev > 0 we must first fill the momenta at the c/f interface with interpolated coarse values
@@ -738,26 +775,15 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         else if (solverChoice.mesh_type == MeshType::VariableDz) {
             if (terrain_poisson_solver == "mlmg") {
 #if (AMREX_SPACEDIM == 3)
-                if (lev != 0) {
-                    amrex::Abort("MLTerrainPoisson currently supports only a single AMR level");
-                }
-                if (solverChoice.use_real_bcs) {
-                    amrex::Abort("MLTerrainPoisson currently supports homogeneous boundary conditions only");
-                }
-                bool full_domain = (subdomains[lev].size() == 1) &&
-                                   (my_region == Geom(lev).Domain()) &&
-                                   (rhs_sub[0].boxArray().numPts() == Geom(lev).Domain().numPts());
-                if (!full_domain) {
-                    amrex::Abort("MLTerrainPoisson requires one subdomain covering the full level domain");
-                }
-
                 Vector<Geometry> ml_geom{Geom(lev)};
                 Vector<BoxArray> ml_grids{rhs_sub[0].boxArray()};
                 Vector<DistributionMapping> ml_dmap{rhs_sub[0].DistributionMap()};
 
                 LPInfo lpinfo;
                 MLTerrainPoisson terrain_op(ml_geom, ml_grids, ml_dmap, lpinfo);
-                terrain_op.setDomainBC(get_lo_projection_bc(Geom(lev), domain_bc_type),
+                // The legacy terrain projection uses Neumann pressure at zlo,
+                // even if the physical velocity BC there is outflow.
+                terrain_op.setDomainBC(get_lo_terrain_projection_bc(Geom(lev), domain_bc_type),
                                        get_hi_projection_bc(Geom(lev), domain_bc_type));
                 terrain_op.setLevelBC(0, nullptr);
                 terrain_op.setZPhys(0, znd_sub);
