@@ -2,6 +2,10 @@
 
 Date: 2026-10-08
 
+> Historical level-zero review record. The subsequent coarse-fine AMR work and
+> current validation status are recorded in [terrain_mlmg_amr_validation.md](terrain_mlmg_amr_validation.md).
+> The level-zero-only limitations below describe the earlier review state.
+
 ## Verdict
 
 **Draft PR only.** The lower-z BC selection, fail-fast checks, documentation, focused normal-wall MLMG run, and matched short GMRES/MLMG runs are in place. Broader validation remains incomplete, and the focused GoogleTest target is still building.

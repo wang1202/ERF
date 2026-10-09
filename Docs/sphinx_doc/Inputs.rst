@@ -3498,7 +3498,7 @@ The terrain-fitted projection keeps ``erf.terrain_poisson_solver = gmres_fft``
 as its default. This is the existing GMRES solver with an FFT preconditioner
 and requires an FFT-enabled build. ``mlmg`` selects an experimental AMReX
 terrain multigrid operator and does not require FFT support. Select it
-explicitly in an otherwise valid 3D terrain input:
+explicitly in an otherwise valid 3D static fitted-terrain input:
 
 .. code-block:: ini
 
@@ -3508,12 +3508,37 @@ explicitly in an otherwise valid 3D terrain input:
    # Experimental terrain MLMG projection.
    erf.terrain_poisson_solver = mlmg
 
-The MLMG option currently requires ``erf.mesh_type = VariableDz``,
-``erf.terrain_type = StaticFittedMesh``, ``erf.use_real_bcs = false``,
-``amr.max_level = 0``, and exactly one ERF subdomain covering the complete
-domain. It rejects moving terrain, embedded-boundary or immersed terrain,
-real/inhomogeneous boundary data, refined-level projections, and partial-domain
-layouts. The default GMRES+FFT solver remains the fallback for those cases.
+The MLMG option requires a 3D ``VariableDz`` mesh, which ERF derives from
+``erf.terrain_type = StaticFittedMesh``; ``erf.mesh_type`` is not a user input
+for selecting this mesh. Moving terrain, embedded-boundary or immersed terrain,
+and ``erf.use_real_bcs = true`` are unsupported. ERF constructs a separate
+single-level MLMG operator for each rectangular solve region on each ERF AMR
+level. This is an independent per-level projection, not a coupled composite
+AMR Poisson solve. Connected irregular regions and partial refinement across a
+periodic seam are rejected with an input diagnostic.
+
+The coarse-fine vertical momentum ghosts used by the terrain projection are
+filled from coarse momentum after conversion to ERF's ``rho0``-weighted
+representation. This fill is applied before both the vorticity conversion and
+the reverse conversion after the projection correction. A one-rank H100 test
+of the two-level ``TerrainHill`` case with a partially refined vertical region
+completed with finite fields and reduced the initial level-1 divergence from
+``L_inf = 3.43e-1`` to ``1.08e-9``. This is focused experimental evidence, not
+validation of every AMR layout: a two-rank run with multiple boxes and
+x/y/z box splits also completed, but disconnected regions, restart/regrid,
+three levels, CPU, and no-FFT builds remain to be tested. Do not assume general
+multi-level production support from these focused cases. The default solver selection remains `gmres_fft`. The coarse-fine
+momentum ghost fill is shared before either projection backend; on this
+partial-vertical fixture GMRES+FFT receives finite momentum, then its legacy
+FFT path rejects the shortened vertical solve region because its `dz`
+vector does not span the full level domain.
+
+A full-height two-level comparison completed one timestep with both backends.
+The initial projection reduced L_inf divergence below 1e-8 on both levels,
+but later fine-level GMRES projections reached 2.15e-3 while MLMG remained
+below 1e-8. Final state-field differences and the unresolved boundary-flux
+comparison are recorded in `terrain_mlmg_amr_validation.md`; this is not a
+solver-parity result.
 
 Both terrain solvers use a homogeneous Neumann pressure-correction condition
 at the lower z face when z is nonperiodic, including when the physical input
@@ -3526,15 +3551,12 @@ projection and timestep timings at the same resolution and decomposition.
 
 Set ``erf.mg_v > 0`` to print the selected terrain solver once and see MLMG
 iteration output. The following is the solver-specific part of a minimal
-configuration; it must be added to a valid 3D terrain case with a full-domain
-grid layout:
+configuration; add it to a valid 3D static fitted-terrain case:
 
 .. code-block:: ini
 
    erf.terrain_type = StaticFittedMesh
-   erf.mesh_type = VariableDz
    erf.use_real_bcs = false
-   amr.max_level = 0
    erf.terrain_poisson_solver = mlmg
    erf.mg_v = 1
 

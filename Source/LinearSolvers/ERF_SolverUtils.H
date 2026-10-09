@@ -4,8 +4,14 @@
 #ifndef ERF_SOLVER_UTILS_H_
 #define ERF_SOLVER_UTILS_H_
 
+#include "AMReX_BoxArray.H"
+#include "AMReX_Geometry.H"
 #include "AMReX_LO_BCTYPES.H"
+#ifdef ERF_USE_FFT
+#include <AMReX_FFT.H>
+#endif
 
+#include <sstream>
 #include <string>
 
 using namespace amrex;
@@ -34,20 +40,19 @@ terrain_poisson_solver_choice_error (std::string const& choice)
 
 /**
  * Validate runtime conditions required by the experimental terrain MLMG
- * projection. Boolean arguments keep this check independent of ERF's solver
- * configuration types and make its diagnostics directly unit-testable.
+ * projection. Each ERF level/subdomain is represented by a separate one-level
+ * operator, so the ERF level index is deliberately not a restriction.
  */
 inline std::string
-terrain_mlmg_configuration_error (int lev, bool is_3d, bool variable_dz,
-                                  bool static_fitted_terrain, bool use_real_bcs,
-                                  bool full_domain)
+terrain_mlmg_configuration_error (bool is_3d, bool variable_dz,
+                                  bool static_fitted_terrain, bool use_real_bcs)
 {
     if (!is_3d) {
         return "erf.terrain_poisson_solver=mlmg requires a 3D ERF build (AMREX_SPACEDIM=3)";
     }
     if (!variable_dz) {
-        return "erf.terrain_poisson_solver=mlmg requires erf.mesh_type=VariableDz; "
-               "flat ConstantDz/StretchedDz meshes are unsupported";
+        return "erf.terrain_poisson_solver=mlmg requires a VariableDz mesh derived from "
+               "erf.terrain_type=StaticFittedMesh; flat ConstantDz/StretchedDz meshes are unsupported";
     }
     if (!static_fitted_terrain) {
         return "erf.terrain_poisson_solver=mlmg requires erf.terrain_type=StaticFittedMesh; "
@@ -57,15 +62,152 @@ terrain_mlmg_configuration_error (int lev, bool is_3d, bool variable_dz,
         return "erf.terrain_poisson_solver=mlmg does not support erf.use_real_bcs=true; "
                "use homogeneous projection boundary conditions";
     }
-    if (lev != 0) {
-        return "erf.terrain_poisson_solver=mlmg supports level 0 only; set amr.max_level=0 "
-               "or select erf.terrain_poisson_solver=gmres_fft";
+    return {};
+}
+
+inline std::string
+terrain_mlmg_box_string (Box const& box)
+{
+    std::ostringstream os;
+    os << '[';
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        if (d != 0) { os << ','; }
+        os << box.smallEnd(d) << ':' << box.bigEnd(d);
     }
-    if (!full_domain) {
-        return "erf.terrain_poisson_solver=mlmg requires exactly one ERF subdomain covering "
-               "the complete level-0 domain; use a full-domain rectangular layout";
+    os << ']';
+    return os.str();
+}
+
+/**
+ * Require valid solve boxes to be an exact, disjoint rectangular cover of a
+ * regional operator domain. This rejects holes and L-shaped connected unions.
+ */
+inline std::string
+terrain_mlmg_region_error (int lev, int isub, Box const& level_domain,
+                           Box const& region, BoxArray const& region_boxes)
+{
+    bool boxes_inside_region = true;
+    for (int i = 0; i < region_boxes.size(); ++i) {
+        boxes_inside_region = boxes_inside_region && region.contains(region_boxes[i]);
+    }
+
+    const Long actual_cells = region_boxes.numPts();
+    const Long expected_cells = region.numPts();
+    const bool exact_rectangle = region.ok() && region.cellCentered() &&
+        level_domain.contains(region) && region_boxes.size() > 0 &&
+        region_boxes.isDisjoint() && boxes_inside_region &&
+        region_boxes.minimalBox() == region && actual_cells == expected_cells;
+
+    if (exact_rectangle) { return {}; }
+
+    std::ostringstream os;
+    os << "erf.terrain_poisson_solver=mlmg cannot solve non-rectangular or invalid "
+       << "ERF region: lev=" << lev << ", isub=" << isub
+       << ", region=" << terrain_mlmg_box_string(region)
+       << ", actual_cells=" << actual_cells
+       << ", expected_cells=" << expected_cells
+       << ". Connected irregular/L-shaped regions are unsupported; use a rectangular "
+       << "refinement region or erf.terrain_poisson_solver=gmres_fft";
+    return os.str();
+}
+
+/**
+ * A partial region touching a periodic physical seam cannot be represented by
+ * a one-domain operator with ordinary periodic or Neumann conditions.
+ */
+inline std::string
+terrain_mlmg_periodic_region_error (int lev, int isub,
+                                    Geometry const& level_geom, Box const& region)
+{
+    const Box& domain = level_geom.Domain();
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        if (!level_geom.isPeriodic(d)) { continue; }
+        const bool touches_lo = region.smallEnd(d) == domain.smallEnd(d);
+        const bool touches_hi = region.bigEnd(d) == domain.bigEnd(d);
+        const bool spans_periodic_axis = touches_lo && touches_hi;
+        if ((touches_lo || touches_hi) && !spans_periodic_axis) {
+            std::ostringstream os;
+            os << "erf.terrain_poisson_solver=mlmg does not support partial periodic-seam "
+               << "refinement: lev=" << lev << ", isub=" << isub
+               << ", dir=" << d << ", region=" << terrain_mlmg_box_string(region)
+               << ". Extend the rectangular region across the complete periodic direction "
+               << "or use erf.terrain_poisson_solver=gmres_fft";
+            return os.str();
+        }
     }
     return {};
+}
+
+/** Construct a one-level Geometry preserving the level's index/physical mapping. */
+inline Geometry
+terrain_mlmg_region_geometry (Geometry const& level_geom, Box const& region)
+{
+    const Box& global_domain = level_geom.Domain();
+    Array<Real,AMREX_SPACEDIM> prob_lo{};
+    Array<Real,AMREX_SPACEDIM> prob_hi{};
+    Array<int,AMREX_SPACEDIM> periodic{};
+    const auto dx = level_geom.CellSizeArray();
+
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        prob_lo[d] = level_geom.ProbLo(d) +
+            (region.smallEnd(d) - global_domain.smallEnd(d)) * dx[d];
+        prob_hi[d] = level_geom.ProbLo(d) +
+            (region.bigEnd(d) + 1 - global_domain.smallEnd(d)) * dx[d];
+        periodic[d] = level_geom.isPeriodic(d) &&
+            region.smallEnd(d) == global_domain.smallEnd(d) &&
+            region.bigEnd(d) == global_domain.bigEnd(d);
+    }
+
+    const RealBox physical_region(prob_lo, prob_hi);
+    return Geometry(region, physical_region, level_geom.Coord(), periodic);
+}
+
+struct TerrainMLMGRegionBCs
+{
+    Array<LinOpBCType,AMREX_SPACEDIM> lo{};
+    Array<LinOpBCType,AMREX_SPACEDIM> hi{};
+    bool is_singular = true;
+};
+
+/**
+ * Build effective regional BCs: physical faces retain ERF's projection map,
+ * artificial subdomain faces are homogeneous Neumann, and terrain zlo is
+ * always homogeneous Neumann. Periodicity is retained only for a full-axis
+ * regional domain.
+ */
+inline TerrainMLMGRegionBCs
+terrain_mlmg_region_bcs (Geometry const& level_geom, Box const& region,
+                         Array<std::string,2*AMREX_SPACEDIM> const& domain_bc_names)
+{
+    TerrainMLMGRegionBCs result;
+    const Box& domain = level_geom.Domain();
+    auto physical_bc = [&] (int dir, auto side) {
+        if (dir == 2 && side == Orientation::low) {
+            return LinOpBCType::Neumann;
+        }
+        const auto& name = domain_bc_names[Orientation(dir, side)];
+        return (name == "Outflow" || name == "Open")
+            ? LinOpBCType::Dirichlet : LinOpBCType::Neumann;
+    };
+
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        const bool at_lo = region.smallEnd(d) == domain.smallEnd(d);
+        const bool at_hi = region.bigEnd(d) == domain.bigEnd(d);
+        if (level_geom.isPeriodic(d) && at_lo && at_hi) {
+            result.lo[d] = LinOpBCType::Periodic;
+            result.hi[d] = LinOpBCType::Periodic;
+        } else {
+            result.lo[d] = at_lo ? physical_bc(d, Orientation::low)
+                                 : LinOpBCType::Neumann;
+            result.hi[d] = at_hi ? physical_bc(d, Orientation::high)
+                                 : LinOpBCType::Neumann;
+        }
+        if (result.lo[d] == LinOpBCType::Dirichlet ||
+            result.hi[d] == LinOpBCType::Dirichlet) {
+            result.is_singular = false;
+        }
+    }
+    return result;
 }
 
 /**
