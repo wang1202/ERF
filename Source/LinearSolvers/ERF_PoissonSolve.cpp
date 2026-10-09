@@ -379,7 +379,7 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
                 in_any_fine_box = in_any_fine_box || fine_mom.boxArray()[ib].contains(bad_index);
             }
             const char* where = in_any_fine_box ? "fine-fine ghost" : "coarse-fine ghost";
-            Print() << "Invalid interpolated rho0 momentum ghost before " << stencil_name
+            AllPrint() << "Invalid interpolated rho0 momentum ghost before " << stencil_name
                     << ": ERF level=" << lev
                     << ", box=" << d_bad_box.dataValue() << ' ' << this_box
                     << ", component=" << ((bc_comp == BCVars::xvel_bc) ? "xmom" : "ymom")
@@ -465,7 +465,7 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
                     }
                 }
             }
-            Print() << "Invalid " << stencil_name << " momentum stencil input"
+            AllPrint() << "Invalid " << stencil_name << " momentum stencil input"
                     << ": ERF level=" << lev << " projection_call=" << projection_call
                     << " rank=" << ParallelDescriptor::MyProc()
                     << " box=" << box_id << ' ' << source_box
