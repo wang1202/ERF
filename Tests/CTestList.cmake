@@ -2444,6 +2444,37 @@ function(terrain_hill_files TEST_NAME OUT_VAR)
     set(${OUT_VAR} "erf.input_sounding_file=${CMAKE_CURRENT_BINARY_DIR}/test_files/${TEST_NAME}/input_sounding" PARENT_SCOPE)
 endfunction()
 
+
+# Assert the experimental terrain MLMG path reaches and projects both ERF
+# levels on the partial-vertical TerrainHill refinement.
+function(add_test_terrain_mlmg_amr TEST_NAME)
+    set(TEST_FILES_DIR "TerrainHill")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/TerrainHill.i")
+    set(test_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    add_test(${TEST_NAME} ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DINPUT=${test_input}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DLOG=${test_log}"
+        "-DRUNTIME_OPTIONS=erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.mg_v=2 max_step=1"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunTerrainMLMGAMR.cmake)
+    set_tests_properties(${TEST_NAME}
+        PROPERTIES
+        TIMEOUT 300
+        PROCESSORS 1
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "experimental;terrain;mlmg;amr"
+        ATTACHED_FILES_ON_FAIL "${test_log}")
+endfunction(add_test_terrain_mlmg_amr)
+
+add_test_terrain_mlmg_amr(TerrainMLMG_TwoLevelPartialVertical)
+
 # Two levels over a 100 m hill on a terrain-fitted mesh.  The zero-gradient
 # condition below the mesh is corrected by the terrain slope times a lateral
 # gradient that each box can only take one-sided in its outermost ghost
