@@ -8,6 +8,7 @@
 
 #include "ERF.H"
 #include "ERF_Constants.H"
+#include "ERF_PBLDiagnosticRecorder.H"
 #include "AMReX_buildInfo.H"
 #include "ERF_SBMConstraintGroups.H"
 #include "ERF_SBMFixtureValidation.H"

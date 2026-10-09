@@ -113,6 +113,13 @@ public:
     const amrex::MultiFab& delta_theta_v_diagnostics () const { return m_delta_theta_v_cc; }
     const amrex::MultiFab& wthv_at_pblh_diagnostics () const { return m_wthv_at_pblh_cc; }
 
+    // NVCC requires an extended device-lambda's enclosing member function
+    // to have public access.
+    void update_entrainment_diagnostics (const amrex::MultiFab& mapfac_mx,
+                                         const amrex::MultiFab& mapfac_my,
+                                         const amrex::Geometry& geom,
+                                         double dt);
+
 private:
     int m_lev;
     ShocRuntimeOptions m_opts;
@@ -203,9 +210,5 @@ private:
                                  const amrex::Geometry& geom,
                                  double dt) const;
     void print_debug_summary (double dt) const;
-    void update_entrainment_diagnostics (const amrex::MultiFab& mapfac_mx,
-                                         const amrex::MultiFab& mapfac_my,
-                                         const amrex::Geometry& geom,
-                                         double dt);
 };
 #endif

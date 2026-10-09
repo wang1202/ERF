@@ -3,7 +3,7 @@
 #include "ERF_Constants.H"
 #include "ERF_IndexDefines.H"
 #include "ERF_ShocDriver.H"
-#include "ERF_SurfaceFluxDiagnostics.H"
+#include "Diagnostics/ERF_SurfaceFluxDiagnostics.H"
 
 #include <AMReX_ParallelDescriptor.H>
 #include <AMReX_Print.H>
@@ -237,15 +237,15 @@ void PBLDiagnosticRecorder::write (amrex::Real time, int step, const amrex::Mult
         const amrex::Real wstar=valid(wcube)&&wcube>0?std::cbrt(wcube):missing;
         if (summary && amrex::ParallelDescriptor::IOProcessor() && time>m_last_summary_time[site]) {
             auto& os=*m_summary_files[site];
-            write_value(os,time); os<<' '<<step<<' '; write_value(os,loc.x); os<<' '; write_value(os,loc.y)<<' '<<i<<' '<<j<<' '; write_value(os,ph); os<<' '; write_value(os,top)<<' ';
+            write_value(os,time); os<<' '<<step<<' '; write_value(os,loc.x); os<<' '; write_value(os,loc.y); os<<' '<<i<<' '<<j<<' '; write_value(os,ph); os<<' '; write_value(os,top); os<<' ';
             write_value(os,wek[0]);os<<' ';write_value(os,wef[0]);os<<' ';write_value(os,pblht[0]);os<<' ';write_value(os,pblhh[0]);os<<' ';write_value(os,wp[0]);os<<' ';write_value(os,dtv[0]);os<<' ';write_value(os,wtvp[0]);os<<' ';write_value(os,ratio);os<<' ';write_value(os,wtv0);os<<' ';write_value(os,ust[0]);os<<' ';write_value(os,olen[0]);os<<' ';write_value(os,wstar);os<<' ';
-            write_value(os,valid(sens[0])?surface_flux_diagnostics::sensible_heat_flux_wm2_from_rhotheta_flux(sens[0]):missing);os<<' ';write_value(os,valid(latent[0])?surface_flux_diagnostics::latent_heat_flux_wm2_from_rhoqv_flux(latent[0]):missing);os<<' ';write_value(os,depth>0?tkei/depth:missing);os<<' ';write_value(os,shear_i);os<<' ';write_value(os,buoy_i);os<<' ';write_value(os,diss_i);os<<' ';write_value(os,shear_i+buoy_i-diss_i);os<<' ';write_value(os,brmax);os<<' ';write_value(os,cfmax);os<<' ';write_value(os,lwp);os<<' ';write_value(os,iwp);os<<' ';write_value(os,lwmin);os<<' ';write_value(os,swcount>0?swsum/swcount:missing)<<'\n';
+            write_value(os,valid(sens[0])?surface_flux_diagnostics::sensible_heat_flux_wm2_from_rhotheta_flux(sens[0]):missing);os<<' ';write_value(os,valid(latent[0])?surface_flux_diagnostics::latent_heat_flux_wm2_from_rhoqv_flux(latent[0]):missing);os<<' ';write_value(os,depth>0?tkei/depth:missing);os<<' ';write_value(os,shear_i);os<<' ';write_value(os,buoy_i);os<<' ';write_value(os,diss_i);os<<' ';write_value(os,shear_i+buoy_i-diss_i);os<<' ';write_value(os,brmax);os<<' ';write_value(os,cfmax);os<<' ';write_value(os,lwp);os<<' ';write_value(os,iwp);os<<' ';write_value(os,lwmin);os<<' ';write_value(os,swcount>0?swsum/swcount:missing);os<<'\n';
             os.flush(); m_last_summary_time[site]=time;
         }
         if (profile && amrex::ParallelDescriptor::IOProcessor() && time>m_last_profile_time[site]) {
             auto& os=*m_profile_files[site];
             for (int n=0;n<nz;++n) {
-                write_value(os,time);os<<' '<<step<<' ';write_value(os,loc.x);os<<' ';write_value(os,loc.y)<<' '<<i<<' '<<j<<' ';write_value(os,pblh[n]);os<<' ';write_value(os,wek[n]);os<<' ';write_value(os,wef[n]);os<<' '<<(klo+n)<<' ';write_value(os,z[n]);os<<' ';write_value(os,valid(z[n])&&valid(z_sfc)?z[n]-z_sfc:missing);os<<' ';write_value(os,theta[n]);os<<' ';write_value(os,theta_v[n]);os<<' ';write_value(os,qv[n]);os<<' ';write_value(os,qc[n]);os<<' ';write_value(os,qi[n]);os<<' ';write_value(os,u[n]);os<<' ';write_value(os,v[n]);os<<' ';write_value(os,w[n]);os<<' ';write_value(os,ke[n]);os<<' ';write_value(os,wtv[n]);os<<' ';write_value(os,wtl[n]);os<<' ';write_value(os,wqw[n]);os<<' ';write_value(os,ws[n]);os<<' ';write_value(os,w3[n]);os<<' ';write_value(os,br[n]);os<<' ';write_value(os,shear[n]);os<<' ';write_value(os,buoy[n]);os<<' ';write_value(os,diss[n]);os<<' ';write_value(os,eddy[n]);os<<' ';write_value(os,kmv[n]);os<<' ';write_value(os,khv[n]);os<<' ';write_value(os,cf[n]);os<<' ';write_value(os,qlc[n]);os<<' ';write_value(os,cond[n]);os<<' ';write_value(os,qsw[n]);os<<' ';write_value(os,qlw[n])<<'\n';
+                write_value(os,time);os<<' '<<step<<' ';write_value(os,loc.x);os<<' ';write_value(os,loc.y);os<<' '<<i<<' '<<j<<' ';write_value(os,pblh[n]);os<<' ';write_value(os,wek[n]);os<<' ';write_value(os,wef[n]);os<<' '<<(klo+n)<<' ';write_value(os,z[n]);os<<' ';write_value(os,valid(z[n])&&valid(z_sfc)?z[n]-z_sfc:missing);os<<' ';write_value(os,theta[n]);os<<' ';write_value(os,theta_v[n]);os<<' ';write_value(os,qv[n]);os<<' ';write_value(os,qc[n]);os<<' ';write_value(os,qi[n]);os<<' ';write_value(os,u[n]);os<<' ';write_value(os,v[n]);os<<' ';write_value(os,w[n]);os<<' ';write_value(os,ke[n]);os<<' ';write_value(os,wtv[n]);os<<' ';write_value(os,wtl[n]);os<<' ';write_value(os,wqw[n]);os<<' ';write_value(os,ws[n]);os<<' ';write_value(os,w3[n]);os<<' ';write_value(os,br[n]);os<<' ';write_value(os,shear[n]);os<<' ';write_value(os,buoy[n]);os<<' ';write_value(os,diss[n]);os<<' ';write_value(os,eddy[n]);os<<' ';write_value(os,kmv[n]);os<<' ';write_value(os,khv[n]);os<<' ';write_value(os,cf[n]);os<<' ';write_value(os,qlc[n]);os<<' ';write_value(os,cond[n]);os<<' ';write_value(os,qsw[n]);os<<' ';write_value(os,qlw[n]);os<<'\n';
             }
             os.flush(); m_last_profile_time[site]=time;
         }

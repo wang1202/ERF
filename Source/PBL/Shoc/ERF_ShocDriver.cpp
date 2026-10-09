@@ -864,6 +864,7 @@ ShocDriver::advance (MultiFab& cons,
             ParallelFor(xy_box, [=] AMREX_GPU_DEVICE (int i, int j, int) noexcept
             {
                 const int ic = shoc_column_index(layout, i, j);
+                const int k0 = layout.kmin;
                 for (int kk = 0; kk < layout.nlev; ++kk) {
                     const int k = layout.kmin + kk;
                     // Native SHOC pblh is diagnosed as meters AGL and is
