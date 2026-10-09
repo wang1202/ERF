@@ -2692,7 +2692,7 @@ function(add_test_terrain_mlmg_reject_three_levels TEST_NAME)
         "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
         "-DLOG=${test_log}"
         "-DREQUIRED_MARKER=supports at most two ERF levels"
-        "-DRUNTIME_OPTIONS=erf.terrain_poisson_solver=mlmg erf.mg_v=2 max_step=0 amr.max_level=2 erf.box1.max_level=2"
+        "-DRUNTIME_OPTIONS=erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.mg_v=2 max_step=1 amr.max_level=2 erf.box1.max_level=2 amr.ref_ratio_vect=2 2 2 2 2 2"
         -P ${PROJECT_SOURCE_DIR}/Tests/RunTerrainMLMGRejectIncompatible.cmake)
     set_tests_properties(${TEST_NAME} PROPERTIES
         TIMEOUT 120
