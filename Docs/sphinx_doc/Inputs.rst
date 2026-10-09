@@ -3511,33 +3511,33 @@ explicitly in an otherwise valid 3D static fitted-terrain input:
 The MLMG option requires a 3D ``VariableDz`` mesh, which ERF derives from
 ``erf.terrain_type = StaticFittedMesh``; ``erf.mesh_type`` is not a user input
 for selecting this mesh. Moving terrain, embedded-boundary or immersed terrain,
-and ``erf.use_real_bcs = true`` are unsupported. ERF constructs a separate
-single-level MLMG operator for each rectangular solve region on each ERF AMR
-level. This is an independent per-level projection, not a coupled composite
-AMR Poisson solve. Connected irregular regions and partial refinement across a
-periodic seam are rejected with an input diagnostic.
+and ``erf.use_real_bcs = true`` are unsupported. The current validated
+integration scope is at most two ERF levels (levels 0 and 1), with exactly one
+connected rectangular solve region on each active level. ERF constructs a
+separate single-level MLMG operator for each region; this is an independent
+per-level projection, not a coupled composite AMR Poisson solve. Three or more
+levels, disconnected regions, connected irregular regions, and partial
+refinement across a periodic seam are rejected with an input diagnostic.
+Singular homogeneous-normal regions whose weighted compatibility mean exceeds
+the precision-specific divergence tolerance are also rejected before solve.
 
-The projection implementation fills vertical coarse-fine momentum ghosts
-through face-centered FillPatchTwoLevels using coarse momentum converted to
-ERF's rho0-weighted representation. The fill is intended to run before both
-the vorticity conversion and the reverse conversion after projection. This
-lifecycle and time interpolation are under current-source validation.
-Earlier one- and two-rank H100 TerrainHill runs completed on a partially
-refined vertical layout, but they used dirty pre-rebase executables and do not
-establish correctness of the current source. The partial-height legacy
-GMRES+FFT path also has a known assertion because its dz vector does not span
-the shortened vertical solve region.
+The projection fills vertical coarse-fine momentum ghosts through face-centered
+FillPatchTwoLevels using coarse momentum converted to ERF's rho0-weighted
+representation, at the registered coarse-data time. The fill runs before both
+the vorticity conversion and the reverse conversion after projection. The
+partial-height legacy GMRES+FFT path has a known assertion because its dz
+vector does not span the shortened vertical solve region. On a mutually
+supported full-height layout, a clean upstream-base and feature-branch CPU
+DOUBLE control produced the same GMRES fine-level divergence sequence,
+including its large later residual; that is a pre-existing GMRES limitation
+and remains outside the MLMG implementation.
 
-MLMG remains experimental, opt-in, and not merge-ready. Its implementation
-constructs independent single-level operators for rectangular solve regions;
-it is not a composite AMR Poisson solve. The fine-level GMRES discrepancy
-previously measured at 2.15e-3 has not been resolved with independent residual
-and flux evidence on the current source. Disconnected regions, three-level
-layouts, restart/regrid, boundary variants, precision coverage, and final-
-source solver parity remain unverified. Do not infer general multi-level
-production support or a performance improvement from the earlier focused
-runs. See terrain_mlmg_merge_readiness.md for the authoritative current-source
-test matrix and explicit merge verdict.
+MLMG remains experimental, opt-in, and not merge-ready. The lifecycle,
+restart/regrid, boundary variants, map-factor coverage, full-source performance,
+and broader upstream regression suite remain incomplete. Do not infer general
+multi-level production support or a performance improvement. See
+terrain_mlmg_merge_readiness.md for the authoritative current-source test
+matrix and explicit merge verdict.
 
 Both terrain solvers use a homogeneous Neumann pressure-correction condition
 at the lower z face when z is nonperiodic, including when the physical input

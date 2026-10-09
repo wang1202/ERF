@@ -26,6 +26,16 @@ inline constexpr char const* terrain_poisson_solver_default () noexcept
     return "gmres_fft";
 }
 
+inline constexpr Real terrain_mlmg_compatibility_tolerance () noexcept
+{
+    return sizeof(Real) == sizeof(float) ? Real(1.e-4) : Real(1.e-6);
+}
+
+inline bool terrain_mlmg_compatibility_mean_exceeds (Real mean) noexcept
+{
+    return amrex::Math::abs(mean) > terrain_mlmg_compatibility_tolerance();
+}
+
 /**
  * Detect an invalid value in a terrain-projection momentum ghost.
  *
@@ -54,9 +64,29 @@ terrain_poisson_solver_choice_error (std::string const& choice)
 }
 
 /**
+ * Restrict the experimental per-region MLMG operator to the integration
+ * scope that has been exercised: ERF levels 0 and 1 and one connected region
+ * on each active level.
+ */
+inline std::string
+terrain_mlmg_scope_error (int max_level, int lev, int num_regions)
+{
+    if (max_level > 1) {
+        return "erf.terrain_poisson_solver=mlmg currently supports at most two ERF levels "
+               "(levels 0 and 1); configured max_level=" + std::to_string(max_level);
+    }
+    if (num_regions > 1) {
+        return "erf.terrain_poisson_solver=mlmg currently requires one connected rectangular "
+               "solve region per active level; level " + std::to_string(lev) +
+               " has " + std::to_string(num_regions) + " regions";
+    }
+    return {};
+}
+
+/**
  * Validate runtime conditions required by the experimental terrain MLMG
  * projection. Each ERF level/subdomain is represented by a separate one-level
- * operator, so the ERF level index is deliberately not a restriction.
+ * operator.
  */
 inline std::string
 terrain_mlmg_configuration_error (bool is_3d, bool variable_dz,
@@ -121,8 +151,8 @@ terrain_mlmg_region_error (int lev, int isub, Box const& level_domain,
        << ", region=" << terrain_mlmg_box_string(region)
        << ", actual_cells=" << actual_cells
        << ", expected_cells=" << expected_cells
-       << ". Connected irregular/L-shaped regions are unsupported; use a rectangular "
-       << "refinement region or erf.terrain_poisson_solver=gmres_fft";
+       << ". Connected irregular/L-shaped regions are unsupported; use one rectangular "
+       << "refinement region";
     return os.str();
 }
 
@@ -145,8 +175,7 @@ terrain_mlmg_periodic_region_error (int lev, int isub,
             os << "erf.terrain_poisson_solver=mlmg does not support partial periodic-seam "
                << "refinement: lev=" << lev << ", isub=" << isub
                << ", dir=" << d << ", region=" << terrain_mlmg_box_string(region)
-               << ". Extend the rectangular region across the complete periodic direction "
-               << "or use erf.terrain_poisson_solver=gmres_fft";
+               << ". Extend the rectangular region across the complete periodic direction";
             return os.str();
         }
     }

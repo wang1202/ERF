@@ -2642,6 +2642,40 @@ if(ERF_ENABLE_MPI)
     add_test_terrain_mlmg_amr(TerrainMLMG_TwoLevelPartialVertical_TwoRanks 2)
 endif()
 
+add_test(NAME TerrainMLMGProjectionChecker_SelfTest
+    COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/Tests/check_terrain_mlmg_projection.py --self-test)
+set_tests_properties(TerrainMLMGProjectionChecker_SelfTest PROPERTIES
+    LABELS "experimental;terrain;mlmg;unit")
+
+# This input has a singular effective Neumann region with nonzero net flux.
+# MLMG must reject it rather than hide a divergence floor by subtracting a mean.
+function(add_test_terrain_mlmg_reject_incompatible TEST_NAME)
+    set(TEST_FILES_DIR "Terrain2Lev_STF_interp")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/Terrain2Lev_STF_interp.i")
+    set(test_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=1"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DINPUT=${test_input}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DLOG=${test_log}"
+        "-DREQUIRED_MARKER=ERF_TERRAIN_MLMG_INCOMPATIBLE_COMPATIBILITY"
+        "-DRUNTIME_OPTIONS=erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.mg_v=2 max_step=0"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunTerrainMLMGRejectIncompatible.cmake)
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        TIMEOUT 120
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "experimental;terrain;mlmg;negative"
+        ATTACHED_FILES_ON_FAIL "${test_log}")
+endfunction()
+add_test_terrain_mlmg_reject_incompatible(TerrainMLMG_RejectIncompatibleSingularRHS)
+
 # Two levels over a 100 m hill on a terrain-fitted mesh.  The zero-gradient
 # condition below the mesh is corrected by the terrain slope times a lateral
 # gradient that each box can only take one-sided in its outermost ghost

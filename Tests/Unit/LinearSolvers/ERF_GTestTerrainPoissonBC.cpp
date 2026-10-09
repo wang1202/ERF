@@ -116,6 +116,25 @@ TEST(TerrainMLMGRegion, RejectsPartialPeriodicSeamButAcceptsInteriorPatch)
     EXPECT_FALSE(local.isPeriodic(1));
 }
 
+TEST(TerrainMLMGRegion, RejectsUnvalidatedLevelAndDisconnectedRegionScopes)
+{
+    EXPECT_TRUE(terrain_mlmg_scope_error(1, 1, 1).empty());
+    const auto three_level_error = terrain_mlmg_scope_error(2, 2, 1);
+    EXPECT_NE(three_level_error.find("at most two ERF levels"), std::string::npos);
+    EXPECT_NE(three_level_error.find("max_level=2"), std::string::npos);
+    const auto disconnected_error = terrain_mlmg_scope_error(1, 1, 2);
+    EXPECT_NE(disconnected_error.find("one connected rectangular solve region"), std::string::npos);
+    EXPECT_NE(disconnected_error.find("level 1 has 2 regions"), std::string::npos);
+}
+
+TEST(TerrainMLMGCompatibility, UsesPrecisionAppropriateDivergenceThreshold)
+{
+    const amrex::Real tolerance = terrain_mlmg_compatibility_tolerance();
+    EXPECT_DOUBLE_EQ(tolerance, sizeof(amrex::Real) == sizeof(float) ? 1.e-4 : 1.e-6);
+    EXPECT_FALSE(terrain_mlmg_compatibility_mean_exceeds(tolerance));
+    EXPECT_TRUE(terrain_mlmg_compatibility_mean_exceeds(tolerance * amrex::Real(1.01)));
+}
+
 TEST(TerrainProjectionBC, PhysicalAndArtificialFacesUseRegionalConditions)
 {
     const auto global = make_geometry({0, 1, 0});

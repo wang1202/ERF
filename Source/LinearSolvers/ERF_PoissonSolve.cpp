@@ -182,6 +182,11 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         if (!error.empty()) {
             amrex::Abort(error);
         }
+        const std::string scope_error = terrain_mlmg_scope_error(
+            maxLevel(), lev, subdomains[lev].size());
+        if (!scope_error.empty()) {
+            amrex::Abort(scope_error);
+        }
         if (subdomains[lev].empty()) {
             amrex::Abort("erf.terrain_poisson_solver=mlmg found no ERF solve regions at level " +
                          std::to_string(lev));
@@ -333,60 +338,87 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
                            0, 0, 1, geom[lev-1], geom[lev], refRatio(lev-1),
                            &face_cons_linear_interp, domain_bcs_type, bc_comp);
 
-        Gpu::DeviceScalar<int> d_bad(0), d_bad_i(-1), d_bad_j(-1), d_bad_k(-1), d_bad_box(-1);
-        Gpu::DeviceScalar<Real> d_bad_value(zero);
-        int* bad_ptr = d_bad.dataPtr();
-        int* bad_i_ptr = d_bad_i.dataPtr();
-        int* bad_j_ptr = d_bad_j.dataPtr();
-        int* bad_k_ptr = d_bad_k.dataPtr();
-        int* bad_box_ptr = d_bad_box.dataPtr();
-        Real* bad_value_ptr = d_bad_value.dataPtr();
         const Box level_face_domain = convert(geom[lev].Domain(), fine_mom.boxArray().ixType());
 
-        for (MFIter mfi(fine_mom, false); mfi.isValid(); ++mfi) {
-            const Box& valid = mfi.validbox();
-            Box ghost_lo(valid);
-            ghost_lo.setRange(2, valid.smallEnd(2)-1, valid.smallEnd(2)-1);
-            ghost_lo &= interp_fine[mfi].box();
-            ghost_lo &= level_face_domain;
-            Box ghost_hi(valid);
-            ghost_hi.setRange(2, valid.bigEnd(2)+1, valid.bigEnd(2)+1);
-            ghost_hi &= interp_fine[mfi].box();
-            ghost_hi &= level_face_domain;
+        if (mg_verbose > 1) {
+            // Strict diagnostic mode records the first failed interpolation and
+            // synchronizes only when the user explicitly requests stencil checks.
+            Gpu::DeviceScalar<int> d_bad(0), d_bad_i(-1), d_bad_j(-1), d_bad_k(-1), d_bad_box(-1);
+            Gpu::DeviceScalar<Real> d_bad_value(zero);
+            int* bad_ptr = d_bad.dataPtr();
+            int* bad_i_ptr = d_bad_i.dataPtr();
+            int* bad_j_ptr = d_bad_j.dataPtr();
+            int* bad_k_ptr = d_bad_k.dataPtr();
+            int* bad_box_ptr = d_bad_box.dataPtr();
+            Real* bad_value_ptr = d_bad_value.dataPtr();
 
-            const Array4<Real> dst = fine_mom.array(mfi);
-            const Array4<Real const> src = interp_fine.const_array(mfi);
-            const int box_id = mfi.index();
-            auto copy_and_check = [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
-                const Real value = src(i,j,k);
-                dst(i,j,k) = value;
-                if (terrain_projection_ghost_value_invalid(value, bogus_large_value) &&
-                    Gpu::Atomic::CAS(bad_ptr,0,1) == 0) {
-                    bad_i_ptr[0] = i; bad_j_ptr[0] = j; bad_k_ptr[0] = k;
-                    bad_box_ptr[0] = box_id;
-                    bad_value_ptr[0] = value;
-                }
-            };
-            if (!ghost_lo.isEmpty()) { ParallelFor(ghost_lo, copy_and_check); }
-            if (!ghost_hi.isEmpty()) { ParallelFor(ghost_hi, copy_and_check); }
-        }
-        Gpu::synchronize();
-        if (d_bad.dataValue() != 0 && mg_verbose <= 1) {
-            const IntVect bad_index(d_bad_i.dataValue(), d_bad_j.dataValue(), d_bad_k.dataValue());
-            const Box& this_box = fine_mom.boxArray()[d_bad_box.dataValue()];
-            bool in_any_fine_box = false;
-            for (int ib = 0; ib < fine_mom.boxArray().size(); ++ib) {
-                in_any_fine_box = in_any_fine_box || fine_mom.boxArray()[ib].contains(bad_index);
+            for (MFIter mfi(fine_mom, false); mfi.isValid(); ++mfi) {
+                const Box& valid = mfi.validbox();
+                Box ghost_lo(valid);
+                ghost_lo.setRange(2, valid.smallEnd(2)-1, valid.smallEnd(2)-1);
+                ghost_lo &= interp_fine[mfi].box();
+                ghost_lo &= level_face_domain;
+                Box ghost_hi(valid);
+                ghost_hi.setRange(2, valid.bigEnd(2)+1, valid.bigEnd(2)+1);
+                ghost_hi &= interp_fine[mfi].box();
+                ghost_hi &= level_face_domain;
+
+                const Array4<Real> dst = fine_mom.array(mfi);
+                const Array4<Real const> src = interp_fine.const_array(mfi);
+                const int box_id = mfi.index();
+                auto copy_and_check = [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                    const Real value = src(i,j,k);
+                    dst(i,j,k) = value;
+                    if (terrain_projection_ghost_value_invalid(value, bogus_large_value) &&
+                        Gpu::Atomic::CAS(bad_ptr,0,1) == 0) {
+                        bad_i_ptr[0] = i; bad_j_ptr[0] = j; bad_k_ptr[0] = k;
+                        bad_box_ptr[0] = box_id;
+                        bad_value_ptr[0] = value;
+                    }
+                };
+                if (!ghost_lo.isEmpty()) { ParallelFor(ghost_lo, copy_and_check); }
+                if (!ghost_hi.isEmpty()) { ParallelFor(ghost_hi, copy_and_check); }
             }
-            const char* where = in_any_fine_box ? "fine-fine ghost" : "coarse-fine ghost";
-            AllPrint() << "Invalid interpolated rho0 momentum ghost before " << stencil_name
-                    << ": ERF level=" << lev
-                    << ", box=" << d_bad_box.dataValue() << ' ' << this_box
-                    << ", component=" << ((bc_comp == BCVars::xvel_bc) ? "xmom" : "ymom")
-                    << ", face=(" << bad_index << "), value=" << d_bad_value.dataValue()
-                    << ", location=" << where << std::endl;
-            Abort(std::string("coarse/fine momentum interpolation left an invalid ") +
-                  stencil_name + " stencil value");
+            Gpu::synchronize();
+            if (d_bad.dataValue() != 0) {
+                const IntVect bad_index(d_bad_i.dataValue(), d_bad_j.dataValue(), d_bad_k.dataValue());
+                const Box& this_box = fine_mom.boxArray()[d_bad_box.dataValue()];
+                bool in_any_fine_box = false;
+                for (int ib = 0; ib < fine_mom.boxArray().size(); ++ib) {
+                    in_any_fine_box = in_any_fine_box || fine_mom.boxArray()[ib].contains(bad_index);
+                }
+                const char* where = in_any_fine_box ? "fine-fine ghost" : "coarse-fine ghost";
+                AllPrint() << "Invalid interpolated rho0 momentum ghost before " << stencil_name
+                        << ": ERF level=" << lev
+                        << ", box=" << d_bad_box.dataValue() << ' ' << this_box
+                        << ", component=" << ((bc_comp == BCVars::xvel_bc) ? "xmom" : "ymom")
+                        << ", face=(" << bad_index << "), value=" << d_bad_value.dataValue()
+                        << ", location=" << where << std::endl;
+                Abort(std::string("coarse/fine momentum interpolation left an invalid ") +
+                      stencil_name + " stencil value");
+            }
+        } else {
+            // The normal path only copies interpolated values; it avoids
+            // diagnostic atomics and a device-to-host synchronization.
+            for (MFIter mfi(fine_mom, false); mfi.isValid(); ++mfi) {
+                const Box& valid = mfi.validbox();
+                Box ghost_lo(valid);
+                ghost_lo.setRange(2, valid.smallEnd(2)-1, valid.smallEnd(2)-1);
+                ghost_lo &= interp_fine[mfi].box();
+                ghost_lo &= level_face_domain;
+                Box ghost_hi(valid);
+                ghost_hi.setRange(2, valid.bigEnd(2)+1, valid.bigEnd(2)+1);
+                ghost_hi &= interp_fine[mfi].box();
+                ghost_hi &= level_face_domain;
+
+                const Array4<Real> dst = fine_mom.array(mfi);
+                const Array4<Real const> src = interp_fine.const_array(mfi);
+                auto copy = [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                    dst(i,j,k) = src(i,j,k);
+                };
+                if (!ghost_lo.isEmpty()) { ParallelFor(ghost_lo, copy); }
+                if (!ghost_hi.isEmpty()) { ParallelFor(ghost_hi, copy); }
+            }
         }
     };
 
@@ -929,6 +961,20 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
 
             sum /= vol;
             compatibility_mean[isub] = sum;
+
+            if (terrain_poisson_solver == "mlmg" &&
+                terrain_mlmg_compatibility_mean_exceeds(sum)) {
+                std::ostringstream message;
+                message << "ERF_TERRAIN_MLMG_INCOMPATIBLE_COMPATIBILITY: "
+                        << "singular homogeneous-normal solve region has incompatible net flux; "
+                        << "lev=" << lev << ", subdomain=" << isub
+                        << ", region=" << terrain_mlmg_box_string(my_region)
+                        << ", weighted_compatibility_mean=" << sum
+                        << ", tolerance=" << terrain_mlmg_compatibility_tolerance()
+                        << ". Adjust the physical fluxes or rectangular solve region so the "
+                        << "singular operator receives a compatible right-hand side.";
+                amrex::Abort(message.str());
+            }
 
             for (MFIter mfi(rhs_sub[0]); mfi.isValid(); ++mfi)
             {
