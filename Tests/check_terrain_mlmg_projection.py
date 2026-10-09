@@ -63,7 +63,8 @@ def parse_log(text, expected_levels, min_events, final_step, divergence_toleranc
               required_faces=(), neumann_flux_tolerance=1.e-12):
     events = []
     human_posts = {level: [] for level in expected_levels}
-    latest_pre = {}
+    pending_pre = {level: [] for level in expected_levels}
+    human_pres = {level: [] for level in expected_levels}
     flux_faces = set()
     current_coarse_step = None
     for line_number, original in enumerate(text.splitlines(), 1):
@@ -76,7 +77,8 @@ def parse_log(text, expected_levels, min_events, final_step, divergence_toleranc
             match = PRE_RE.match(line)
             if match:
                 level = int(match.group(1))
-                latest_pre[level] = finite_number(match.group(2), f"line {line_number} pre L_inf")
+                pending_pre[level].append(
+                    finite_number(match.group(2), f"line {line_number} pre L_inf"))
         if "Max/L2 norm of divergence after" in line:
             match = POST_RE.match(line)
             if not match:
@@ -88,12 +90,15 @@ def parse_log(text, expected_levels, min_events, final_step, divergence_toleranc
             if value > divergence_tolerance:
                 raise ValueError(
                     f"line {line_number}: post L_inf={value:g} exceeds {divergence_tolerance:g}")
-            if level not in latest_pre:
+            if level not in pending_pre or not pending_pre[level]:
                 raise ValueError(f"line {line_number}: no pre-projection norm for level {level}")
-            if value > latest_pre[level]:
+            projection_pre = max(pending_pre[level])
+            if value > projection_pre:
                 raise ValueError(
                     f"line {line_number}: projection increased L_inf at level {level}: "
-                    f"pre={latest_pre[level]:g}, post={value:g}")
+                    f"pre={projection_pre:g}, post={value:g}")
+            human_pres[level].append((len(pending_pre[level]), projection_pre))
+            pending_pre[level].clear()
             human_posts[level].append(value)
 
         if line.startswith("ERF_TERRAIN_PROJECTION_EVENT"):
@@ -188,6 +193,20 @@ def parse_log(text, expected_levels, min_events, final_step, divergence_toleranc
             raise ValueError(
                 f"level {level}: {len(level_events)} structured events but "
                 f"{len(human_posts[level])} human-readable norms")
+        if len(human_pres[level]) != len(level_events):
+            raise ValueError(
+                f"level {level}: {len(level_events)} structured events but "
+                f"{len(human_pres[level])} grouped pre-projection norms")
+        for index, event in enumerate(level_events):
+            pre_regions, pre_value = human_pres[level][index]
+            if pre_regions != event.regions:
+                raise ValueError(
+                    f"level {level} event {index + 1}: event reports {event.regions} regions "
+                    f"but {pre_regions} pre-projection norms were recorded")
+            if not math.isclose(event.pre, pre_value, rel_tol=1.e-7, abs_tol=0.0):
+                raise ValueError(
+                    f"level {level} event {index + 1}: structured pre L_inf {event.pre:g} "
+                    f"differs from region maximum {pre_value:g}")
         for index, (event, value) in enumerate(zip(level_events, human_posts[level]), 1):
             if not math.isclose(event.post, value, rel_tol=1.e-7, abs_tol=0.0):
                 raise ValueError(
@@ -207,8 +226,11 @@ def self_test():
                 f"Max/L2 norm of divergence before solve in subdomain 0 at level {level} : "
                 "1e-2 2e-2 and volume-weighted sum 0")
             fixture.append(
+                f"Max/L2 norm of divergence before solve in subdomain 1 at level {level} : "
+                "5e-3 1e-2 and volume-weighted sum 0")
+            fixture.append(
                 f"ERF_TERRAIN_PROJECTION_EVENT step=1 projection_call={projection_call} time=0.5 dt=0.5 level={level} "
-                "solver=mlmg regions=1 pre_Linf=1e-2 post_Linf=1e-8 post_max_cell=(0,0,0) "
+                "solver=mlmg regions=2 pre_Linf=1e-2 post_Linf=1e-8 post_max_cell=(0,0,0) "
                 "post_max_rank=0 relative_reduction=0.999999 solve_status=0 "
                 "solver_reltol=1e-6 solver_abstol=1e-10 residual=1e-9 "
                 "compatibility_mean_max_abs=0")
