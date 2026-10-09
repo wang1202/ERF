@@ -45,6 +45,9 @@ Governing Equations
 | **erf.use_fft**                 | use FFT rather than multigrid to solve the the Poisson   | Boolean            | false            |
 |                                 | equations                                                |                    |                  |
 +---------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.terrain_poisson_solver**  | select terrain projection solver; see Terrain section   | gmres_fft, mlmg    | gmres_fft        |
+|                                 | for experimental MLMG restrictions                     |                    |                  |
++---------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.mg_v**                    | verbosity of the multigrid solver if used the Poisson    | Integer >= 0       | 0                |
 |                                 | equations                                                |                    |                  |
 +---------------------------------+----------------------------------------------------------+--------------------+------------------+
@@ -3487,6 +3490,53 @@ List of Parameters
 +----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **prob.wavelength**              | wavelength [m] of the ``MovingSineWave`` custom terrain  | Real > 0           | 100.0            |
 +----------------------------------+----------------------------------------------------------+--------------------+------------------+
+
+Terrain Poisson solver
+----------------------
+
+The terrain-fitted projection keeps ``erf.terrain_poisson_solver = gmres_fft``
+as its default. This is the existing GMRES solver with an FFT preconditioner
+and requires an FFT-enabled build. ``mlmg`` selects an experimental AMReX
+terrain multigrid operator and does not require FFT support. Select it
+explicitly in an otherwise valid 3D terrain input:
+
+.. code-block:: ini
+
+   # Default; omit this line or set it explicitly to retain GMRES+FFT.
+   # erf.terrain_poisson_solver = gmres_fft
+
+   # Experimental terrain MLMG projection.
+   erf.terrain_poisson_solver = mlmg
+
+The MLMG option currently requires ``erf.mesh_type = VariableDz``,
+``erf.terrain_type = StaticFittedMesh``, ``erf.use_real_bcs = false``,
+``amr.max_level = 0``, and exactly one ERF subdomain covering the complete
+domain. It rejects moving terrain, embedded-boundary or immersed terrain,
+real/inhomogeneous boundary data, refined-level projections, and partial-domain
+layouts. The default GMRES+FFT solver remains the fallback for those cases.
+
+Both terrain solvers use a homogeneous Neumann pressure-correction condition
+at the lower z face when z is nonperiodic, including when the physical input
+uses ``zlo.type = outflow``; this matches ERF's established terrain projection
+convention. At lateral Neumann faces, the AMReX MLMG operator sets the entire
+normal correction flux to zero, while the legacy terrain GMRES stencil can
+retain terrain cross terms, so wall-adjacent corrections need not match.
+Fewer MLMG iterations alone do not imply a faster model timestep; compare full
+projection and timestep timings at the same resolution and decomposition.
+
+Set ``erf.mg_v > 0`` to print the selected terrain solver once and see MLMG
+iteration output. The following is the solver-specific part of a minimal
+configuration; it must be added to a valid 3D terrain case with a full-domain
+grid layout:
+
+.. code-block:: ini
+
+   erf.terrain_type = StaticFittedMesh
+   erf.mesh_type = VariableDz
+   erf.use_real_bcs = false
+   amr.max_level = 0
+   erf.terrain_poisson_solver = mlmg
+   erf.mg_v = 1
 
 Examples of Usage
 -----------------
