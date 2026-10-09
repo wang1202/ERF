@@ -289,7 +289,7 @@ function(add_test_two_stream_radiation TEST_NAME PLTFILE)
         "-DSEB_REGRIDDED_FROM=${tsr_seb_regridded}"
         "-DSEB_PARITY_CHECKER=${TWO_STREAM_SEB_PARITY_CHECKER}"
         "-DFEXTRACT=${FEXTRACT_EXE}"
-        "-DPYTHON_EXE=${ERF_TEST_PYTHON}"
+        "-DPYTHON_EXE=${Python3_EXECUTABLE}"
         -P ${PROJECT_SOURCE_DIR}/Tests/RunTwoStreamRadiation.cmake)
     set_tests_properties(${TEST_NAME}
         PROPERTIES
@@ -322,7 +322,7 @@ function(add_test_two_stream_seb_flux_source TEST_NAME)
         "-DINPUT=${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.i"
         "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
         "-DFEXTRACT=${FEXTRACT_EXE}"
-        "-DPYTHON_EXE=${ERF_TEST_PYTHON}"
+        "-DPYTHON_EXE=${Python3_EXECUTABLE}"
         "-DCHECKER=${TWO_STREAM_SEB_FLUX_SOURCE_CHECKER}"
         "-DSTEPS=10"
         "-DDT=${_sebfs_dt}"
@@ -356,7 +356,7 @@ function(add_test_two_stream_noahmp_levels TEST_NAME)
         "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
         "-DLAND_DIR=${PROJECT_SOURCE_DIR}/Exec/RegTests/NoahMP_Ideal"
         "-DFEXTRACT=${FEXTRACT_EXE}"
-        "-DPYTHON_EXE=${ERF_TEST_PYTHON}"
+        "-DPYTHON_EXE=${Python3_EXECUTABLE}"
         "-DCHECKER=${TWO_STREAM_NOAHMP_LEVELS_CHECKER}"
         -P ${PROJECT_SOURCE_DIR}/Tests/RunTwoStreamNoahMPLevels.cmake)
     set_tests_properties(${TEST_NAME}
@@ -390,7 +390,7 @@ function(add_test_two_stream_seb_moisture TEST_NAME)
         "-DINPUT=${CURRENT_TEST_BINARY_DIR}/TwoStream_SEBSurfaceLayerFluxes.i"
         "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
         "-DFEXTRACT=${FEXTRACT_EXE}"
-        "-DPYTHON_EXE=${ERF_TEST_PYTHON}"
+        "-DPYTHON_EXE=${Python3_EXECUTABLE}"
         "-DCHECKER=${TWO_STREAM_SEB_MOISTURE_CHECKER}"
         "-DSTEPS=10"
         "-DDT=1.0"
@@ -606,9 +606,9 @@ if(EXISTS "${ERF_NOAHMP_TABLE}")
 
   # The two-stream balance's copies of Noah-MP's soil and vegetation parameters
   # (erf.radiation.seb_soil_type, seb_vegetation_type) against the same table. Plain Python, no ERF run: every build with the submodule has it.
-  if(ERF_TEST_PYTHON)
+  if(Python3_EXECUTABLE)
     add_test(NAME NoahMPSoilTable_MatchesSubmodule
-        COMMAND ${ERF_TEST_PYTHON} ${PROJECT_SOURCE_DIR}/Tests/check_noahmp_soil_table.py
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/Tests/check_noahmp_soil_table.py
                 --table ${ERF_NOAHMP_TABLE}
                 --header ${PROJECT_SOURCE_DIR}/Source/Radiation/TwoStream/ERF_NoahMPSoilTable.H
                 --vegetation-header ${PROJECT_SOURCE_DIR}/Source/Radiation/TwoStream/ERF_NoahMPVegetationTable.H)
@@ -1819,7 +1819,7 @@ if(ERF_ENABLE_MPI AND NOT WIN32)
   # bound. Dropping the average-down moves the worst cell to ~3e-5 K, four orders of
   # magnitude above it, from the first output onward. Domain means would NOT catch this:
   # average_down is mean-preserving, so the two levels' means agree either way.
-  if(ERF_TEST_PYTHON)
+  if(Python3_EXECUTABLE)
     add_test_two_stream_radiation(TwoStream_PrognosticSEBMultiLevel "plt00006"
                                   CHECK_LEVELS 0 1
                                   SEB_PARITY_PLOTFILE "plt2d00006")
@@ -1832,7 +1832,7 @@ if(ERF_ENABLE_MPI AND NOT WIN32)
   # behaviour. post_timestep skips the transfer for such a level; this asserts every cell
   # of level 0 moved away from erf.rad_t_sfc. With the guard removed those cells sit at
   # exactly 300.0 instead of 300.0476.
-  if(ERF_TEST_PYTHON)
+  if(Python3_EXECUTABLE)
     add_test_two_stream_radiation(TwoStream_PrognosticSEBShallowNest "plt00006"
                                   CHECK_LEVELS 0
                                   DIAG_LEVELS 0
@@ -1852,7 +1852,7 @@ if(ERF_ENABLE_MPI AND NOT WIN32)
   # The runner's 1-rank vs 2-rank comparison matters here too: it is what showed the
   # interpolation reading a periodic halo that fill_seb_from_coarse had clamped, which left
   # the new level's edge columns dependent on the box layout.
-  if(ERF_TEST_PYTHON)
+  if(Python3_EXECUTABLE)
     add_test_two_stream_radiation(TwoStream_PrognosticSEBLateLevel "plt00011"
                                   CHECK_LEVELS 0 1
                                   SEB_PARITY_PLOTFILE "plt2d00011"
@@ -1869,7 +1869,7 @@ if(ERF_ENABLE_MPI AND NOT WIN32)
   # retained values (deviations off by 2.2e-4 against 3.8e-5), only the interpolation from
   # the parent (added cells off by 7.9e-2 against 2.0e-3). The correct run sits at 7e-6,
   # 3e-6 and 4e-5.
-  if(ERF_TEST_PYTHON)
+  if(Python3_EXECUTABLE)
     add_test_two_stream_radiation(TwoStream_PrognosticSEBRegrid "plt00011"
                                   CHECK_LEVELS 0 1
                                   SEB_PARITY_PLOTFILE "plt2d00011"
@@ -1894,7 +1894,7 @@ if(ERF_ENABLE_MPI AND NOT WIN32)
   # sum(dt (H + LE)) / C_s to 5 %. With the balance reading the defaults in both legs
   # (the behaviour before this test) seb_hfx is 0 against a sensible_heat_flux of tens
   # of W/m^2, and the two skins agree.
-  if(ERF_TEST_PYTHON)
+  if(Python3_EXECUTABLE)
     add_test_two_stream_seb_flux_source(TwoStream_SEBSurfaceLayerFluxes)
     # The same on two levels over a ridge, level 1 created at step 7 over the middle half:
     # every level and column checked, with per-column surface-layer fluxes (H spread
@@ -1911,7 +1911,7 @@ if(ERF_ENABLE_MPI AND NOT WIN32)
 
   # Two-stream radiation feeding Noah-MP on two levels (see the function above). Noah-MP
   # needs a parallel NetCDF build, which no CI job has, so this runs where one exists.
-  if(ERF_ENABLE_NOAHMP AND ERF_TEST_PYTHON)
+  if(ERF_ENABLE_NOAHMP AND Python3_EXECUTABLE)
     add_test_two_stream_noahmp_levels(TwoStream_NoahMPLevels)
   endif()
 
@@ -2333,7 +2333,7 @@ function(add_test_ibseb_refined_levels TEST_NAME)
         "-DCONFIG=$<CONFIG>"
         "-DINPUT=${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.i"
         "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
-        "-DPYTHON_EXE=${ERF_TEST_PYTHON}"
+        "-DPYTHON_EXE=${Python3_EXECUTABLE}"
         "-DCHECKER=${CMAKE_CURRENT_SOURCE_DIR}/check_ibseb_refined_levels.py"
         "-DBOX_SCRIPT=${PROJECT_SOURCE_DIR}/Exec/CanonicalTests/SEB/ibseb_refinement_box.py"
         -P ${PROJECT_SOURCE_DIR}/Tests/RunIBSEBRefinedLevels.cmake)
@@ -2359,7 +2359,7 @@ function(add_test_ibseb_two_stream_sun TEST_NAME TEST_FILES_DIR)
         "-DCONFIG=$<CONFIG>"
         "-DINPUT=${CURRENT_TEST_BINARY_DIR}/${TEST_FILES_DIR}.i"
         "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
-        "-DPYTHON_EXE=${ERF_TEST_PYTHON}"
+        "-DPYTHON_EXE=${Python3_EXECUTABLE}"
         "-DCHECKER=${CMAKE_CURRENT_SOURCE_DIR}/check_ibseb_two_stream_sun.py"
         -P ${PROJECT_SOURCE_DIR}/Tests/RunIBSEBTwoStreamSun.cmake)
     set_tests_properties(${TEST_NAME}
@@ -2372,7 +2372,7 @@ function(add_test_ibseb_two_stream_sun TEST_NAME TEST_FILES_DIR)
 endfunction(add_test_ibseb_two_stream_sun)
 
 if(ERF_ENABLE_MPI AND NOT WIN32)
-  if(NOT "${ERF_TEST_PYTHON}" STREQUAL "")
+  if(NOT "${Python3_EXECUTABLE}" STREQUAL "")
     add_test_ibseb_refined_levels(IBSEB_RefinedLevels)
     add_test_ibseb_two_stream_sun(IBSEB_TwoStreamSunRun IBSEB_TwoStreamSun)
   endif()
@@ -2594,6 +2594,113 @@ endfunction(add_test_station_series)
 function(terrain_hill_files TEST_NAME OUT_VAR)
     set(${OUT_VAR} "erf.input_sounding_file=${CMAKE_CURRENT_BINARY_DIR}/test_files/${TEST_NAME}/input_sounding" PARENT_SCOPE)
 endfunction()
+
+
+# Assert the experimental terrain MLMG path reaches and projects both ERF
+# levels on the partial-vertical TerrainHill refinement.
+function(add_test_terrain_mlmg_amr TEST_NAME NRANKS)
+    set(TEST_FILES_DIR "TerrainHill")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+
+    if(ERF_PRECISION STREQUAL "SINGLE")
+        set(_divergence_tolerance "1.0e-4")
+    else()
+        set(_divergence_tolerance "1.0e-6")
+    endif()
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/TerrainHill.i")
+    set(test_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    add_test(${TEST_NAME} ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}"
+        "-DNRANKS=${NRANKS}"
+        "-DEXPECTED_LEVELS=0,1"
+        "-DMIN_EVENTS_PER_LEVEL=2"
+        "-DFINAL_STEP=2"
+        "-DDIVERGENCE_TOLERANCE=${_divergence_tolerance}"
+        "-DREQUIRED_NEUMANN_FACES=0:z:lo,0:z:hi,1:x:lo,1:x:hi,1:y:lo,1:y:hi,1:z:lo,1:z:hi"
+        "-DNEUMANN_FLUX_TOLERANCE=1.0e-12"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DINPUT=${test_input}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DLOG=${test_log}"
+        "-DRUNTIME_OPTIONS=erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.mg_v=2 max_step=2 amr.max_grid_size_x=8 amr.max_grid_size_y=8 amr.max_grid_size_z=8"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunTerrainMLMGAMR.cmake)
+    set_tests_properties(${TEST_NAME}
+        PROPERTIES
+        TIMEOUT 300
+        PROCESSORS ${NRANKS}
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "experimental;terrain;mlmg;amr"
+        ATTACHED_FILES_ON_FAIL "${test_log}")
+endfunction(add_test_terrain_mlmg_amr)
+
+add_test_terrain_mlmg_amr(TerrainMLMG_TwoLevelPartialVertical_OneRank 1)
+if(ERF_ENABLE_MPI)
+    add_test_terrain_mlmg_amr(TerrainMLMG_TwoLevelPartialVertical_TwoRanks 2)
+endif()
+
+add_test(NAME TerrainMLMGProjectionChecker_SelfTest
+    COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/Tests/check_terrain_mlmg_projection.py --self-test)
+set_tests_properties(TerrainMLMGProjectionChecker_SelfTest PROPERTIES
+    LABELS "experimental;terrain;mlmg;unit")
+
+# This input has a singular effective Neumann region with nonzero net flux.
+# MLMG must reject it rather than hide a divergence floor by subtracting a mean.
+function(add_test_terrain_mlmg_reject_incompatible TEST_NAME)
+    set(TEST_FILES_DIR "Terrain2Lev_STF_interp")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/Terrain2Lev_STF_interp.i")
+    set(test_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=1"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DINPUT=${test_input}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DLOG=${test_log}"
+        "-DREQUIRED_MARKER=ERF_TERRAIN_MLMG_INCOMPATIBLE_COMPATIBILITY"
+        "-DRUNTIME_OPTIONS=erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.mg_v=2 max_step=0"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunTerrainMLMGRejectIncompatible.cmake)
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        TIMEOUT 120
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "experimental;terrain;mlmg;negative"
+        ATTACHED_FILES_ON_FAIL "${test_log}")
+endfunction()
+add_test_terrain_mlmg_reject_incompatible(TerrainMLMG_RejectIncompatibleSingularRHS)
+
+function(add_test_terrain_mlmg_reject_three_levels TEST_NAME)
+    set(TEST_FILES_DIR "TerrainHill")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/TerrainHill.i")
+    set(test_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=1"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DINPUT=${test_input}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DLOG=${test_log}"
+        "-DREQUIRED_MARKER=supports at most two ERF levels"
+        "-DRUNTIME_OPTIONS=erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.mg_v=2 max_step=1 amr.max_level=2 erf.box1.max_level=2 amr.ref_ratio_vect=2 2 2 2 2 2"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunTerrainMLMGRejectIncompatible.cmake)
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        TIMEOUT 120
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "experimental;terrain;mlmg;negative"
+        ATTACHED_FILES_ON_FAIL "${test_log}")
+endfunction()
+add_test_terrain_mlmg_reject_three_levels(TerrainMLMG_RejectThreeLevelScope)
 
 # Two levels over a 100 m hill on a terrain-fitted mesh.  The zero-gradient
 # condition below the mesh is corrected by the terrain slope times a lateral

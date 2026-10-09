@@ -45,6 +45,9 @@ Governing Equations
 | **erf.use_fft**                 | use FFT rather than multigrid to solve the the Poisson   | Boolean            | false            |
 |                                 | equations                                                |                    |                  |
 +---------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.terrain_poisson_solver**  | select terrain projection solver; see Terrain section   | gmres_fft, mlmg    | gmres_fft        |
+|                                 | for experimental MLMG restrictions                     |                    |                  |
++---------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.mg_v**                    | verbosity of the multigrid solver if used the Poisson    | Integer >= 0       | 0                |
 |                                 | equations                                                |                    |                  |
 +---------------------------------+----------------------------------------------------------+--------------------+------------------+
@@ -3487,6 +3490,74 @@ List of Parameters
 +----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **prob.wavelength**              | wavelength [m] of the ``MovingSineWave`` custom terrain  | Real > 0           | 100.0            |
 +----------------------------------+----------------------------------------------------------+--------------------+------------------+
+
+Terrain Poisson solver
+----------------------
+
+The terrain-fitted projection keeps ``erf.terrain_poisson_solver = gmres_fft``
+as its default. This is the existing GMRES solver with an FFT preconditioner
+and requires an FFT-enabled build. ``mlmg`` selects an experimental AMReX
+terrain multigrid operator and does not require FFT support. Select it
+explicitly in an otherwise valid 3D static fitted-terrain input:
+
+.. code-block:: ini
+
+   # Default; omit this line or set it explicitly to retain GMRES+FFT.
+   # erf.terrain_poisson_solver = gmres_fft
+
+   # Experimental terrain MLMG projection.
+   erf.terrain_poisson_solver = mlmg
+
+The MLMG option requires a 3D ``VariableDz`` mesh, which ERF derives from
+``erf.terrain_type = StaticFittedMesh``; ``erf.mesh_type`` is not a user input
+for selecting this mesh. Moving terrain, embedded-boundary or immersed terrain,
+and ``erf.use_real_bcs = true`` are unsupported. The current validated
+integration scope is at most two ERF levels (levels 0 and 1), with exactly one
+connected rectangular solve region on each active level. ERF constructs a
+separate single-level MLMG operator for each region; this is an independent
+per-level projection, not a coupled composite AMR Poisson solve. Three or more
+levels, disconnected regions, connected irregular regions, and partial
+refinement across a periodic seam are rejected with an input diagnostic.
+Singular homogeneous-normal regions whose weighted compatibility mean exceeds
+the precision-specific divergence tolerance are also rejected before solve.
+
+The projection fills vertical coarse-fine momentum ghosts through face-centered
+FillPatchTwoLevels using coarse momentum converted to ERF's rho0-weighted
+representation, at the registered coarse-data time. The fill runs before both
+the vorticity conversion and the reverse conversion after projection. The
+partial-height legacy GMRES+FFT path has a known assertion because its dz
+vector does not span the shortened vertical solve region. On a mutually
+supported full-height layout, a clean upstream-base and feature-branch CPU
+DOUBLE control produced the same GMRES fine-level divergence sequence,
+including its large later residual; that is a pre-existing GMRES limitation
+and remains outside the MLMG implementation.
+
+MLMG remains experimental, opt-in, and not merge-ready. The lifecycle,
+restart/regrid, boundary variants, map-factor coverage, full-source performance,
+and broader upstream regression suite remain incomplete. Do not infer general
+multi-level production support or a performance improvement. See
+terrain_mlmg_merge_readiness.md for the authoritative current-source test
+matrix and explicit merge verdict.
+
+Both terrain solvers use a homogeneous Neumann pressure-correction condition
+at the lower z face when z is nonperiodic, including when the physical input
+uses ``zlo.type = outflow``; this matches ERF's established terrain projection
+convention. At lateral Neumann faces, the AMReX MLMG operator sets the entire
+normal correction flux to zero, while the legacy terrain GMRES stencil can
+retain terrain cross terms, so wall-adjacent corrections need not match.
+Fewer MLMG iterations alone do not imply a faster model timestep; compare full
+projection and timestep timings at the same resolution and decomposition.
+
+Set ``erf.mg_v > 0`` to print the selected terrain solver once and see MLMG
+iteration output. The following is the solver-specific part of a minimal
+configuration; add it to a valid 3D static fitted-terrain case:
+
+.. code-block:: ini
+
+   erf.terrain_type = StaticFittedMesh
+   erf.use_real_bcs = false
+   erf.terrain_poisson_solver = mlmg
+   erf.mg_v = 1
 
 Examples of Usage
 -----------------

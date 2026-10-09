@@ -3,6 +3,12 @@
  */
 #include "ERF.H"
 #include "ERF_Utils.H"
+#include "ERF_SolverUtils.H"
+
+#include <AMReX_MLMG.H>
+#if (AMREX_SPACEDIM == 3)
+#include <AMReX_MLTerrainPoisson.H>
+#endif
 
 using namespace amrex;
 
@@ -148,6 +154,82 @@ void ERF::project_initial_velocity (int lev, double time, double l_dt)
 void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFab>& mom_mf)
 {
     BL_PROFILE("ERF::project_momenta()");
+
+    // Stable call sequence identifies the projection stage when time-integration
+    // invokes this routine multiple times within one coarse timestep.
+    static Long projection_call_counter = 0;
+    const Long projection_call = projection_call_counter++;
+
+    // Keep the existing GMRES+FFT solver as the default. The experimental
+    // multigrid path is opt-in through erf.terrain_poisson_solver = mlmg.
+    static const std::string terrain_poisson_solver = [] () {
+        std::string choice = terrain_poisson_solver_default();
+        ParmParse pp("erf");
+        pp.query("terrain_poisson_solver", choice);
+        const std::string error = terrain_poisson_solver_choice_error(choice);
+        if (!error.empty()) {
+            amrex::Abort(error);
+        }
+        return choice;
+    } ();
+
+    if (terrain_poisson_solver == "mlmg") {
+        const std::string error = terrain_mlmg_configuration_error(
+            AMREX_SPACEDIM == 3,
+            solverChoice.mesh_type == MeshType::VariableDz,
+            solverChoice.terrain_type == TerrainType::StaticFittedMesh,
+            solverChoice.use_real_bcs);
+        if (!error.empty()) {
+            amrex::Abort(error);
+        }
+        const std::string scope_error = terrain_mlmg_scope_error(
+            maxLevel(), lev, subdomains[lev].size());
+        if (!scope_error.empty()) {
+            amrex::Abort(scope_error);
+        }
+        if (subdomains[lev].empty()) {
+            amrex::Abort("erf.terrain_poisson_solver=mlmg found no ERF solve regions at level " +
+                         std::to_string(lev));
+        }
+        const Box level_domain = geom[lev].Domain();
+        for (int isub = 0; isub < subdomains[lev].size(); ++isub) {
+            const Box region(subdomains[lev][isub].minimalBox());
+            BoxList region_box_list;
+            for (int igrid = 0; igrid < grids[lev].size(); ++igrid) {
+                if (subdomains[lev][isub].intersects(grids[lev][igrid])) {
+                    region_box_list.push_back(grids[lev][igrid]);
+                }
+            }
+            const BoxArray region_boxes(region_box_list);
+            const std::string region_error = terrain_mlmg_region_error(
+                lev, isub, level_domain, region, region_boxes);
+            if (!region_error.empty()) {
+                amrex::Abort(region_error);
+            }
+            const std::string periodic_error = terrain_mlmg_periodic_region_error(
+                lev, isub, geom[lev], region);
+            if (!periodic_error.empty()) {
+                amrex::Abort(periodic_error);
+            }
+        }
+    }
+
+#ifndef ERF_USE_FFT
+    if (terrain_poisson_solver == "gmres_fft" &&
+        solverChoice.mesh_type == MeshType::VariableDz) {
+        amrex::Abort("erf.terrain_poisson_solver=gmres_fft requires an FFT-enabled build; "
+                     "set erf.terrain_poisson_solver=mlmg for the experimental non-FFT solver");
+    }
+#endif
+
+    // Print the chosen terrain solver once, when multigrid verbosity is enabled.
+    static bool printed_terrain_solver = false;
+    if (solverChoice.mesh_type == MeshType::VariableDz && mg_verbose > 0 &&
+        !printed_terrain_solver) {
+        amrex::Print() << "Terrain Poisson solver: " << terrain_poisson_solver << std::endl;
+        printed_terrain_solver = true;
+    }
+
     Real l_dt = static_cast<Real>(l_dt_d);
     //
     // If at lev > 0 we must first fill the momenta at the c/f interface with interpolated coarse values
@@ -228,6 +310,261 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
                              domain_bcs_type);
     }
 
+    // OmegaFromW and WFromOmega need rho0-weighted x/y momentum one cell above
+    // and below each valid w-face. Same-level FillBoundary cannot populate the
+    // coarse/fine part of that stencil. Build rho0-weighted coarse sources from
+    // the states bracketing l_time, then use ERF's ordinary face-centered
+    // FillPatchTwoLevels interpolation, and copy only vertical ghost faces back
+    // so valid fine momentum and projection corrections remain untouched.
+    MultiFab coarse_xmom_old, coarse_ymom_old, coarse_zmom_old;
+    MultiFab coarse_xmom_new, coarse_ymom_new, coarse_zmom_new;
+    auto fill_vertical_projection_ghost = [&] (MultiFab& fine_mom,
+                                               MultiFab& coarse_mom_old,
+                                               MultiFab& coarse_mom_new,
+                                               int bc_comp,
+                                               char const* stencil_name)
+    {
+        MultiFab interp_fine(fine_mom.boxArray(), fine_mom.DistributionMap(),
+                             1, IntVect(0,0,1));
+        interp_fine.setVal(bogus_large_value);
+        Vector<MultiFab*> coarse_data{&coarse_mom_old, &coarse_mom_new};
+        Vector<MultiFab*> fine_data{&fine_mom, &fine_mom};
+        Vector<Real> coarse_times{static_cast<Real>(t_old[lev-1]),
+                                  static_cast<Real>(t_new[lev-1])};
+        Vector<Real> data_times{static_cast<Real>(l_time), static_cast<Real>(l_time)};
+        FillPatchTwoLevels(interp_fine, IntVect(0,0,1), IntVect(0,0,0),
+                           static_cast<Real>(l_time),
+                           coarse_data, coarse_times, fine_data, data_times,
+                           0, 0, 1, geom[lev-1], geom[lev], refRatio(lev-1),
+                           &face_cons_linear_interp, domain_bcs_type, bc_comp);
+
+        const Box level_face_domain = convert(geom[lev].Domain(), fine_mom.boxArray().ixType());
+
+        if (mg_verbose > 1) {
+            // Strict diagnostic mode records the first failed interpolation and
+            // synchronizes only when the user explicitly requests stencil checks.
+            Gpu::DeviceScalar<int> d_bad(0), d_bad_i(-1), d_bad_j(-1), d_bad_k(-1), d_bad_box(-1);
+            Gpu::DeviceScalar<Real> d_bad_value(zero);
+            int* bad_ptr = d_bad.dataPtr();
+            int* bad_i_ptr = d_bad_i.dataPtr();
+            int* bad_j_ptr = d_bad_j.dataPtr();
+            int* bad_k_ptr = d_bad_k.dataPtr();
+            int* bad_box_ptr = d_bad_box.dataPtr();
+            Real* bad_value_ptr = d_bad_value.dataPtr();
+
+            for (MFIter mfi(fine_mom, false); mfi.isValid(); ++mfi) {
+                const Box& valid = mfi.validbox();
+                Box ghost_lo(valid);
+                ghost_lo.setRange(2, valid.smallEnd(2)-1, valid.smallEnd(2)-1);
+                ghost_lo &= interp_fine[mfi].box();
+                ghost_lo &= level_face_domain;
+                Box ghost_hi(valid);
+                ghost_hi.setRange(2, valid.bigEnd(2)+1, valid.bigEnd(2)+1);
+                ghost_hi &= interp_fine[mfi].box();
+                ghost_hi &= level_face_domain;
+
+                const Array4<Real> dst = fine_mom.array(mfi);
+                const Array4<Real const> src = interp_fine.const_array(mfi);
+                const int box_id = mfi.index();
+                auto copy_and_check = [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                    const Real value = src(i,j,k);
+                    dst(i,j,k) = value;
+                    if (terrain_projection_ghost_value_invalid(value, bogus_large_value) &&
+                        Gpu::Atomic::CAS(bad_ptr,0,1) == 0) {
+                        bad_i_ptr[0] = i; bad_j_ptr[0] = j; bad_k_ptr[0] = k;
+                        bad_box_ptr[0] = box_id;
+                        bad_value_ptr[0] = value;
+                    }
+                };
+                if (!ghost_lo.isEmpty()) { ParallelFor(ghost_lo, copy_and_check); }
+                if (!ghost_hi.isEmpty()) { ParallelFor(ghost_hi, copy_and_check); }
+            }
+            Gpu::synchronize();
+            if (d_bad.dataValue() != 0) {
+                const IntVect bad_index(d_bad_i.dataValue(), d_bad_j.dataValue(), d_bad_k.dataValue());
+                const Box& this_box = fine_mom.boxArray()[d_bad_box.dataValue()];
+                bool in_any_fine_box = false;
+                for (int ib = 0; ib < fine_mom.boxArray().size(); ++ib) {
+                    in_any_fine_box = in_any_fine_box || fine_mom.boxArray()[ib].contains(bad_index);
+                }
+                const char* where = in_any_fine_box ? "fine-fine ghost" : "coarse-fine ghost";
+                AllPrint() << "Invalid interpolated rho0 momentum ghost before " << stencil_name
+                        << ": ERF level=" << lev
+                        << ", box=" << d_bad_box.dataValue() << ' ' << this_box
+                        << ", component=" << ((bc_comp == BCVars::xvel_bc) ? "xmom" : "ymom")
+                        << ", face=(" << bad_index << "), value=" << d_bad_value.dataValue()
+                        << ", location=" << where << std::endl;
+                Abort(std::string("coarse/fine momentum interpolation left an invalid ") +
+                      stencil_name + " stencil value");
+            }
+        } else {
+            // The normal path only copies interpolated values; it avoids
+            // diagnostic atomics and a device-to-host synchronization.
+            for (MFIter mfi(fine_mom, false); mfi.isValid(); ++mfi) {
+                const Box& valid = mfi.validbox();
+                Box ghost_lo(valid);
+                ghost_lo.setRange(2, valid.smallEnd(2)-1, valid.smallEnd(2)-1);
+                ghost_lo &= interp_fine[mfi].box();
+                ghost_lo &= level_face_domain;
+                Box ghost_hi(valid);
+                ghost_hi.setRange(2, valid.bigEnd(2)+1, valid.bigEnd(2)+1);
+                ghost_hi &= interp_fine[mfi].box();
+                ghost_hi &= level_face_domain;
+
+                const Array4<Real> dst = fine_mom.array(mfi);
+                const Array4<Real const> src = interp_fine.const_array(mfi);
+                auto copy = [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                    dst(i,j,k) = src(i,j,k);
+                };
+                if (!ghost_lo.isEmpty()) { ParallelFor(ghost_lo, copy); }
+                if (!ghost_hi.isEmpty()) { ParallelFor(ghost_hi, copy); }
+            }
+        }
+    };
+
+    auto validate_projection_stencil = [&] (MultiFab& xmom, MultiFab& ymom,
+                                            char const* stencil_name)
+    {
+        if (mg_verbose <= 1) { return; }
+        Gpu::DeviceScalar<int> d_bad(0), d_bad_box(-1), d_bad_component(-1);
+        Gpu::DeviceScalar<int> d_src_i(-1), d_src_j(-1), d_src_k(-1);
+        Gpu::DeviceScalar<int> d_w_i(-1), d_w_j(-1), d_w_k(-1);
+        Gpu::DeviceScalar<Real> d_bad_value(zero);
+        int* bad_ptr = d_bad.dataPtr();
+        int* box_ptr = d_bad_box.dataPtr();
+        int* component_ptr = d_bad_component.dataPtr();
+        int* src_i_ptr = d_src_i.dataPtr();
+        int* src_j_ptr = d_src_j.dataPtr();
+        int* src_k_ptr = d_src_k.dataPtr();
+        int* w_i_ptr = d_w_i.dataPtr();
+        int* w_j_ptr = d_w_j.dataPtr();
+        int* w_k_ptr = d_w_k.dataPtr();
+        Real* value_ptr = d_bad_value.dataPtr();
+
+        for (MFIter mfi(rhs_lev,TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            const Array4<Real const> u = xmom.const_array(mfi);
+            const Array4<Real const> v = ymom.const_array(mfi);
+            const int box_id = mfi.index();
+            const auto check_sample = [=] AMREX_GPU_DEVICE
+                (Real value, int si, int sj, int sk, int component,
+                 int wi, int wj, int wk) noexcept
+            {
+                if (terrain_projection_ghost_value_invalid(value, bogus_large_value) &&
+                    Gpu::Atomic::CAS(bad_ptr,0,1) == 0) {
+                    box_ptr[0] = box_id;
+                    component_ptr[0] = component;
+                    src_i_ptr[0] = si; src_j_ptr[0] = sj; src_k_ptr[0] = sk;
+                    w_i_ptr[0] = wi; w_j_ptr[0] = wj; w_k_ptr[0] = wk;
+                    value_ptr[0] = value;
+                }
+            };
+            Box w_faces = mfi.nodaltilebox(2);
+            ParallelFor(w_faces, [=] AMREX_GPU_DEVICE
+                (int i, int j, int k) noexcept
+            {
+                const int klo = (k == 0) ? k : k-1;
+                const int khi = (k == 0) ? k+1 : k;
+                check_sample(u(i+1,j,klo), i+1,j,klo, 0, i,j,k);
+                check_sample(u(i+1,j,khi), i+1,j,khi, 0, i,j,k);
+                check_sample(u(i  ,j,klo), i  ,j,klo, 0, i,j,k);
+                check_sample(u(i  ,j,khi), i  ,j,khi, 0, i,j,k);
+                check_sample(v(i,j+1,klo), i,j+1,klo, 1, i,j,k);
+                check_sample(v(i,j+1,khi), i,j+1,khi, 1, i,j,k);
+                check_sample(v(i,j  ,klo), i,j  ,klo, 1, i,j,k);
+                check_sample(v(i,j  ,khi), i,j  ,khi, 1, i,j,k);
+            });
+        }
+        Gpu::synchronize();
+        if (d_bad.dataValue() != 0) {
+            const int box_id = d_bad_box.dataValue();
+            const int component = d_bad_component.dataValue();
+            const IntVect source(d_src_i.dataValue(), d_src_j.dataValue(), d_src_k.dataValue());
+            const IntVect target(d_w_i.dataValue(), d_w_j.dataValue(), d_w_k.dataValue());
+            const MultiFab& source_mom = component == 0 ? xmom : ymom;
+            const Box& source_box = source_mom.boxArray()[box_id];
+            const Box source_domain = convert(
+                geom[lev].Domain(), source_mom.boxArray().ixType());
+            const char* location = "coarse-fine ghost";
+            if (!source_domain.contains(source)) {
+                location = "physical-boundary ghost";
+            } else if (source_box.contains(source)) {
+                location = "valid face";
+            } else {
+                for (int ib = 0; ib < source_mom.boxArray().size(); ++ib) {
+                    if (source_mom.boxArray()[ib].contains(source)) {
+                        location = "fine-fine ghost";
+                        break;
+                    }
+                }
+            }
+            AllPrint() << "Invalid " << stencil_name << " momentum stencil input"
+                    << ": ERF level=" << lev << " projection_call=" << projection_call
+                    << " rank=" << ParallelDescriptor::MyProc()
+                    << " box=" << box_id << ' ' << source_box
+                    << " target_wface=" << target
+                    << " component=" << (component == 0 ? "xmom" : "ymom")
+                    << " source_face=" << source
+                    << " value=" << d_bad_value.dataValue()
+                    << " location=" << location << std::endl;
+            Abort(std::string(stencil_name) +
+                  " read an invalid horizontal momentum stencil value");
+        }
+    };
+
+    if (solverChoice.mesh_type == MeshType::VariableDz) {
+        mom_mf[IntVars::xmom].FillBoundary(IntVect(0,0,1), geom[lev].periodicity());
+        mom_mf[IntVars::ymom].FillBoundary(IntVect(0,0,1), geom[lev].periodicity());
+    }
+
+    if (solverChoice.mesh_type == MeshType::VariableDz && lev > 0) {
+        const int crse_lev = lev - 1;
+        const auto& crse_u_old = rU_old[crse_lev];
+        const auto& crse_v_old = rV_old[crse_lev];
+        const auto& crse_w_old = rW_old[crse_lev];
+        const auto& crse_u_new = rU_new[crse_lev];
+        const auto& crse_v_new = rV_new[crse_lev];
+        const auto& crse_w_new = rW_new[crse_lev];
+
+        coarse_xmom_old.define(crse_u_old.boxArray(), crse_u_old.DistributionMap(), 1,
+                               crse_u_old.nGrowVect());
+        coarse_ymom_old.define(crse_v_old.boxArray(), crse_v_old.DistributionMap(), 1,
+                               crse_v_old.nGrowVect());
+        coarse_zmom_old.define(crse_w_old.boxArray(), crse_w_old.DistributionMap(), 1,
+                               crse_w_old.nGrowVect());
+        coarse_xmom_new.define(crse_u_new.boxArray(), crse_u_new.DistributionMap(), 1,
+                               crse_u_new.nGrowVect());
+        coarse_ymom_new.define(crse_v_new.boxArray(), crse_v_new.DistributionMap(), 1,
+                               crse_v_new.nGrowVect());
+        coarse_zmom_new.define(crse_w_new.boxArray(), crse_w_new.DistributionMap(), 1,
+                               crse_w_new.nGrowVect());
+
+        MultiFab::Copy(coarse_xmom_old, crse_u_old, 0, 0, 1, 0);
+        MultiFab::Copy(coarse_ymom_old, crse_v_old, 0, 0, 1, 0);
+        MultiFab::Copy(coarse_zmom_old, crse_w_old, 0, 0, 1, 0);
+        MultiFab::Copy(coarse_xmom_new, crse_u_new, 0, 0, 1, 0);
+        MultiFab::Copy(coarse_ymom_new, crse_v_new, 0, 0, 1, 0);
+        MultiFab::Copy(coarse_zmom_new, crse_w_new, 0, 0, 1, 0);
+
+        MultiFab crse_rho0(base_state[crse_lev], make_alias, BaseState::r0_comp, 1);
+        ConvertForProjection(vars_old[crse_lev][Vars::cons], crse_rho0,
+                             coarse_xmom_old, coarse_ymom_old, coarse_zmom_old,
+                             geom[crse_lev].Domain(), domain_bcs_type);
+        ConvertForProjection(vars_new[crse_lev][Vars::cons], crse_rho0,
+                             coarse_xmom_new, coarse_ymom_new, coarse_zmom_new,
+                             geom[crse_lev].Domain(), domain_bcs_type);
+
+        coarse_xmom_old.FillBoundary(geom[crse_lev].periodicity());
+        coarse_ymom_old.FillBoundary(geom[crse_lev].periodicity());
+        coarse_xmom_new.FillBoundary(geom[crse_lev].periodicity());
+        coarse_ymom_new.FillBoundary(geom[crse_lev].periodicity());
+        fill_vertical_projection_ghost(mom_mf[IntVars::xmom],
+                                       coarse_xmom_old, coarse_xmom_new,
+                                       BCVars::xvel_bc, "OmegaFromW");
+        fill_vertical_projection_ghost(mom_mf[IntVars::ymom],
+                                       coarse_ymom_old, coarse_ymom_new,
+                                       BCVars::yvel_bc, "OmegaFromW");
+    }
+
     //
     // ****************************************************************************
     // Now convert the rho0w MultiFab to hold Omega rather than rhow
@@ -235,33 +572,25 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
     //
     if (solverChoice.mesh_type == MeshType::VariableDz)
     {
+        validate_projection_stencil(mom_mf[IntVars::xmom],
+                                    mom_mf[IntVars::ymom], "OmegaFromW");
         // OmegaFromW below averages (rho0 u) and (rho0 v) over the faces below and above
         // each w-face, so at the lowest and highest w-face of a box it reads one face in the
-        // z-ghost layer. Where a box face lies inside the domain (a BoxArray split in z) that
-        // ghost face must hold the neighbouring box's momentum, in the same rho0 scaling as
-        // the valid faces; VelocityToMomentum and ConvertForProjection both write the valid
-        // faces only. Fill the z-ghost layer here, after the conversion, so no caller has to.
-        // At the domain bottom the w-face k = 0 is set to zero and nothing below it is read;
-        // at the domain top the ghost face is outside the domain, which FillBoundary leaves
-        // to the extrapolation in VelocityToMomentum (or the boundary fill in the time step).
+        // z-ghost layer. Same-level FillBoundary handles box splits; for partial fine
+        // levels the explicit two-level fill above supplies coarse/fine values in rho0
+        // units. At the physical bottom k=0 is set to zero and nothing below it is read;
+        // the physical top remains governed by VelocityToMomentum's existing extrapolation.
         AMREX_ALWAYS_ASSERT(mom_mf[IntVars::xmom].nGrowVect()[2] >= 1 &&
                             mom_mf[IntVars::ymom].nGrowVect()[2] >= 1);
-        mom_mf[IntVars::xmom].FillBoundary(IntVect(0,0,1), geom[lev].periodicity());
-        mom_mf[IntVars::ymom].FillBoundary(IntVect(0,0,1), geom[lev].periodicity());
-
-        for ( MFIter mfi(rhs_lev,TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        for (MFIter mfi(rhs_lev,TilingIfNotGPU()); mfi.isValid(); ++mfi)
         {
             const Array4<Real const>& rho0u_arr = mom_mf[IntVars::xmom].const_array(mfi);
             const Array4<Real const>& rho0v_arr = mom_mf[IntVars::ymom].const_array(mfi);
             const Array4<Real      >& rho0w_arr = mom_mf[IntVars::zmom].array(mfi);
+            const Array4<Real const>& z_nd = z_phys_nd[lev]->const_array(mfi);
+            const Array4<Real const>& mf_u = mapfac[lev][MapFacType::u_x]->const_array(mfi);
+            const Array4<Real const>& mf_v = mapfac[lev][MapFacType::v_y]->const_array(mfi);
 
-            const Array4<Real const>&     z_nd = z_phys_nd[lev]->const_array(mfi);
-            const Array4<Real const>&     mf_u =  mapfac[lev][MapFacType::u_x]->const_array(mfi);
-            const Array4<Real const>&     mf_v =  mapfac[lev][MapFacType::v_y]->const_array(mfi);
-
-            //
-            // Define Omega from (rho0 W) but store it in the same array
-            //
             Box tbz = mfi.nodaltilebox(2);
             ParallelFor(tbz, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
                 if (k == 0) {
@@ -314,6 +643,10 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
     Vector<MultiFab> rhs_sub; rhs_sub.resize(1);
     Vector<MultiFab> phi_sub; phi_sub.resize(1);
     Vector<Array<MultiFab,AMREX_SPACEDIM>> fluxes_sub; fluxes_sub.resize(1);
+    Vector<int> solve_status(subdomains[lev].size(), -1);
+    Vector<Real> solve_residual(subdomains[lev].size(), Real(-1));
+    Vector<Real> compatibility_mean(subdomains[lev].size(), zero);
+    Real pre_projection_linf = zero;
 
     MultiFab ax_sub, ay_sub, az_sub, dJ_sub, znd_sub;
     MultiFab mfmx_sub, mfmy_sub, mfvx_sub, mfuy_sub;
@@ -348,6 +681,7 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
 
     for (int isub = 0; isub < subdomains[lev].size(); ++isub)
     {
+        Box my_region(subdomains[lev][isub].minimalBox());
         BoxList bl_sub;
         Vector<int> dm_sub;
 
@@ -486,6 +820,7 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
 
         // Max norm over the entire MultiFab
         rhsnorm = rhs_sub[0].norm0();
+        pre_projection_linf = std::max(pre_projection_linf, rhsnorm);
 
         if (mg_verbose > 0) {
             bool local = false;
@@ -576,6 +911,7 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
 
             // Re-define max norm over the entire MultiFab
             rhsnorm = rhs_lev.norm0();
+            pre_projection_linf = std::max(pre_projection_linf, rhsnorm);
 
             if (mg_verbose > 0)
             {
@@ -587,19 +923,21 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         } // lev 0 && use_real_bcs
 
         // *******************************************************************************************
-        // Enforce solvability if the problem is singular (i.e all sides Neumann or periodic)
-        // Note that solves at lev > 0 are always singular because we impose Neumann bc's on all sides
-        // *******************************************************************************************
+        // Enforce solvability only for operators whose effective BCs are singular.
+        TerrainMLMGRegionBCs terrain_region_bcs;
         bool is_singular = true;
-        if (lev == 0) {
+        if (terrain_poisson_solver == "mlmg") {
+            terrain_region_bcs = terrain_mlmg_region_bcs(geom[lev], my_region, domain_bc_type);
+            is_singular = terrain_region_bcs.is_singular;
+        } else if (lev == 0) {
             if ( (domain_bc_type[0] == "Outflow" || domain_bc_type[0] == "Open") && !solverChoice.use_real_bcs ) is_singular = false;
             if ( (domain_bc_type[1] == "Outflow" || domain_bc_type[1] == "Open") && !solverChoice.use_real_bcs ) is_singular = false;
             if ( (domain_bc_type[3] == "Outflow" || domain_bc_type[3] == "Open") && !solverChoice.use_real_bcs ) is_singular = false;
             if ( (domain_bc_type[4] == "Outflow" || domain_bc_type[4] == "Open") && !solverChoice.use_real_bcs ) is_singular = false;
             if ( (domain_bc_type[5] == "Outflow" || domain_bc_type[5] == "Open")                               ) is_singular = false;
-        } else {
-            Box my_region(subdomains[lev][isub].minimalBox());
-            if ( (domain_bc_type[5] == "Outflow" || domain_bc_type[5] == "Open") && (my_region.bigEnd(2) == domain.bigEnd(2)) ) is_singular = false;
+        } else if ( (domain_bc_type[5] == "Outflow" || domain_bc_type[5] == "Open") &&
+                    (my_region.bigEnd(2) == domain.bigEnd(2)) ) {
+            is_singular = false;
         }
 
         if (is_singular)
@@ -608,13 +946,35 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
             Real sum = volWgtSumMF(lev,rhs_sub[0],0,dJ_sub,mfmx_sub,mfmy_sub,false,local);
 
             Real vol;
-            if (solverChoice.mesh_type == MeshType::ConstantDz) {
-                vol = rhs_sub[0].boxArray().numPts();
+            if (terrain_poisson_solver == "mlmg") {
+                // Match the compatibility integral's terrain Jacobian and
+                // map-factor weighting. AMReX applies detJ to the operator RHS
+                // internally, so the Jacobian is included here exactly once.
+                MultiFab unit_weight(rhs_sub[0].boxArray(), rhs_sub[0].DistributionMap(), 1, 0);
+                unit_weight.setVal(1.0);
+                vol = volWgtSumMF(lev, unit_weight, 0, dJ_sub, mfmx_sub, mfmy_sub, false, false);
+            } else if (solverChoice.mesh_type == MeshType::ConstantDz) {
+                vol = rhs_sub[0].boxArray().numPts() * dx[0] * dx[1] * dx[2];
             } else {
-                vol = dJ_sub.sum();
+                vol = dJ_sub.sum() * dx[0] * dx[1] * dx[2];
             }
 
-            sum /= (vol * dx[0] * dx[1] * dx[2]);
+            sum /= vol;
+            compatibility_mean[isub] = sum;
+
+            if (terrain_poisson_solver == "mlmg" &&
+                terrain_mlmg_compatibility_mean_exceeds(sum)) {
+                std::ostringstream message;
+                message << "ERF_TERRAIN_MLMG_INCOMPATIBLE_COMPATIBILITY: "
+                        << "singular homogeneous-normal solve region has incompatible net flux; "
+                        << "lev=" << lev << ", subdomain=" << isub
+                        << ", region=" << terrain_mlmg_box_string(my_region)
+                        << ", weighted_compatibility_mean=" << sum
+                        << ", tolerance=" << terrain_mlmg_compatibility_tolerance()
+                        << ". Adjust the physical fluxes or rectangular solve region so the "
+                        << "singular operator receives a compatible right-hand side.";
+                amrex::Abort(message.str());
+            }
 
             for (MFIter mfi(rhs_sub[0]); mfi.isValid(); ++mfi)
             {
@@ -634,7 +994,18 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         // ****************************************************************************
         // No need to build the solver if RHS == 0
         // ****************************************************************************
-        if (rhsnorm <= solverChoice.poisson_abstol) continue; // this subdomain only
+        if (rhsnorm <= solverChoice.poisson_abstol) {
+            solve_status[isub] = 0;
+            solve_residual[isub] = rhsnorm;
+            continue; // this subdomain only
+        }
+
+        std::unique_ptr<MultiFab> rhs_solve_diag;
+        if (mg_verbose > 1) {
+            rhs_solve_diag = std::make_unique<MultiFab>(
+                rhs_sub[0].boxArray(), rhs_sub[0].DistributionMap(), 1, 0);
+            MultiFab::Copy(*rhs_solve_diag, rhs_sub[0], 0, 0, 1, 0);
+        }
 
         double start_step = ParallelDescriptor::second();
 
@@ -680,10 +1051,6 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
 
         if (solverChoice.terrain_type != TerrainType::EB) {
 
-#ifdef ERF_USE_FFT
-        Box my_region(subdomains[lev][isub].minimalBox());
-#endif
-
         // ****************************************************************************
         // No terrain or grid stretching
         // ****************************************************************************
@@ -720,16 +1087,200 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         // General terrain
         // ****************************************************************************
         else if (solverChoice.mesh_type == MeshType::VariableDz) {
-#ifdef ERF_USE_FFT
-            bool boxes_make_rectangle = (my_region.numPts() == subdomains[lev][isub].numPts());
-            if (!boxes_make_rectangle) {
-                amrex::Abort("FFT preconditioner for GMRES won't work unless the union of boxes is rectangular");
-            } else {
-                solve_with_gmres(lev, my_region, rhs_sub[0], phi_sub[0], fluxes_sub[0], ax_sub, ay_sub, az_sub, dJ_sub, znd_sub);
-            }
+            if (terrain_poisson_solver == "mlmg") {
+#if (AMREX_SPACEDIM == 3)
+                const double setup_start = ParallelDescriptor::second();
+                Vector<Geometry> ml_geom{terrain_mlmg_region_geometry(Geom(lev), my_region)};
+                Vector<BoxArray> ml_grids{rhs_sub[0].boxArray()};
+                Vector<DistributionMapping> ml_dmap{rhs_sub[0].DistributionMap()};
+
+                LPInfo lpinfo;
+                MLTerrainPoisson terrain_op(ml_geom, ml_grids, ml_dmap, lpinfo);
+                terrain_op.setDomainBC(terrain_region_bcs.lo, terrain_region_bcs.hi);
+                terrain_op.setLevelBC(0, nullptr);
+                terrain_op.setZPhys(0, znd_sub);
+                Array<MultiFab const*,AMREX_SPACEDIM> terrain_areas{
+                    &ax_sub, &ay_sub, &az_sub
+                };
+                terrain_op.setAreas(0, terrain_areas);
+                terrain_op.setDetJ(0, dJ_sub);
+
+                MLMG mlmg(terrain_op);
+                mlmg.setMaxIter(200);
+                mlmg.setVerbose(mg_verbose);
+                mlmg.setBottomVerbose(0);
+                const double setup_elapsed = ParallelDescriptor::second() - setup_start;
+                if (mg_verbose > 0) {
+                    amrex::Print() << "Terrain MLMG region: ERF level " << lev
+                                   << ", subdomain " << isub << ", bounds "
+                                   << terrain_mlmg_box_string(my_region)
+                                   << ", operator AMR level 0" << std::endl;
+                }
+                if (mg_verbose > 1) {
+                    auto bc_name = [] (LinOpBCType bc) {
+                        if (bc == LinOpBCType::Periodic) return "periodic";
+                        if (bc == LinOpBCType::Neumann) return "Neumann";
+                        if (bc == LinOpBCType::Dirichlet) return "Dirichlet";
+                        return "other";
+                    };
+                    amrex::Print() << "Terrain MLMG effective BCs: lo=("
+                                   << bc_name(terrain_region_bcs.lo[0]) << ','
+                                   << bc_name(terrain_region_bcs.lo[1]) << ','
+                                   << bc_name(terrain_region_bcs.lo[2]) << "), hi=("
+                                   << bc_name(terrain_region_bcs.hi[0]) << ','
+                                   << bc_name(terrain_region_bcs.hi[1]) << ','
+                                   << bc_name(terrain_region_bcs.hi[2]) << "), singular="
+                                   << terrain_region_bcs.is_singular << std::endl;
+                }
+
+                const double solve_start = ParallelDescriptor::second();
+                mlmg.solve(GetVecOfPtrs(phi_sub), GetVecOfConstPtrs(rhs_sub),
+                           solverChoice.poisson_reltol, solverChoice.poisson_abstol);
+                const double solve_elapsed = ParallelDescriptor::second() - solve_start;
+                solve_residual[isub] = mlmg.getFinalResidual();
+                const Real mlmg_tolerance = amrex::max(
+                    solverChoice.poisson_reltol * mlmg.getInitResidual(),
+                    solverChoice.poisson_abstol);
+                solve_status[isub] =
+                    amrex::Math::isfinite(solve_residual[isub]) &&
+                    solve_residual[isub] <= mlmg_tolerance ? 0 : 1;
+
+                // compFlux is inherited from MLCellLinOpT and dispatches to
+                // MLTerrainPoisson::FFlux for this operator.
+                Array<MultiFab*,AMREX_SPACEDIM> terrain_fluxes{
+                    &fluxes_sub[0][0], &fluxes_sub[0][1], &fluxes_sub[0][2]
+                };
+                const double flux_start = ParallelDescriptor::second();
+                terrain_op.compFlux(0, terrain_fluxes, phi_sub[0],
+                                    MLTerrainPoisson::Location::FaceCenter);
+                const double flux_elapsed = ParallelDescriptor::second() - flux_start;
+
+                // Match the map-factor treatment used by the GMRES terrain path.
+                for (MFIter mfi(phi_sub[0]); mfi.isValid(); ++mfi)
+                {
+                    Box xbx = mfi.nodaltilebox(0);
+                    Box ybx = mfi.nodaltilebox(1);
+                    const Array4<Real      >& fx_ar = fluxes_sub[0][0].array(mfi);
+                    const Array4<Real      >& fy_ar = fluxes_sub[0][1].array(mfi);
+                    const Array4<Real const>& mf_ux = mapfac[lev][MapFacType::u_x]->const_array(mfi);
+                    const Array4<Real const>& mf_vy = mapfac[lev][MapFacType::v_y]->const_array(mfi);
+                    ParallelFor(xbx,ybx,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    {
+                        fx_ar(i,j,k) *= mf_ux(i,j,0);
+                    },
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    {
+                        fy_ar(i,j,k) *= mf_vy(i,j,0);
+                    });
+                }
+
+                // Report the actual normal correction flux on effective Neumann
+                // faces. This diagnostic is intentionally verbosity-gated so normal
+                // projections do not pay for boundary reductions.
+                if (mg_verbose > 1) {
+                    const char* axis_name[AMREX_SPACEDIM] = {"x", "y", "z"};
+                    for (int idir = 0; idir < AMREX_SPACEDIM; ++idir) {
+                        for (int side = 0; side < 2; ++side) {
+                            const LinOpBCType bc = side == 0
+                                ? terrain_region_bcs.lo[idir] : terrain_region_bcs.hi[idir];
+                            if (bc != LinOpBCType::Neumann) { continue; }
+
+                            ReduceOps<ReduceOpMax,ReduceOpSum> reduce_op;
+                            ReduceData<Real,Long> reduce_data(reduce_op);
+                            using ReduceTuple = typename decltype(reduce_data)::Type;
+                            MultiFab const& face_flux = fluxes_sub[0][idir];
+                            Box face_region = convert(
+                                my_region, IntVect::TheDimensionVector(idir));
+                            const int face_index = side == 0
+                                ? my_region.smallEnd(idir) : my_region.bigEnd(idir) + 1;
+                            face_region.setRange(idir, face_index, 1);
+                            for (MFIter flux_mfi(face_flux); flux_mfi.isValid(); ++flux_mfi) {
+                                Box bx = face_region & flux_mfi.validbox();
+                                if (mg_verbose > 2) {
+                                    amrex::Print() << "Terrain MLMG flux diagnostic boxes: plane="
+                                                   << face_region << " valid=" << flux_mfi.validbox()
+                                                   << " intersection=" << bx << std::endl;
+                                }
+                                if (bx.isEmpty()) { continue; }
+                                const Array4<Real const> flux_arr = face_flux.const_array(flux_mfi);
+                                reduce_op.eval(bx, reduce_data,
+                                [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept -> ReduceTuple
+                                {
+                                    return {amrex::Math::abs(flux_arr(i,j,k)), Long(1)};
+                                });
+                            }
+                            Real max_normal_flux = amrex::get<0>(reduce_data.value(reduce_op));
+                            Long sample_count = amrex::get<1>(reduce_data.value(reduce_op));
+                            ParallelDescriptor::ReduceRealMax(max_normal_flux);
+                            ParallelDescriptor::ReduceLongSum(sample_count);
+                            if (sample_count == 0) { max_normal_flux = 0.0; }
+                            amrex::Print() << "Terrain MLMG Neumann normal correction flux max: level="
+                                           << lev << " subdomain=" << isub
+                                           << " dir=" << axis_name[idir]
+                                           << " side=" << (side == 0 ? "lo" : "hi")
+                                           << " face_index=" << face_index
+                                           << " operator_domain=" << terrain_op.Geom(0).Domain()
+                                           << " samples=" << sample_count
+                                           << " max_abs=" << max_normal_flux << std::endl;
+                        }
+                    }
+                }
+
+                ImposeBCsOnPhi(lev, phi_sub[0], my_region);
+                if (mg_verbose > 0) {
+                    amrex::Print() << "Terrain MLMG level " << lev << " subdomain " << isub
+                                   << ": iterations=" << mlmg.getNumIters()
+                                   << ", final residual=" << mlmg.getFinalResidual()
+                                   << ", setup=" << setup_elapsed << " s"
+                                   << ", solve=" << solve_elapsed << " s"
+                                   << ", compFlux=" << flux_elapsed << " s" << std::endl;
+                }
 #else
-            amrex::Abort("Rebuild with USE_FFT = TRUE so you can use the FFT preconditioner for GMRES");
+                amrex::Abort("MLTerrainPoisson is available only in 3D builds");
 #endif
+            } else {
+#ifdef ERF_USE_FFT
+                bool boxes_make_rectangle = (my_region.numPts() == subdomains[lev][isub].numPts());
+                if (!boxes_make_rectangle) {
+                    amrex::Abort("FFT preconditioner for GMRES won't work unless the union of boxes is rectangular");
+                } else {
+                    solve_status[isub] = solve_with_gmres(
+                        lev, projection_call, l_time, l_dt_d, my_region, rhs_sub[0], phi_sub[0],
+                        fluxes_sub[0], ax_sub, ay_sub, az_sub, dJ_sub, znd_sub,
+                        solve_residual[isub]);
+                }
+#else
+                amrex::Abort("Rebuild with USE_FFT = TRUE so you can use the FFT preconditioner for GMRES");
+#endif
+            }
+
+            // Independently check that the correction fluxes satisfy the same ERF
+            // terrain divergence used to form the solve RHS. This separates an
+            // operator/flux mismatch from iterative convergence.
+            if (mg_verbose > 1 && rhs_solve_diag) {
+                MultiFab correction_divergence(
+                    rhs_sub[0].boxArray(), rhs_sub[0].DistributionMap(), 1, 0);
+                Array<MultiFab const*,AMREX_SPACEDIM> correction_fluxes{
+                    &fluxes_sub[0][0], &fluxes_sub[0][1], &fluxes_sub[0][2]
+                };
+                compute_divergence(lev, correction_divergence, correction_fluxes,
+                                   mfmx_sub, mfmy_sub, mfvx_sub, mfuy_sub,
+                                   ax_sub, ay_sub, dJ_sub, geom_tmp[0]);
+                MultiFab flux_operator_residual(
+                    correction_divergence.boxArray(),
+                    correction_divergence.DistributionMap(), 1, 0);
+                MultiFab::Copy(flux_operator_residual, correction_divergence, 0, 0, 1, 0);
+                MultiFab::Add(flux_operator_residual, *rhs_solve_diag, 0, 0, 1, 0);
+                amrex::Print() << "Terrain projection flux/operator check"
+                               << " level=" << lev
+                               << " subdomain=" << isub
+                               << " correction_div_Linf=" << correction_divergence.norm0()
+                               << " solve_rhs_Linf=" << rhs_solve_diag->norm0()
+                               << " flux_operator_residual_Linf=" << flux_operator_residual.norm0()
+                               << " flux_operator_residual_L2=" << flux_operator_residual.norm2()
+                               << std::endl;
+            }
 
             //
             // Restore ax,ay,ax to their original definitions
@@ -837,7 +1388,58 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         Real sum = volWgtSumMF(lev,rhs_lev,0,*detJ_cc[lev],*mapfac[lev][MapFacType::m_x],*mapfac[lev][MapFacType::m_y],false,local);
 
         if (mg_verbose > 0) {
-            Print() << "Max/L2 norm of divergence after  solve at level " << lev << " : " << rhs_lev.norm0() << " " <<
+            const Real post_projection_linf = rhs_lev.norm0();
+            MultiFab abs_projection_divergence(
+                rhs_lev.boxArray(), rhs_lev.DistributionMap(), 1, 0);
+            for (MFIter mfi(rhs_lev); mfi.isValid(); ++mfi) {
+                const Box bx = mfi.validbox();
+                const auto src = rhs_lev.const_array(mfi);
+                const auto dst = abs_projection_divergence.array(mfi);
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                    dst(i,j,k) = amrex::Math::abs(src(i,j,k));
+                });
+            }
+            const IntVect post_max_cell = abs_projection_divergence.maxIndex(0);
+            int post_max_rank = ParallelDescriptor::NProcs();
+            for (MFIter mfi(abs_projection_divergence); mfi.isValid(); ++mfi) {
+                if (mfi.validbox().contains(post_max_cell)) {
+                    post_max_rank = ParallelDescriptor::MyProc();
+                }
+            }
+            ParallelDescriptor::ReduceIntMin(post_max_rank);
+            int all_solvers_status = 0;
+            Real max_solver_residual = zero;
+            Real max_compatibility_mean = zero;
+            for (int isub = 0; isub < subdomains[lev].size(); ++isub) {
+                if (solve_status[isub] != 0) { all_solvers_status = 1; }
+                max_solver_residual = amrex::max(
+                    max_solver_residual, amrex::Math::abs(solve_residual[isub]));
+                max_compatibility_mean = amrex::max(
+                    max_compatibility_mean, amrex::Math::abs(compatibility_mean[isub]));
+            }
+            const Real relative_reduction = pre_projection_linf > zero
+                ? (pre_projection_linf - post_projection_linf) / pre_projection_linf
+                : zero;
+            amrex::Print() << "ERF_TERRAIN_PROJECTION_EVENT"
+                           << " step=" << istep[lev]
+                           << " projection_call=" << projection_call
+                           << " time=" << l_time
+                           << " dt=" << l_dt_d
+                           << " level=" << lev
+                           << " solver=" << terrain_poisson_solver
+                           << " regions=" << subdomains[lev].size()
+                           << " pre_Linf=" << pre_projection_linf
+                           << " post_Linf=" << post_projection_linf
+                           << " post_max_cell=" << post_max_cell
+                           << " post_max_rank=" << post_max_rank
+                           << " relative_reduction=" << relative_reduction
+                           << " solve_status=" << all_solvers_status
+                           << " solver_reltol=" << solverChoice.poisson_reltol
+                           << " solver_abstol=" << solverChoice.poisson_abstol
+                           << " residual=" << max_solver_residual
+                           << " compatibility_mean_max_abs=" << max_compatibility_mean
+                           << std::endl;
+            Print() << "Max/L2 norm of divergence after  solve at level " << lev << " : " << post_projection_linf << " " <<
                         rhs_lev.norm2() << " and volume-weighted sum " << sum << std::endl;
         }
 
@@ -871,6 +1473,16 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         // converted back with the horizontal momenta from before the projection.
         mom_mf[IntVars::xmom].FillBoundary(IntVect(0,0,1), geom[lev].periodicity());
         mom_mf[IntVars::ymom].FillBoundary(IntVect(0,0,1), geom[lev].periodicity());
+        if (lev > 0) {
+            fill_vertical_projection_ghost(mom_mf[IntVars::xmom],
+                                           coarse_xmom_old, coarse_xmom_new,
+                                           BCVars::xvel_bc, "WFromOmega");
+            fill_vertical_projection_ghost(mom_mf[IntVars::ymom],
+                                           coarse_ymom_old, coarse_ymom_new,
+                                           BCVars::yvel_bc, "WFromOmega");
+        }
+        validate_projection_stencil(mom_mf[IntVars::xmom],
+                                    mom_mf[IntVars::ymom], "WFromOmega");
 
         for (MFIter mfi(mom_mf[Vars::cons],TilingIfNotGPU()); mfi.isValid(); ++mfi)
         {

@@ -1,4 +1,12 @@
 if(ERF_ENABLE_TESTS OR ERF_ENABLE_UNIT_TESTS)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME TerrainMLMGProjectionChecker
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/check_terrain_mlmg_projection.py
+      --self-test)
+  set_tests_properties(TerrainMLMGProjectionChecker PROPERTIES
+    LABELS "unit;terrain;mlmg")
+
   if(NOT DEFINED ERF_TEST_NRANKS OR "${ERF_TEST_NRANKS}" STREQUAL "")
     set(ERF_TEST_NRANKS 2 CACHE STRING "Number of MPI ranks to use for each regression test" FORCE)
   else()
