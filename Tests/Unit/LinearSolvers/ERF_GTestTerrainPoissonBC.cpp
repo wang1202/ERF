@@ -130,7 +130,8 @@ TEST(TerrainMLMGRegion, RejectsUnvalidatedLevelAndDisconnectedRegionScopes)
 TEST(TerrainMLMGCompatibility, UsesPrecisionAppropriateDivergenceThreshold)
 {
     const amrex::Real tolerance = terrain_mlmg_compatibility_tolerance();
-    EXPECT_DOUBLE_EQ(tolerance, sizeof(amrex::Real) == sizeof(float) ? 1.e-4 : 1.e-6);
+    EXPECT_EQ(tolerance, sizeof(amrex::Real) == sizeof(float)
+                            ? amrex::Real(1.e-4) : amrex::Real(1.e-6));
     EXPECT_FALSE(terrain_mlmg_compatibility_mean_exceeds(tolerance));
     EXPECT_TRUE(terrain_mlmg_compatibility_mean_exceeds(tolerance * amrex::Real(1.01)));
     EXPECT_TRUE(terrain_mlmg_compatibility_mean_exceeds(
