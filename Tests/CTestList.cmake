@@ -2676,6 +2676,32 @@ function(add_test_terrain_mlmg_reject_incompatible TEST_NAME)
 endfunction()
 add_test_terrain_mlmg_reject_incompatible(TerrainMLMG_RejectIncompatibleSingularRHS)
 
+function(add_test_terrain_mlmg_reject_three_levels TEST_NAME)
+    set(TEST_FILES_DIR "TerrainHill")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/TerrainHill.i")
+    set(test_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=1"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DINPUT=${test_input}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DLOG=${test_log}"
+        "-DREQUIRED_MARKER=supports at most two ERF levels"
+        "-DRUNTIME_OPTIONS=erf.terrain_poisson_solver=mlmg erf.mg_v=2 max_step=0 amr.max_level=2 erf.box1.max_level=2"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunTerrainMLMGRejectIncompatible.cmake)
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        TIMEOUT 120
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "experimental;terrain;mlmg;negative"
+        ATTACHED_FILES_ON_FAIL "${test_log}")
+endfunction()
+add_test_terrain_mlmg_reject_three_levels(TerrainMLMG_RejectThreeLevelScope)
+
 # Two levels over a 100 m hill on a terrain-fitted mesh.  The zero-gradient
 # condition below the mesh is corrected by the terrain slope times a lateral
 # gradient that each box can only take one-sided in its outermost ghost
