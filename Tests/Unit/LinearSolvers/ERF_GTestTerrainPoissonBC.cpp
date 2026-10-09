@@ -3,7 +3,10 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
+
 #include "ERF_SolverUtils.H"
+#include "ERF_Constants.H"
 
 namespace {
 
@@ -188,4 +191,29 @@ TEST(TerrainMLMGConfiguration, RejectsUnsupportedConfigurationsWithInputNames)
     EXPECT_NE(terrain_mlmg_configuration_error(true, false, true, false).find("VariableDz mesh"), std::string::npos);
     EXPECT_NE(terrain_mlmg_configuration_error(true, true, false, false).find("erf.terrain_type=StaticFittedMesh"), std::string::npos);
     EXPECT_NE(terrain_mlmg_configuration_error(true, true, true, true).find("erf.use_real_bcs=true"), std::string::npos);
+}
+
+TEST(TerrainProjectionGhost, RejectsPrecisionSpecificFillSentinelsAndNonfiniteValues)
+{
+    EXPECT_TRUE(terrain_projection_ghost_value_invalid(bogus_large_value,
+                                                        bogus_large_value));
+    EXPECT_TRUE(terrain_projection_ghost_value_invalid(
+        bogus_large_value * amrex::Real(0.75), bogus_large_value));
+    EXPECT_TRUE(terrain_projection_ghost_value_invalid(
+        std::numeric_limits<amrex::Real>::max(), bogus_large_value));
+    EXPECT_TRUE(terrain_projection_ghost_value_invalid(
+        std::numeric_limits<amrex::Real>::quiet_NaN(), bogus_large_value));
+    EXPECT_TRUE(terrain_projection_ghost_value_invalid(
+        std::numeric_limits<amrex::Real>::infinity(), bogus_large_value));
+    EXPECT_FALSE(terrain_projection_ghost_value_invalid(amrex::Real(123.5),
+                                                         bogus_large_value));
+}
+
+TEST(TerrainProjectionGhost, CatchesSingleSentinelMagnitudeInEitherMeshPrecision)
+{
+    const amrex::Real single_precision_sentinel = amrex::Real(1.e18);
+    EXPECT_TRUE(terrain_projection_ghost_value_invalid(
+        single_precision_sentinel, single_precision_sentinel));
+    EXPECT_TRUE(terrain_projection_ghost_value_invalid(
+        single_precision_sentinel * amrex::Real(0.75), single_precision_sentinel));
 }

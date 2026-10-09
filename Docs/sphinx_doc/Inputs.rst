@@ -3517,28 +3517,27 @@ level. This is an independent per-level projection, not a coupled composite
 AMR Poisson solve. Connected irregular regions and partial refinement across a
 periodic seam are rejected with an input diagnostic.
 
-The coarse-fine vertical momentum ghosts used by the terrain projection are
-filled from coarse momentum after conversion to ERF's ``rho0``-weighted
-representation. This fill is applied before both the vorticity conversion and
-the reverse conversion after the projection correction. A one-rank H100 test
-of the two-level ``TerrainHill`` case with a partially refined vertical region
-completed with finite fields and reduced the initial level-1 divergence from
-``L_inf = 3.43e-1`` to ``1.08e-9``. This is focused experimental evidence, not
-validation of every AMR layout: a two-rank run with multiple boxes and
-x/y/z box splits also completed, but disconnected regions, restart/regrid,
-three levels, CPU, and no-FFT builds remain to be tested. Do not assume general
-multi-level production support from these focused cases. The default solver selection remains `gmres_fft`. The coarse-fine
-momentum ghost fill is shared before either projection backend; on this
-partial-vertical fixture GMRES+FFT receives finite momentum, then its legacy
-FFT path rejects the shortened vertical solve region because its `dz`
-vector does not span the full level domain.
+The projection implementation fills vertical coarse-fine momentum ghosts
+through face-centered FillPatchTwoLevels using coarse momentum converted to
+ERF's rho0-weighted representation. The fill is intended to run before both
+the vorticity conversion and the reverse conversion after projection. This
+lifecycle and time interpolation are under current-source validation.
+Earlier one- and two-rank H100 TerrainHill runs completed on a partially
+refined vertical layout, but they used dirty pre-rebase executables and do not
+establish correctness of the current source. The partial-height legacy
+GMRES+FFT path also has a known assertion because its dz vector does not span
+the shortened vertical solve region.
 
-A full-height two-level comparison completed one timestep with both backends.
-The initial projection reduced L_inf divergence below 1e-8 on both levels,
-but later fine-level GMRES projections reached 2.15e-3 while MLMG remained
-below 1e-8. Final state-field differences and the unresolved boundary-flux
-comparison are recorded in `terrain_mlmg_amr_validation.md`; this is not a
-solver-parity result.
+MLMG remains experimental, opt-in, and not merge-ready. Its implementation
+constructs independent single-level operators for rectangular solve regions;
+it is not a composite AMR Poisson solve. The fine-level GMRES discrepancy
+previously measured at 2.15e-3 has not been resolved with independent residual
+and flux evidence on the current source. Disconnected regions, three-level
+layouts, restart/regrid, boundary variants, precision coverage, and final-
+source solver parity remain unverified. Do not infer general multi-level
+production support or a performance improvement from the earlier focused
+runs. See terrain_mlmg_merge_readiness.md for the authoritative current-source
+test matrix and explicit merge verdict.
 
 Both terrain solvers use a homogeneous Neumann pressure-correction condition
 at the lower z face when z is nonperiodic, including when the physical input

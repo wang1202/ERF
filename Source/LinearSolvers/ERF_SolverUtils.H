@@ -27,6 +27,21 @@ inline constexpr char const* terrain_poisson_solver_default () noexcept
 }
 
 /**
+ * Detect an invalid value in a terrain-projection momentum ghost.
+ *
+ * Fill buffers are initialized with ERF's bogus_large_value, whose magnitude
+ * differs substantially between SINGLE and DOUBLE builds. Comparing against
+ * a fixed 1.e100 threshold accepts the SINGLE sentinel. Reject values at or
+ * above half the actual fill sentinel while allowing physically valid values.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+bool terrain_projection_ghost_value_invalid (Real value, Real fill_sentinel) noexcept
+{
+    return !amrex::Math::isfinite(value) ||
+           amrex::Math::abs(value) >= Real(0.5) * amrex::Math::abs(fill_sentinel);
+}
+
+/**
  * Return an actionable error for an unsupported terrain Poisson solver name.
  */
 inline std::string

@@ -1,5 +1,7 @@
 # Terrain MLMG coarse-fine AMR validation
 
+> **Historical evidence only:** All run results below predate the current rebased source and are from dirty executables. They do not validate the current branch. The authoritative current-source test matrix, blockers, and merge verdict are in [terrain_mlmg_merge_readiness.md](terrain_mlmg_merge_readiness.md).
+
 Date: 2026-10-09
 
 ## Status

@@ -397,12 +397,14 @@ public:
                          amrex::MultiFab& rhs, amrex::MultiFab& p,
                          amrex::Array<amrex::MultiFab,AMREX_SPACEDIM>& fluxes);
 #endif
-    void solve_with_gmres (int lev, const amrex::Box& subdomain,
+    int solve_with_gmres (int lev, amrex::Long projection_call, double l_time, double l_dt,
+                           const amrex::Box& subdomain,
                            amrex::MultiFab& rhs, amrex::MultiFab& p,
                            amrex::Array<amrex::MultiFab,AMREX_SPACEDIM>& fluxes,
                            amrex::MultiFab& ax_sub, amrex::MultiFab& ay_sub,
                            amrex::MultiFab& az_sub,
-                           amrex::MultiFab& /*dJ_sub*/, amrex::MultiFab& znd_sub);
+                           amrex::MultiFab& /*dJ_sub*/, amrex::MultiFab& znd_sub,
+                           amrex::Real& solver_residual);
 
     void ImposeBCsOnPhi (int lev, amrex::MultiFab& phi, const amrex::Box& subdomain);
 

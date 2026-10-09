@@ -1,5 +1,7 @@
 # Terrain MLMG PR validation
 
+> **Historical review record:** This document describes the earlier level-zero review state and dirty executable runs. Current rebased-source evidence and the authoritative verdict are in [terrain_mlmg_merge_readiness.md](terrain_mlmg_merge_readiness.md).
+
 Date: 2026-10-08
 
 > Historical level-zero review record. The subsequent coarse-fine AMR work and
