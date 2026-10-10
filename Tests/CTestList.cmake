@@ -2743,6 +2743,13 @@ add_test_terrain_mlmg_reject_scope(
     "must be gmres_fft or mlmg"
     "erf.anelastic=1 erf.terrain_poisson_solver=invalid erf.mg_v=2 max_step=0")
 
+if(NOT ERF_ENABLE_FFT)
+    add_test_terrain_mlmg_reject_scope(
+        TerrainProjection_RejectGMRESWithoutFFT
+        "requires an FFT-enabled build"
+        "erf.anelastic=1 erf.terrain_poisson_solver=gmres_fft erf.mg_v=2 max_step=0")
+endif()
+
 # Two levels over a 100 m hill on a terrain-fitted mesh.  The zero-gradient
 # condition below the mesh is corrected by the terrain slope times a lateral
 # gradient that each box can only take one-sided in its outermost ghost
