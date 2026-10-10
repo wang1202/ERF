@@ -124,8 +124,8 @@ set(continuous_options
     erf.check_int=-1
     erf.plot_int_1=1
     erf.plot_face_vels=1
-    amr.max_grid_size_x=8
-    amr.max_grid_size_y=8
+    amr.max_grid_size_x=16
+    amr.max_grid_size_y=16
     amr.max_grid_size_z=8
     erf.regrid_int=1)
 execute_process(
