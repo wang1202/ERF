@@ -3520,6 +3520,17 @@ levels, disconnected regions, connected irregular regions, and partial
 refinement across a periodic seam are rejected with an input diagnostic.
 Singular homogeneous-normal regions whose weighted compatibility mean exceeds
 the precision-specific divergence tolerance are also rejected before solve.
+The present MLMG operator is explicitly restricted to unit horizontal map
+factors: ERF checks all horizontal map-factor arrays once when each level is
+created and rejects any deviation greater than 64 machine epsilons. These map
+factors are static for the supported fitted-terrain mesh. For example,
+``erf.test_mapfactor = true`` is rejected for ``mlmg``. This guard avoids applying an operator/flux combination that has not
+been independently verified for spatially varying map factors; the default
+GMRES+FFT path is unaffected.
+
+The solver choice and these configuration restrictions are checked at the
+start of initialization, before WRFInput/Metgrid boundary files are opened.
+An executable regression covers the real-boundary rejection.
 
 The projection fills vertical coarse-fine momentum ghosts through face-centered
 FillPatchTwoLevels using coarse momentum converted to ERF's rho0-weighted
@@ -3532,10 +3543,13 @@ DOUBLE control produced the same GMRES fine-level divergence sequence,
 including its large later residual; that is a pre-existing GMRES limitation
 and remains outside the MLMG implementation.
 
-MLMG remains experimental, opt-in, and not merge-ready. The lifecycle,
-restart/regrid, boundary variants, map-factor coverage, full-source performance,
-and broader upstream regression suite remain incomplete. Do not infer general
-multi-level production support or a performance improvement. See
+MLMG remains experimental and opt-in. It is not a coupled composite AMR solve,
+and the restriction above means nonunity horizontal map factors are unsupported.
+Boundary regressions exercise the effective physical and artificial boundary
+mapping. Opt-in phase timers are available, but repeated matched measurements
+for the final source, memory measurements, and the broader upstream regression
+suite remain incomplete. Do not infer unrestricted multi-level production
+support or a general performance improvement. See
 terrain_mlmg_merge_readiness.md for the authoritative current-source test
 matrix and explicit merge verdict.
 
@@ -3549,7 +3563,13 @@ Fewer MLMG iterations alone do not imply a faster model timestep; compare full
 projection and timestep timings at the same resolution and decomposition.
 
 Set ``erf.mg_v > 0`` to print the selected terrain solver once and see MLMG
-iteration output. The following is the solver-specific part of a minimal
+iteration output. For phase measurements, set
+``erf.terrain_poisson_timing = true``. It reports coarse/fine ghost filling,
+solver setup, solve, flux calculation, correction application, and total
+projection time for both solver choices. GPU runs synchronize around the timed
+phases, so leave this diagnostic disabled for normal production timing.
+ERF's existing timestep wall-time output can be used to measure the full
+timestep. The following is the solver-specific part of a minimal
 configuration; add it to a valid 3D static fitted-terrain case:
 
 .. code-block:: ini

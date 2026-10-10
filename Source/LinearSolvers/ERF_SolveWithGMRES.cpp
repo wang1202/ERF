@@ -34,6 +34,13 @@ int ERF::solve_with_gmres (int lev, Long projection_call, double l_time, double 
                             MultiFab& dJ_sub, MultiFab& znd_sub,
                             Real& solver_residual)
 {
+    const bool terrain_poisson_timing = terrain_poisson_timing_enabled();
+    double setup_elapsed = 0.0;
+    double solve_elapsed = 0.0;
+    double get_fluxes_elapsed = 0.0;
+    double map_factor_scale_elapsed = 0.0;
+    double impose_phi_bc_elapsed = 0.0;
+
 #ifdef ERF_USE_FFT
     BL_PROFILE("ERF::solve_with_gmres()");
 
@@ -72,6 +79,8 @@ int ERF::solve_with_gmres (int lev, Long projection_call, double l_time, double 
 
     amrex::GMRES<MultiFab, TerrainPoisson> gmsolver;
 
+    if (terrain_poisson_timing) { terrain_poisson_timing_sync(); }
+    const double setup_start = terrain_poisson_timing ? ParallelDescriptor::second() : 0.0;
     TerrainPoisson tp(my_geom, Geom(lev), rhs.boxArray(), rhs.DistributionMap(), domain_bc_type,
                       stretched_dz_d[lev], ax_sub, ay_sub, az_sub, dJ_sub, &znd_sub,
                       solverChoice.use_real_bcs);
@@ -83,8 +92,18 @@ int ERF::solve_with_gmres (int lev, Long projection_call, double l_time, double 
     gmsolver.setRestartLength(50);
 
     tp.usePrecond(true);
+    if (terrain_poisson_timing) {
+        terrain_poisson_timing_sync();
+        setup_elapsed = ParallelDescriptor::second() - setup_start;
+    }
 
+    if (terrain_poisson_timing) { terrain_poisson_timing_sync(); }
+    const double solve_start = terrain_poisson_timing ? ParallelDescriptor::second() : 0.0;
     gmsolver.solve(phi, rhs, reltol, abstol);
+    if (terrain_poisson_timing) {
+        terrain_poisson_timing_sync();
+        solve_elapsed = ParallelDescriptor::second() - solve_start;
+    }
 
     const int solve_status = gmsolver.getStatus();
     solver_residual = gmsolver.getResidualNorm();
@@ -130,7 +149,13 @@ int ERF::solve_with_gmres (int lev, Long projection_call, double l_time, double 
                        << " abstol=" << abstol << std::endl;
     }
 
+    if (terrain_poisson_timing) { terrain_poisson_timing_sync(); }
+    const double get_fluxes_start = terrain_poisson_timing ? ParallelDescriptor::second() : 0.0;
     tp.getFluxes(phi, fluxes);
+    if (terrain_poisson_timing) {
+        terrain_poisson_timing_sync();
+        get_fluxes_elapsed = ParallelDescriptor::second() - get_fluxes_start;
+    }
 
     auto report_normal_flux = [&] (char const* stage) {
         if (mg_verbose <= 1) { return; }
@@ -176,6 +201,8 @@ int ERF::solve_with_gmres (int lev, Long projection_call, double l_time, double 
     };
     report_normal_flux("raw_getFluxes");
 
+    if (terrain_poisson_timing) { terrain_poisson_timing_sync(); }
+    const double map_factor_scale_start = terrain_poisson_timing ? ParallelDescriptor::second() : 0.0;
     for (MFIter mfi(phi); mfi.isValid(); ++mfi)
     {
         Box xbx = mfi.nodaltilebox(0);
@@ -194,6 +221,11 @@ int ERF::solve_with_gmres (int lev, Long projection_call, double l_time, double 
             fy_ar(i,j,k) *= mf_vy(i,j,0);
         });
     } // mfi
+    if (terrain_poisson_timing) {
+        terrain_poisson_timing_sync();
+        map_factor_scale_elapsed =
+            ParallelDescriptor::second() - map_factor_scale_start;
+    }
     report_normal_flux("after_map_scaling");
 #else
     amrex::ignore_unused(lev, projection_call, l_time, l_dt, subdomain, rhs, phi, fluxes,
@@ -203,7 +235,32 @@ int ERF::solve_with_gmres (int lev, Long projection_call, double l_time, double 
     // ****************************************************************************
     // Impose bc's on pprime
     // ****************************************************************************
+    if (terrain_poisson_timing) { terrain_poisson_timing_sync(); }
+    const double impose_phi_bc_start = terrain_poisson_timing ? ParallelDescriptor::second() : 0.0;
     ImposeBCsOnPhi(lev, phi, subdomain);
+    if (terrain_poisson_timing) {
+        terrain_poisson_timing_sync();
+        impose_phi_bc_elapsed =
+            ParallelDescriptor::second() - impose_phi_bc_start;
+
+        Real max_setup = static_cast<Real>(setup_elapsed);
+        Real max_solve = static_cast<Real>(solve_elapsed);
+        Real max_flux = static_cast<Real>(get_fluxes_elapsed);
+        Real max_map_scale = static_cast<Real>(map_factor_scale_elapsed);
+        Real max_impose_bc = static_cast<Real>(impose_phi_bc_elapsed);
+        ParallelDescriptor::ReduceRealMax(max_setup);
+        ParallelDescriptor::ReduceRealMax(max_solve);
+        ParallelDescriptor::ReduceRealMax(max_flux);
+        ParallelDescriptor::ReduceRealMax(max_map_scale);
+        ParallelDescriptor::ReduceRealMax(max_impose_bc);
+        amrex::Print() << "ERF_TERRAIN_TIMING solver=gmres_fft level=" << lev
+                       << " projection_call=" << projection_call
+                       << " setup_s=" << max_setup
+                       << " solve_s=" << max_solve
+                       << " getFluxes_s=" << max_flux
+                       << " map_factor_flux_scaling_s=" << max_map_scale
+                       << " impose_phi_bc_s=" << max_impose_bc << std::endl;
+    }
 #ifdef ERF_USE_FFT
     return solve_status;
 #else

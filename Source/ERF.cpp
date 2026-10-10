@@ -20,6 +20,8 @@
 #include "ERF_IntervalMeansCheckpoint.H"
 #include "ERF_PlotfileSelection.H"
 #include "ERF_Utils.H"
+#include "ERF_SolverUtils.H"
+#include "AMReX_ParmParse.H"
 #include "ERF_TerrainMetrics.H"
 #include "ERF_SrcHeaders.H"
 //#include "ERF_BuoyancyUtils.H"
@@ -897,6 +899,24 @@ ERF::InitData ()
 void
 ERF::InitData_pre ()
 {
+    // Reject unsupported MLMG configurations before InitFromScratch can open
+    // WRFInput/Metgrid files or construct real-boundary data readers. The
+    // projection routine retains the same validation as a defensive check.
+    std::string terrain_poisson_solver = terrain_poisson_solver_default();
+    ParmParse pp_erf("erf");
+    pp_erf.query("terrain_poisson_solver", terrain_poisson_solver);
+    const std::string solver_error =
+        terrain_poisson_solver_choice_error(terrain_poisson_solver);
+    if (!solver_error.empty()) { Abort(solver_error); }
+    if (terrain_poisson_solver == "mlmg") {
+        const std::string config_error = terrain_mlmg_configuration_error(
+            AMREX_SPACEDIM == 3,
+            solverChoice.mesh_type == MeshType::VariableDz,
+            solverChoice.terrain_type == TerrainType::StaticFittedMesh,
+            solverChoice.use_real_bcs);
+        if (!config_error.empty()) { Abort(config_error); }
+    }
+
     if (m_driver_has_atm2ocn_coupling && verbose > 0) {
         amrex::Print() << "ERF InitData_pre: driver-managed atm2ocn coupling enabled"
                        << " two_way=" << (m_driver_uses_two_way_coupling ? 1 : 0)
@@ -3689,6 +3709,24 @@ ERF::ReadParameters ()
                 amrex::Print() <<" Adding stop time " << stop_time << " to start_time " << start_time << std::endl;
                 stop_time += start_time;
             }
+        }
+    }
+
+    // Validate the opt-in terrain solver before NetCDF-specific WRFInput
+    // preconditions can mask an unsupported real-boundary configuration.
+    {
+        std::string terrain_poisson_solver = terrain_poisson_solver_default();
+        pp.query("terrain_poisson_solver", terrain_poisson_solver);
+        const std::string solver_error =
+            terrain_poisson_solver_choice_error(terrain_poisson_solver);
+        if (!solver_error.empty()) { Abort(solver_error); }
+        if (terrain_poisson_solver == "mlmg") {
+            const std::string config_error = terrain_mlmg_configuration_error(
+                AMREX_SPACEDIM == 3,
+                solverChoice.mesh_type == MeshType::VariableDz,
+                solverChoice.terrain_type == TerrainType::StaticFittedMesh,
+                solverChoice.use_real_bcs);
+            if (!config_error.empty()) { Abort(config_error); }
         }
     }
 

@@ -160,6 +160,14 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
     static Long projection_call_counter = 0;
     const Long projection_call = projection_call_counter++;
 
+    const bool terrain_poisson_timing = terrain_poisson_timing_enabled();
+    double projection_start_time = 0.0;
+    if (terrain_poisson_timing) {
+        terrain_poisson_timing_sync();
+        projection_start_time = ParallelDescriptor::second();
+    }
+    double coarse_fine_ghost_fill_time = 0.0;
+
     // Keep the existing GMRES+FFT solver as the default. The experimental
     // multigrid path is opt-in through erf.terrain_poisson_solver = mlmg.
     static const std::string terrain_poisson_solver = [] () {
@@ -182,6 +190,40 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         if (!error.empty()) {
             amrex::Abort(error);
         }
+        // The operator and post-solve flux scaling have not been validated for
+        // nonunity horizontal map factors. Static fitted-terrain map factors
+        // are immutable after a level is created, so inspect each new level
+        // once rather than performing several global extrema reductions on
+        // every projection call.
+        static int checked_map_factor_levels = 0;
+        for (int check_lev = checked_map_factor_levels;
+             check_lev < static_cast<int>(subdomains.size()); ++check_lev) {
+            Real max_abs_deviation = 0.0;
+            if (mapfac[check_lev].size() < MapFacType::num) {
+                amrex::Abort("erf.terrain_poisson_solver=mlmg cannot inspect the horizontal map factors "
+                             "at level " + std::to_string(check_lev));
+            }
+            for (int imap = 0; imap < MapFacType::num; ++imap) {
+                if (!mapfac[check_lev][imap]) {
+                    amrex::Abort("erf.terrain_poisson_solver=mlmg found a missing horizontal map factor "
+                                 "at level " + std::to_string(check_lev));
+                }
+                const MultiFab& scale = *mapfac[check_lev][imap];
+                const Real min_scale = scale.min(0);
+                const Real max_scale = scale.max(0);
+                const Real low_deviation = amrex::Math::abs(min_scale - Real(1.0));
+                const Real high_deviation = amrex::Math::abs(max_scale - Real(1.0));
+                if (low_deviation > max_abs_deviation) { max_abs_deviation = low_deviation; }
+                if (high_deviation > max_abs_deviation) { max_abs_deviation = high_deviation; }
+            }
+            const std::string map_factor_error =
+                terrain_mlmg_map_factor_error(max_abs_deviation);
+            if (!map_factor_error.empty()) {
+                amrex::Abort(map_factor_error + "; level=" + std::to_string(check_lev));
+            }
+        }
+        checked_map_factor_levels = static_cast<int>(subdomains.size());
+
         // Validate every currently constructed solve region before this call
         // can solve any level. Checking only `lev` lets a coarse projection
         // complete before a later fine-level configuration is rejected.
@@ -313,6 +355,17 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
                              mom_mf[IntVars::zmom],
                              Geom(lev).Domain(),
                              domain_bcs_type);
+    }
+
+    // ERF's face-state contract assigns duplicate shared faces to the lower
+    // BoxArray index. Reconcile the rho0-weighted projection inputs before
+    // forming divergence so a split layout or restart cannot feed different
+    // copies of one physical face to neighboring cells. Keep the established
+    // default GMRES path unchanged.
+    if (terrain_poisson_solver == "mlmg") {
+        mom_mf[IntVars::xmom].OverrideSync(geom[lev].periodicity());
+        mom_mf[IntVars::ymom].OverrideSync(geom[lev].periodicity());
+        mom_mf[IntVars::zmom].OverrideSync(geom[lev].periodicity());
     }
 
     // OmegaFromW and WFromOmega need rho0-weighted x/y momentum one cell above
@@ -516,7 +569,12 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         }
     };
 
+    double omega_ghost_fill_start = 0.0;
     if (solverChoice.mesh_type == MeshType::VariableDz) {
+        if (terrain_poisson_timing) {
+            terrain_poisson_timing_sync();
+            omega_ghost_fill_start = ParallelDescriptor::second();
+        }
         mom_mf[IntVars::xmom].FillBoundary(IntVect(0,0,1), geom[lev].periodicity());
         mom_mf[IntVars::ymom].FillBoundary(IntVect(0,0,1), geom[lev].periodicity());
     }
@@ -568,6 +626,11 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         fill_vertical_projection_ghost(mom_mf[IntVars::ymom],
                                        coarse_ymom_old, coarse_ymom_new,
                                        BCVars::yvel_bc, "OmegaFromW");
+    }
+    if (solverChoice.mesh_type == MeshType::VariableDz && terrain_poisson_timing) {
+        terrain_poisson_timing_sync();
+        coarse_fine_ghost_fill_time +=
+            ParallelDescriptor::second() - omega_ghost_fill_start;
     }
 
     //
@@ -1094,7 +1157,8 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         else if (solverChoice.mesh_type == MeshType::VariableDz) {
             if (terrain_poisson_solver == "mlmg") {
 #if (AMREX_SPACEDIM == 3)
-                const double setup_start = ParallelDescriptor::second();
+                if (terrain_poisson_timing) { terrain_poisson_timing_sync(); }
+                const double setup_start = terrain_poisson_timing ? ParallelDescriptor::second() : 0.0;
                 Vector<Geometry> ml_geom{terrain_mlmg_region_geometry(Geom(lev), my_region)};
                 Vector<BoxArray> ml_grids{rhs_sub[0].boxArray()};
                 Vector<DistributionMapping> ml_dmap{rhs_sub[0].DistributionMap()};
@@ -1114,7 +1178,9 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
                 mlmg.setMaxIter(200);
                 mlmg.setVerbose(mg_verbose);
                 mlmg.setBottomVerbose(0);
-                const double setup_elapsed = ParallelDescriptor::second() - setup_start;
+                if (terrain_poisson_timing) { terrain_poisson_timing_sync(); }
+                const double setup_elapsed = terrain_poisson_timing
+                    ? ParallelDescriptor::second() - setup_start : 0.0;
                 if (mg_verbose > 0) {
                     amrex::Print() << "Terrain MLMG region: ERF level " << lev
                                    << ", subdomain " << isub << ", bounds "
@@ -1138,10 +1204,13 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
                                    << terrain_region_bcs.is_singular << std::endl;
                 }
 
-                const double solve_start = ParallelDescriptor::second();
+                if (terrain_poisson_timing) { terrain_poisson_timing_sync(); }
+                const double solve_start = terrain_poisson_timing ? ParallelDescriptor::second() : 0.0;
                 mlmg.solve(GetVecOfPtrs(phi_sub), GetVecOfConstPtrs(rhs_sub),
                            solverChoice.poisson_reltol, solverChoice.poisson_abstol);
-                const double solve_elapsed = ParallelDescriptor::second() - solve_start;
+                if (terrain_poisson_timing) { terrain_poisson_timing_sync(); }
+                const double solve_elapsed = terrain_poisson_timing
+                    ? ParallelDescriptor::second() - solve_start : 0.0;
                 solve_residual[isub] = mlmg.getFinalResidual();
                 const Real mlmg_tolerance = amrex::max(
                     solverChoice.poisson_reltol * mlmg.getInitResidual(),
@@ -1155,10 +1224,13 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
                 Array<MultiFab*,AMREX_SPACEDIM> terrain_fluxes{
                     &fluxes_sub[0][0], &fluxes_sub[0][1], &fluxes_sub[0][2]
                 };
-                const double flux_start = ParallelDescriptor::second();
+                if (terrain_poisson_timing) { terrain_poisson_timing_sync(); }
+                const double flux_start = terrain_poisson_timing ? ParallelDescriptor::second() : 0.0;
                 terrain_op.compFlux(0, terrain_fluxes, phi_sub[0],
                                     MLTerrainPoisson::Location::FaceCenter);
-                const double flux_elapsed = ParallelDescriptor::second() - flux_start;
+                if (terrain_poisson_timing) { terrain_poisson_timing_sync(); }
+                const double flux_elapsed = terrain_poisson_timing
+                    ? ParallelDescriptor::second() - flux_start : 0.0;
 
                 // Match the map-factor treatment used by the GMRES terrain path.
                 for (MFIter mfi(phi_sub[0]); mfi.isValid(); ++mfi)
@@ -1233,6 +1305,19 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
                 }
 
                 ImposeBCsOnPhi(lev, phi_sub[0], my_region);
+                if (terrain_poisson_timing) {
+                    Real max_setup = static_cast<Real>(setup_elapsed);
+                    Real max_solve = static_cast<Real>(solve_elapsed);
+                    Real max_flux = static_cast<Real>(flux_elapsed);
+                    ParallelDescriptor::ReduceRealMax(max_setup);
+                    ParallelDescriptor::ReduceRealMax(max_solve);
+                    ParallelDescriptor::ReduceRealMax(max_flux);
+                    amrex::Print() << "ERF_TERRAIN_TIMING solver=mlmg level=" << lev
+                                   << " subdomain=" << isub
+                                   << " setup_s=" << max_setup
+                                   << " solve_s=" << max_solve
+                                   << " compFlux_s=" << max_flux << std::endl;
+                }
                 if (mg_verbose > 0) {
                     amrex::Print() << "Terrain MLMG level " << lev << " subdomain " << isub
                                    << ": iterations=" << mlmg.getNumIters()
@@ -1354,9 +1439,50 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
     // ****************************************************************************
     // Subtract dt grad(phi) from the momenta (rho0u, rho0v, Omega)
     // ****************************************************************************
+    // In diagnostic mode compare duplicate face values against ERF's
+    // lower-BoxArray-index ownership rule before and after correction. Audit
+    // momentum and the solver-produced flux separately to locate any mismatch;
+    // an OverrideSync copy is used so this instrumentation never changes state.
+    auto audit_shared_faces = [&] (MultiFab const& face_values,
+                                    char const* component,
+                                    char const* stage) {
+        MultiFab owner_values(face_values.boxArray(),
+                              face_values.DistributionMap(), 1, 0);
+        MultiFab::Copy(owner_values, face_values, 0, 0, 1, 0);
+        owner_values.OverrideSync(geom[lev].periodicity());
+        MultiFab::Subtract(owner_values, face_values, 0, 0, 1, 0);
+        const Real difference = owner_values.norm0();
+        const Real magnitude = face_values.norm0();
+        const Real tolerance = Real(64) * std::numeric_limits<Real>::epsilon() *
+                               amrex::max(Real(1.0), magnitude);
+        amrex::Print() << "ERF_TERRAIN_SHARED_FACE_AUDIT level=" << lev
+                       << " component=" << component
+                       << " stage=" << stage
+                       << " difference_linf=" << difference
+                       << " tolerance=" << tolerance << std::endl;
+        return difference;
+    };
+    if (terrain_poisson_solver == "mlmg" && mg_verbose > 1) {
+        audit_shared_faces(mom_mf[IntVars::xmom], "xmom", "pre_correction_momentum");
+        audit_shared_faces(mom_mf[IntVars::ymom], "ymom", "pre_correction_momentum");
+        audit_shared_faces(mom_mf[IntVars::zmom], "zmom", "pre_correction_momentum");
+        audit_shared_faces(fluxes[0][0], "xmom", "correction_flux");
+        audit_shared_faces(fluxes[0][1], "ymom", "correction_flux");
+        audit_shared_faces(fluxes[0][2], "zmom", "correction_flux");
+    }
+
+    if (terrain_poisson_timing) { terrain_poisson_timing_sync(); }
+    const double correction_start_time = terrain_poisson_timing
+        ? ParallelDescriptor::second() : 0.0;
     MultiFab::Add(mom_mf[IntVars::xmom],fluxes[0][0],0,0,1,0);
     MultiFab::Add(mom_mf[IntVars::ymom],fluxes[0][1],0,0,1,0);
     MultiFab::Add(mom_mf[IntVars::zmom],fluxes[0][2],0,0,1,0);
+
+    if (terrain_poisson_solver == "mlmg" && mg_verbose > 1) {
+        audit_shared_faces(mom_mf[IntVars::xmom], "xmom", "post_correction_momentum");
+        audit_shared_faces(mom_mf[IntVars::ymom], "ymom", "post_correction_momentum");
+        audit_shared_faces(mom_mf[IntVars::zmom], "zmom", "post_correction_momentum");
+    }
 
     // ****************************************************************************
     // Define gradp from fluxes -- note that fluxes is dt * change in Gp
@@ -1369,6 +1495,9 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
     gradp[lev][GpVars::gpx].FillBoundary(geom_tmp[0].periodicity());
     gradp[lev][GpVars::gpy].FillBoundary(geom_tmp[0].periodicity());
     gradp[lev][GpVars::gpz].FillBoundary(geom_tmp[0].periodicity());
+    if (terrain_poisson_timing) { terrain_poisson_timing_sync(); }
+    const double correction_elapsed = terrain_poisson_timing
+        ? ParallelDescriptor::second() - correction_start_time : 0.0;
 
     //
     // This call is only to verify the divergence after the solve
@@ -1476,6 +1605,11 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         // but the fluxes were added to the valid faces only. Fill the ghost faces again, or the
         // lowest and highest w-face of a box inside the domain (a BoxArray split in z) would be
         // converted back with the horizontal momenta from before the projection.
+        double w_omega_ghost_fill_start = 0.0;
+        if (terrain_poisson_timing) {
+            terrain_poisson_timing_sync();
+            w_omega_ghost_fill_start = ParallelDescriptor::second();
+        }
         mom_mf[IntVars::xmom].FillBoundary(IntVect(0,0,1), geom[lev].periodicity());
         mom_mf[IntVars::ymom].FillBoundary(IntVect(0,0,1), geom[lev].periodicity());
         if (lev > 0) {
@@ -1485,6 +1619,11 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
             fill_vertical_projection_ghost(mom_mf[IntVars::ymom],
                                            coarse_ymom_old, coarse_ymom_new,
                                            BCVars::yvel_bc, "WFromOmega");
+        }
+        if (terrain_poisson_timing) {
+            terrain_poisson_timing_sync();
+            coarse_fine_ghost_fill_time +=
+                ParallelDescriptor::second() - w_omega_ghost_fill_start;
         }
         validate_projection_stencil(mom_mf[IntVars::xmom],
                                     mom_mf[IntVars::ymom], "WFromOmega");
@@ -1522,4 +1661,22 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
     // Update pressure variable with phi -- note that phi is dt * change in pressure
     // ****************************************************************************
     MultiFab::Saxpy(pp_inc[lev], one/l_dt, phi_lev,0,0,1,1);
+
+    if (terrain_poisson_timing) {
+        terrain_poisson_timing_sync();
+        Real max_ghost_fill = static_cast<Real>(coarse_fine_ghost_fill_time);
+        Real max_correction = static_cast<Real>(correction_elapsed);
+        Real max_projection = static_cast<Real>(
+            ParallelDescriptor::second() - projection_start_time);
+        ParallelDescriptor::ReduceRealMax(max_ghost_fill);
+        ParallelDescriptor::ReduceRealMax(max_correction);
+        ParallelDescriptor::ReduceRealMax(max_projection);
+        amrex::Print() << "ERF_TERRAIN_TIMING solver=" << terrain_poisson_solver
+                       << " level=" << lev
+                       << " projection_call=" << projection_call
+                       << " projection_momentum_ghost_fill_s=" << max_ghost_fill
+                       << " correction_application_s=" << max_correction
+                       << " total_projection_s=" << max_projection
+                       << std::endl;
+    }
 }

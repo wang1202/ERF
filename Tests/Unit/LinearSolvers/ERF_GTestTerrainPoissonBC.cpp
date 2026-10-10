@@ -209,6 +209,20 @@ TEST(TerrainMLMGConfiguration, AcceptsSupportedConfiguration)
     EXPECT_TRUE(terrain_mlmg_configuration_error(true, true, true, false).empty());
 }
 
+TEST(TerrainMLMGConfiguration, RestrictsUnvalidatedHorizontalMapFactorsToUnity)
+{
+    EXPECT_TRUE(terrain_mlmg_map_factor_error(amrex::Real(0.0)).empty());
+    EXPECT_TRUE(terrain_mlmg_map_factor_error(
+        amrex::Real(32.0) * std::numeric_limits<amrex::Real>::epsilon()).empty());
+    EXPECT_NE(terrain_mlmg_map_factor_error(amrex::Real(0.5)).find(
+                  "supports only unit horizontal map factors"),
+              std::string::npos);
+    EXPECT_NE(terrain_mlmg_map_factor_error(
+                  std::numeric_limits<amrex::Real>::quiet_NaN()).find(
+                  "supports only unit horizontal map factors"),
+              std::string::npos);
+}
+
 TEST(TerrainMLMGConfiguration, RejectsUnsupportedConfigurationsWithInputNames)
 {
     EXPECT_NE(terrain_mlmg_configuration_error(false, true, true, false).find("AMREX_SPACEDIM=3"), std::string::npos);

@@ -2642,6 +2642,94 @@ if(ERF_ENABLE_MPI)
     add_test_terrain_mlmg_amr(TerrainMLMG_TwoLevelPartialVertical_TwoRanks 2)
 endif()
 
+# Execute real AMR projections for physical and artificial boundary faces.
+# Effective BCs are checked from the solver's diagnostic; Neumann corrections
+# are checked by the projection log checker.
+function(add_test_terrain_mlmg_boundary TEST_NAME REQUIRED_EFFECTIVE_BCS REQUIRED_NEUMANN_FACES RUNTIME_OPTIONS)
+    set(TEST_FILES_DIR "TerrainHill")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    if(ERF_PRECISION STREQUAL "SINGLE")
+        set(_divergence_tolerance "1.0e-4")
+    else()
+        set(_divergence_tolerance "1.0e-6")
+    endif()
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/TerrainHill.i")
+    set(test_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}"
+        "-DNRANKS=1"
+        "-DEXPECTED_LEVELS=0,1"
+        "-DMIN_EVENTS_PER_LEVEL=1"
+        "-DFINAL_STEP=1"
+        "-DDIVERGENCE_TOLERANCE=${_divergence_tolerance}"
+        "-DREQUIRED_EFFECTIVE_BCS=${REQUIRED_EFFECTIVE_BCS}"
+        "-DREQUIRED_NEUMANN_FACES=${REQUIRED_NEUMANN_FACES}"
+        "-DNEUMANN_FLUX_TOLERANCE=1.0e-12"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DINPUT=${test_input}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DLOG=${test_log}"
+        "-DRUNTIME_OPTIONS=erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.mg_v=2 max_step=1 amr.max_grid_size_x=8 amr.max_grid_size_y=8 amr.max_grid_size_z=8 ${RUNTIME_OPTIONS}"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunTerrainMLMGAMR.cmake)
+    set_tests_properties(${TEST_NAME}
+        PROPERTIES
+        TIMEOUT 300
+        PROCESSORS 1
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "experimental;terrain;mlmg;amr;boundary"
+        ATTACHED_FILES_ON_FAIL "${test_log}")
+endfunction()
+
+add_test_terrain_mlmg_boundary(
+    TerrainMLMG_BC_LowerZOutflow_UpperZOutflow
+    "lo=(periodic,periodic,Neumann), hi=(periodic,periodic,Dirichlet), singular=0"
+    "0:z:lo,1:x:lo,1:x:hi,1:y:lo,1:y:hi,1:z:lo,1:z:hi"
+    "zlo.type=Outflow zhi.type=Outflow")
+add_test_terrain_mlmg_boundary(
+    TerrainMLMG_BC_LateralOutflow_MixedPhysicalArtificial
+    "lo=(Dirichlet,Dirichlet,Neumann), hi=(Dirichlet,Dirichlet,Neumann), singular=0"
+    "0:z:lo,0:z:hi,1:x:hi,1:y:lo,1:y:hi,1:z:lo,1:z:hi"
+    "geometry.is_periodic=0 0 0 xlo.type=Outflow xhi.type=Outflow ylo.type=Outflow yhi.type=Outflow erf.box1.in_box_lo=0 200 0 erf.box1.in_box_hi=800 600 300")
+add_test_terrain_mlmg_boundary(
+    TerrainMLMG_BC_TopOutflow_FullHeightFinePatch
+    "lo=(Neumann,Neumann,Neumann), hi=(Neumann,Neumann,Dirichlet), singular=0"
+    "0:z:lo,1:x:lo,1:x:hi,1:y:lo,1:y:hi,1:z:lo"
+    "zlo.type=Outflow zhi.type=Outflow erf.box1.in_box_lo=400 200 0 erf.box1.in_box_hi=1200 600 600")
+
+if(ERF_ENABLE_MPI)
+    set(TEST_NAME TerrainMLMG_OneRankTwoRankStateParity)
+    set(TEST_FILES_DIR "TerrainHill")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=2"
+        "-DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DCONFIG=$<CONFIG>"
+        "-DINPUT=${CURRENT_TEST_BINARY_DIR}/TerrainHill.i"
+        "-DSOUNDING=${CURRENT_TEST_BINARY_DIR}/input_sounding"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DFCOMPARE=${FCOMPARE_EXE}"
+        "-DLOG=${CURRENT_TEST_BINARY_DIR}/rank-parity.log"
+        "-DRTOL=1.0e-10"
+        "-DATOL=1.0e-12"
+        "-DRUNTIME_OPTIONS=erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.mg_v=2 max_step=1 amr.max_grid_size_x=8 amr.max_grid_size_y=8 amr.max_grid_size_z=8 erf.plot_int_1=1 erf.plot_face_vels=1 erf.sum_interval=1 erf.v=1"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunTerrainMLMGRankParity.cmake)
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        TIMEOUT 600
+        PROCESSORS 2
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "experimental;terrain;mlmg;amr;mpi;parity"
+        ATTACHED_FILES_ON_FAIL "${CURRENT_TEST_BINARY_DIR}/one_rank/simulation.log;${CURRENT_TEST_BINARY_DIR}/two_ranks/simulation.log;${CURRENT_TEST_BINARY_DIR}/plt-parity.log;${CURRENT_TEST_BINARY_DIR}/pltU-parity.log;${CURRENT_TEST_BINARY_DIR}/pltV-parity.log;${CURRENT_TEST_BINARY_DIR}/pltW-parity.log")
+endif()
+
 add_test(NAME TerrainMLMGProjectionChecker_SelfTest
     COMMAND ${Python3_EXECUTABLE}
         ${PROJECT_SOURCE_DIR}/Tests/check_terrain_mlmg_projection.py --self-test)
@@ -2752,6 +2840,41 @@ add_test_terrain_mlmg_reject_scope(
     TerrainMLMG_RejectUnsupportedTerrainGeometry
     "requires a VariableDz mesh"
     "erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.terrain_type=ImmersedForcing erf.immersed_forcing_substep=true eb2.small_volfrac=0.005 erf.mg_v=2 max_step=0")
+add_test_terrain_mlmg_reject_scope(
+    TerrainMLMG_RejectNonunitMapFactors
+    "supports only unit horizontal map factors"
+    "erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.mg_v=2 max_step=0 erf.test_mapfactor=true")
+if(ERF_ENABLE_MPI)
+    set(TEST_NAME TerrainMLMG_RejectNonunitMapFactors_TwoRanks)
+    set(TEST_FILES_DIR "TerrainHill")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/TerrainHill.i")
+    set(test_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=2"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DINPUT=${test_input}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DLOG=${test_log}"
+        "-DREQUIRED_MARKER=supports only unit horizontal map factors"
+        "-DREJECT_BEFORE_PROJECTION=ON"
+        "-DRUNTIME_OPTIONS=erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.mg_v=2 max_step=0 erf.test_mapfactor=true"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunTerrainMLMGRejectIncompatible.cmake)
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        TIMEOUT 120
+        PROCESSORS 2
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "experimental;terrain;mlmg;negative;mpi"
+        ATTACHED_FILES_ON_FAIL "${test_log}")
+endif()
+add_test_terrain_mlmg_reject_scope(
+    TerrainMLMG_RejectRealBoundaryInput
+    "does not support erf.use_real_bcs=true"
+    "erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.use_real_bcs=true erf.mg_v=2 max_step=0 erf.init_type=WRFInput erf.moisture_model=SatAdj erf.nc_bdy_file=unread_boundary_fixture")
 
 if(NOT ERF_ENABLE_FFT)
     add_test_terrain_mlmg_reject_scope(

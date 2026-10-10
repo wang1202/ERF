@@ -6,15 +6,40 @@
 
 #include "AMReX_BoxArray.H"
 #include "AMReX_Geometry.H"
+#include "AMReX_Gpu.H"
 #include "AMReX_LO_BCTYPES.H"
+#include "AMReX_ParmParse.H"
 #ifdef ERF_USE_FFT
 #include <AMReX_FFT.H>
 #endif
 
+#include <limits>
 #include <sstream>
 #include <string>
 
 using namespace amrex;
+
+/**
+ * Opt-in synchronized timing for terrain Poisson phase comparisons.  The
+ * normal production path does not introduce GPU synchronization or output.
+ */
+inline bool terrain_poisson_timing_enabled ()
+{
+    static const bool enabled = [] () {
+        bool value = false;
+        ParmParse pp("erf");
+        pp.query("terrain_poisson_timing", value);
+        return value;
+    } ();
+    return enabled;
+}
+
+inline void terrain_poisson_timing_sync ()
+{
+#ifdef AMREX_USE_GPU
+    Gpu::streamSynchronize();
+#endif
+}
 
 /**
  * Default solver for the terrain Poisson equation. Keep the established
@@ -35,6 +60,26 @@ inline bool terrain_mlmg_compatibility_mean_exceeds (Real mean) noexcept
 {
     return !amrex::Math::isfinite(mean) ||
            amrex::Math::abs(mean) > terrain_mlmg_compatibility_tolerance();
+}
+
+/**
+ * The terrain MLMG operator has not been verified with horizontal map
+ * factors. Keep that configuration from running silently until its
+ * coefficient/flux identity has independent numerical coverage.
+ */
+inline std::string
+terrain_mlmg_map_factor_error (Real max_abs_deviation)
+{
+    const Real roundoff_tolerance = Real(64) * std::numeric_limits<Real>::epsilon();
+    if (amrex::Math::isfinite(max_abs_deviation) &&
+        max_abs_deviation <= roundoff_tolerance) {
+        return {};
+    }
+    std::ostringstream os;
+    os << "erf.terrain_poisson_solver=mlmg currently supports only unit horizontal map factors; "
+       << "max_abs_deviation_from_one=" << max_abs_deviation
+       << ", roundoff_tolerance=" << roundoff_tolerance;
+    return os.str();
 }
 
 /**

@@ -38,6 +38,13 @@ endif()
 if(combined_output MATCHES "Invalid interpolated rho0 momentum ghost|First invalid Omega input|First invalid W input")
     message(FATAL_ERROR "Terrain MLMG AMR run reported an invalid projection ghost; see ${LOG}")
 endif()
+if(DEFINED REQUIRED_EFFECTIVE_BCS AND NOT "${REQUIRED_EFFECTIVE_BCS}" STREQUAL "")
+    string(FIND "${combined_output}" "${REQUIRED_EFFECTIVE_BCS}" effective_bc_position)
+    if(effective_bc_position EQUAL -1)
+        message(FATAL_ERROR
+            "Expected effective terrain MLMG BCs '${REQUIRED_EFFECTIVE_BCS}' were not reported; see ${LOG}")
+    endif()
+endif()
 
 set(check_command "${PYTHON_EXECUTABLE}"
     "${CMAKE_CURRENT_LIST_DIR}/check_terrain_mlmg_projection.py"
