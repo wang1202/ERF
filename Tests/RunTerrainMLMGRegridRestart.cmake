@@ -60,6 +60,7 @@ if(NOT EXISTS "${run_root}/checkpoint/chk00001/Header")
     message(FATAL_ERROR "Terrain MLMG checkpoint leg did not write chk00001")
 endif()
 
+file(COPY "${run_root}/checkpoint/chk00001" DESTINATION "${run_root}/restart")
 execute_process(
     COMMAND ${launch} "${TEST_EXE}" "${INPUT}" ${common_options} ${restart_options}
     WORKING_DIRECTORY "${run_root}/restart"
