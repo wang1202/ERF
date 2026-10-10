@@ -3257,6 +3257,8 @@ function(add_test_terrain_mlmg_regrid_restart TEST_NAME NRANKS)
         "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
         "-DNRANKS=${NRANKS}"
         "-DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}"
+        "-DCONFIG=$<CONFIG>"
+        "-DFCOMPARE=${FCOMPARE_EXE}"
         "-DDIVERGENCE_TOLERANCE=${_divergence_tolerance}"
         "-DTEST_EXE=${TEST_EXE}"
         "-DINPUT=${CURRENT_TEST_BINARY_DIR}/TerrainHill.i"

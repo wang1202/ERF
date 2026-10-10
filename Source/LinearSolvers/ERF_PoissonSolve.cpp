@@ -390,6 +390,14 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         Vector<Real> coarse_times{static_cast<Real>(t_old[lev-1]),
                                   static_cast<Real>(t_new[lev-1])};
         Vector<Real> data_times{static_cast<Real>(l_time), static_cast<Real>(l_time)};
+        if (mg_verbose > 1) {
+            amrex::Print() << "ERF_TERRAIN_PROJECTION_GHOST_TIME"
+                           << " level=" << lev
+                           << " fine_time=" << l_time
+                           << " coarse_old_time=" << t_old[lev-1]
+                           << " coarse_new_time=" << t_new[lev-1]
+                           << " stencil=" << stencil_name << std::endl;
+        }
         FillPatchTwoLevels(interp_fine, IntVect(0,0,1), IntVect(0,0,0),
                            static_cast<Real>(l_time),
                            coarse_data, coarse_times, fine_data, data_times,
