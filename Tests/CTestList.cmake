@@ -3153,3 +3153,6 @@ add_test(NAME TerrainMLMGRegridChecker_SelfTest
         ${PROJECT_SOURCE_DIR}/Tests/check_terrain_mlmg_regrid.py --self-test)
 set_tests_properties(TerrainMLMGRegridChecker_SelfTest PROPERTIES
     LABELS "experimental;terrain;mlmg;unit")
+if(ERF_ENABLE_MPI)
+    add_test_terrain_mlmg_regrid_restart(TerrainMLMG_TwoLevelRestartRegridsLevel1_TwoRanks 2)
+endif()
