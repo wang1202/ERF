@@ -33,4 +33,8 @@ endif()
 if(NOT combined_output MATCHES "${REQUIRED_MARKER}")
     message(FATAL_ERROR "MLMG failed without the required diagnostic; see ${LOG}: ${combined_output}")
 endif()
+if(DEFINED REJECT_BEFORE_PROJECTION AND REJECT_BEFORE_PROJECTION AND
+   combined_output MATCHES "ERF_TERRAIN_PROJECTION_EVENT|Terrain MLMG level|Solving in subdomain")
+    message(FATAL_ERROR "Unsupported MLMG scope was rejected only after a projection solve; see ${LOG}: ${combined_output}")
+endif()
 message(STATUS "MLMG configuration rejected with the expected diagnostic.")
