@@ -3116,3 +3116,40 @@ endif()
 #=============================================================================
 # Performance tests
 #=============================================================================
+
+# End-to-end restart lifecycle regression: the restart regrids level 1 with a
+# changed box tiling, and MLMG must continue projecting on the rebuilt grids.
+function(add_test_terrain_mlmg_regrid_restart TEST_NAME NRANKS)
+    set(TEST_FILES_DIR "TerrainHill")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    if(ERF_PRECISION STREQUAL "SINGLE")
+        set(_divergence_tolerance "1.0e-4")
+    else()
+        set(_divergence_tolerance "1.0e-6")
+    endif()
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=${NRANKS}"
+        "-DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}"
+        "-DDIVERGENCE_TOLERANCE=${_divergence_tolerance}"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DINPUT=${CURRENT_TEST_BINARY_DIR}/TerrainHill.i"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunTerrainMLMGRegridRestart.cmake)
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        TIMEOUT 1200
+        PROCESSORS ${NRANKS}
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "experimental;terrain;mlmg;amr;restart"
+        ATTACHED_FILES_ON_FAIL
+            "${CURRENT_TEST_BINARY_DIR}/terrain_mlmg_regrid_restart/checkpoint/simulation.log;${CURRENT_TEST_BINARY_DIR}/terrain_mlmg_regrid_restart/restart/simulation.log")
+endfunction()
+add_test_terrain_mlmg_regrid_restart(TerrainMLMG_TwoLevelRestartRegridsLevel1 1)
+add_test(NAME TerrainMLMGRegridChecker_SelfTest
+    COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/Tests/check_terrain_mlmg_regrid.py --self-test)
+set_tests_properties(TerrainMLMGRegridChecker_SelfTest PROPERTIES
+    LABELS "experimental;terrain;mlmg;unit")
