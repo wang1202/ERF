@@ -16,7 +16,7 @@ erf_mpi_launcher_command(run_command
     NUMPROC_FLAG "${MPIEXEC_NUMPROC_FLAG}"
     NRANKS "${NRANKS}"
     PREFLAGS "${MPIEXEC_PREFLAGS}"
-    CONTEXT "Terrain MLMG incompatible-RHS regression")
+    CONTEXT "Terrain MLMG runtime rejection regression")
 separate_arguments(runtime_options UNIX_COMMAND "${RUNTIME_OPTIONS}")
 list(APPEND run_command "${TEST_EXE}" "${INPUT}" ${runtime_options})
 execute_process(
