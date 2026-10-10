@@ -182,34 +182,39 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
         if (!error.empty()) {
             amrex::Abort(error);
         }
-        const std::string scope_error = terrain_mlmg_scope_error(
-            maxLevel(), lev, subdomains[lev].size());
-        if (!scope_error.empty()) {
-            amrex::Abort(scope_error);
-        }
-        if (subdomains[lev].empty()) {
-            amrex::Abort("erf.terrain_poisson_solver=mlmg found no ERF solve regions at level " +
-                         std::to_string(lev));
-        }
-        const Box level_domain = geom[lev].Domain();
-        for (int isub = 0; isub < subdomains[lev].size(); ++isub) {
-            const Box region(subdomains[lev][isub].minimalBox());
-            BoxList region_box_list;
-            for (int igrid = 0; igrid < grids[lev].size(); ++igrid) {
-                if (subdomains[lev][isub].intersects(grids[lev][igrid])) {
-                    region_box_list.push_back(grids[lev][igrid]);
+        // Validate every currently constructed solve region before this call
+        // can solve any level. Checking only `lev` lets a coarse projection
+        // complete before a later fine-level configuration is rejected.
+        for (int check_lev = 0; check_lev < static_cast<int>(subdomains.size()); ++check_lev) {
+            const std::string scope_error = terrain_mlmg_scope_error(
+                maxLevel(), check_lev, subdomains[check_lev].size());
+            if (!scope_error.empty()) {
+                amrex::Abort(scope_error);
+            }
+            if (subdomains[check_lev].empty()) {
+                amrex::Abort("erf.terrain_poisson_solver=mlmg found no ERF solve regions at level " +
+                             std::to_string(check_lev));
+            }
+            const Box level_domain = geom[check_lev].Domain();
+            for (int isub = 0; isub < subdomains[check_lev].size(); ++isub) {
+                const Box region(subdomains[check_lev][isub].minimalBox());
+                BoxList region_box_list;
+                for (int igrid = 0; igrid < grids[check_lev].size(); ++igrid) {
+                    if (subdomains[check_lev][isub].intersects(grids[check_lev][igrid])) {
+                        region_box_list.push_back(grids[check_lev][igrid]);
+                    }
                 }
-            }
-            const BoxArray region_boxes(region_box_list);
-            const std::string region_error = terrain_mlmg_region_error(
-                lev, isub, level_domain, region, region_boxes);
-            if (!region_error.empty()) {
-                amrex::Abort(region_error);
-            }
-            const std::string periodic_error = terrain_mlmg_periodic_region_error(
-                lev, isub, geom[lev], region);
-            if (!periodic_error.empty()) {
-                amrex::Abort(periodic_error);
+                const BoxArray region_boxes(region_box_list);
+                const std::string region_error = terrain_mlmg_region_error(
+                    check_lev, isub, level_domain, region, region_boxes);
+                if (!region_error.empty()) {
+                    amrex::Abort(region_error);
+                }
+                const std::string periodic_error = terrain_mlmg_periodic_region_error(
+                    check_lev, isub, geom[check_lev], region);
+                if (!periodic_error.empty()) {
+                    amrex::Abort(periodic_error);
+                }
             }
         }
     }

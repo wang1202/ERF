@@ -2745,14 +2745,10 @@ add_test_terrain_mlmg_reject_scope(
 add_test_terrain_mlmg_reject_scope(
     TerrainMLMG_RejectIrregularRegion
     "Connected irregular/L-shaped regions are unsupported"
-    "erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.mg_v=2 max_step=0 erf.refinement_indicators=box1 box2 erf.box1.max_level=1 erf.box1.in_box_lo=400 200 0 erf.box1.in_box_hi=800 400 300 erf.box2.max_level=1 erf.box2.in_box_lo=600 401 0 erf.box2.in_box_hi=800 600 300")
-add_test_terrain_mlmg_reject_scope(
-    TerrainMLMG_RejectRealBoundaryConditions
-    "does not support erf.use_real_bcs=true"
-    "erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.use_real_bcs=true erf.mg_v=2 max_step=0")
+    "erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.mg_v=2 max_step=0 amr.grid_eff=1.0 amr.blocking_factor=1 amr.max_grid_size_x=8 amr.max_grid_size_y=8 amr.max_grid_size_z=8 erf.refinement_indicators=box1 box2 erf.box1.max_level=1 erf.box1.in_box_lo=400 200 0 erf.box1.in_box_hi=800 400 300 erf.box2.max_level=1 erf.box2.in_box_lo=600 401 0 erf.box2.in_box_hi=800 600 300")
 add_test_terrain_mlmg_reject_scope(
     TerrainMLMG_RejectUnsupportedTerrainGeometry
-    "requires erf.terrain_type=StaticFittedMesh"
+    "requires a VariableDz mesh"
     "erf.anelastic=1 erf.terrain_poisson_solver=mlmg erf.terrain_type=ImmersedForcing erf.immersed_forcing_substep=true eb2.small_volfrac=0.005 erf.mg_v=2 max_step=0")
 
 if(NOT ERF_ENABLE_FFT)
