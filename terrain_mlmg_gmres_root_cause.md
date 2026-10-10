@@ -37,6 +37,3 @@ The required next experiment is an opt-in diagnostic build that snapshots valid 
 ## Disposition
 
 Leave the default `gmres_fft` unchanged. Keep this issue separate from the MLMG implementation unless a same-state experiment demonstrates feature interference or upstream maintainers explicitly request a combined scope. The issue draft in `terrain_gmres_upstream_issue_draft.md` is for user review only and has not been published.
-# Follow-up status (2026-10-10)
-
-The requested decisive experiment remains incomplete. Instrumentation was prepared in isolated feature and clean-upstream worktrees for immutable preprojection/pre-compatibility snapshots, repeat-operator checks (including ghost perturbation), and independent GMRES/MLMG solves on copies of the same input. The diagnostic builds did not finish, so no new snapshot, repeatability result, same-data solver comparison, or clean-upstream confirmation was obtained. Existing reported estimated-vs-true residual values establish a discrepancy but do not establish its numerical cause or whether it is pre-existing. Do not attribute the defect to MLMG or expand this PR based on the current evidence. Keep GMRES+FFT as the default; resolve with the controlled experiment before merge.

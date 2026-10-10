@@ -69,14 +69,3 @@ Historical matched one-level benchmarks reported CPU timestep sum 18.0% lower fo
 4. Decide the AMReX dependency approach and update the PR description to match verified scope.
 
 **Recommendation: NOT READY.** No maintainer disposition exists for the legacy GMRES issue, G8 currently fails, and several numerical and platform gates lack current-source evidence.
-# Follow-up validation (2026-10-10)
-
-## G8 continuous/restart control
-
-The previously reported 0.233 m/s level-1 vertical-velocity difference came from comparing different regrid lifecycles. In the controlled no-regrid test, continuous and restart runs with the same BoxArray matched bit-for-bit at all common output times. In the changed-layout test, a restart from 8/8/8 to 16/16/8 (same physical times, refinement coverage, timestep settings, and plot schedules) matched an uninterrupted control that changed its BoxArray at the same time: all fields in `plt`, `pltU`, `pltV`, and `pltW` at t=0.5, 1.0, and 1.5 were bitwise identical (zero absolute and relative difference). The earlier continuous reference started at the 16/16/8 layout and therefore omitted the same `RemakeLevel` operation.
-
-Field-level diagnostics on the uninterrupted runtime-reblock control found the first valid-cell change in `zvel` during `FillPatchFineLevel` in `RemakeLevel` at t=0.5 (Linf 0.2471481141, L2 1.336395862); valid `cons`, `xvel`, `yvel`, and `base_state` were unchanged at that point. The subsequent `project_initial_velocity` reduced divergence Linf from 0.0261532 to 1.265e-8. This is a common remake operation in both equivalent paths, not a continuous/restart discrepancy. No production correction is indicated. The checked-in restart regression still needs to be changed to compare against this lifecycle-equivalent runtime-reblock control; that regression repair was not completed in this round. Raw evidence: `/tmp/g8-runtime-E/run.log`, `/tmp/g8-runtime-E/compare-with-D.txt`.
-
-## Remaining readiness gates
-
-The immutable GMRES preprojection snapshot, same-data independent GMRES/MLMG solves, and clean-upstream reproduction did not complete in this round; no attribution to MLMG or upstream is justified. The GMRES issue therefore remains unresolved and requires follow-up before merge. The feature MPI build did not finish sufficiently to report the requested final rank-parity/regression matrix. GPU tests were unavailable on this node (no NVIDIA device/toolchain). PR #4253 was isolated and tested with and without its FillPatch density-ghost patch; the failing output was bitwise unchanged, so that PR does not contribute to G8 and no changes from it were imported. Verdict: G8 restart parity is cleared for equivalent lifecycle; overall merge readiness remains blocked on GMRES attribution and the incomplete final regression matrix.

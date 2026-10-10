@@ -25,6 +25,3 @@ Matched historical one-level measurements showed MLMG about 18% faster in summed
 ## Review status
 
 The branch is **not ready to open for upstream merge review**. G8 currently fails and several required current-source numerical, rank-parity, boundary, mapping, and full GMRES diagnostic gates remain open. This text is a local draft; no PR has been opened.
-# G8 follow-up evidence (2026-10-10)
-
-The initial ~0.233 m/s comparison was not lifecycle-equivalent. A no-regrid continuous/restart pair matched bit-for-bit. For the changed-BoxArray test, a continuous run that reblocked 8/8/8 to 16/16/8 at the same physical time as the restart remake matched all `plt`, `pltU`, `pltV`, and `pltW` fields at t=0.5, 1.0, and 1.5 bit-for-bit. The earlier continuous reference began with the final 16/16/8 layout and skipped `RemakeLevel`. No MLMG/terrain production correction is indicated by this test. The GMRES residual discrepancy remains unresolved: immutable snapshot, independent solver replay, and clean-upstream confirmation were not completed. Overall merge readiness remains pending that diagnosis and the final regression matrix.
