@@ -391,7 +391,7 @@ ERF::WriteCheckpointFile () const
         VisMF::Write(cons, MultiFabFileFullPrefix(lev, checkpointname, "Level_", "Cell"));
 
         if (sbm_state_manager) {
-            VisMF::Write(sbm_state_manager->state(lev),
+            VisMF::Write(sbm_state_manager->new_state(lev),
                          MultiFabFileFullPrefix(lev, checkpointname, "Level_", "SBMSpectrum"));
         }
 
@@ -811,6 +811,19 @@ ERF::WriteCheckpointFile () const
                 }
                 ZLevelsFile << "\n";
             }
+
+#ifdef ERF_USE_NETCDF
+            //
+            // The height of the top of the domain that the wrfinput path derived from PH/PHB
+            // at level 0.  zlevels_stag does not carry it: with erf.avg_grid_faces_to_nodes
+            // the vertical grid is never rebuilt from z_top, so the two differ there.  A level
+            // created from a wrfinput file AFTER a restart -- a nest whose start time has not
+            // been reached yet when the checkpoint was written -- builds its terrain from this
+            // value, so it has to survive the restart.  Written last so that a checkpoint from
+            // before this line simply ends after the per-level data.
+            //
+            ZLevelsFile << z_top << "\n";
+#endif
         }
     }
 
@@ -1115,7 +1128,30 @@ ERF::ReadCheckpointFile ()
                 // Keep the cell heights consistent with the levels we just read in
                 update_stretched_dz(lev, zlevels_stag, stretched_dz_h, stretched_dz_d);
             }
+
+#ifdef ERF_USE_NETCDF
+            isz >> z_top;
+#endif
         } // zlevels file exists
+
+#ifdef ERF_USE_NETCDF
+        //
+        // z_top is only ever computed when level 0 is built from a wrfinput file, which a
+        // restart does not do, so without the value just read it would stay at zero and any
+        // level created from a wrfinput file later in the run would build a degenerate
+        // vertical grid.  Fall back to the top of the level-0 grid for a checkpoint written
+        // before z_top was stored; that is exactly z_top unless avg_grid_faces_to_nodes is
+        // set, in which case the vertical grid was never rebuilt from it and we cannot know.
+        //
+        if (z_top == zero && !zlevels_stag.empty() && !zlevels_stag[0].empty()) {
+            z_top = zlevels_stag[0].back();
+            if (solverChoice.init_type == InitType::WRFInput && solverChoice.avg_grid_faces_to_nodes) {
+                Print() << "WARNING: this checkpoint does not store z_top; falling back to the top "
+                           "of the level-0 grid (" << z_top << " m), which with "
+                           "erf.avg_grid_faces_to_nodes is not the value the original run used.\n";
+            }
+        }
+#endif
     }
 
     //
@@ -1390,7 +1426,7 @@ ERF::ReadCheckpointFile ()
             if (!FileExists(spectrum_file + "_H")) {
                 Abort("SBM restart is missing authoritative spectrum for level " + std::to_string(lev));
             }
-            auto& spectrum = sbm_state_manager->state(lev);
+            auto& spectrum = sbm_state_manager->new_state_for_initialization(lev);
             VisMF::Read(spectrum, spectrum_file);
             std::string state_diagnostic;
             if (!erf_sbm::authoritative_state_admissible(
