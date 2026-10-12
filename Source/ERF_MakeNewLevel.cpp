@@ -135,9 +135,12 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
         auxiliary_inert_tracer->define(lev, ba, dm);
     }
     if (sbm_state_manager) {
-        sbm_state_manager->define(lev, ba, dm);
+        const double sbm_initial_time = restart_chkfile.empty()
+                                            ? static_cast<double>(time)
+                                            : t_new[lev];
+        sbm_state_manager->define(lev, ba, dm, sbm_initial_time);
         for (int comp = 0; comp < static_cast<int>(solverChoice.sbm_fixture_initial_state.size()); ++comp) {
-            sbm_state_manager->state(lev).setVal(
+            sbm_state_manager->new_state_for_initialization(lev).setVal(
                 solverChoice.sbm_fixture_initial_state[static_cast<std::size_t>(comp)], comp, 1, 0);
         }
         AMREX_ALWAYS_ASSERT(sbm_transport != nullptr);
@@ -511,6 +514,16 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
         //       of the fine detJ for that average-down to telescope and stay conservative.
         for (int crse_lev = lev-1; crse_lev >= 0; crse_lev--) {
             average_down(  *detJ_cc[crse_lev+1],   *detJ_cc[crse_lev], 0, 1, refRatio(crse_lev));
+
+            //
+            // Keep the halo in step with the valid cells we just replaced.  The coarse detJ
+            // under this level is now the average of the fine one, but its ghost cells still
+            // hold what the coarse terrain alone gave, and the two differ in the last bits.
+            // InitData_post does this FillBoundary after its own average-down, so without it
+            // here a restart -- which goes through InitData_post -- does not reproduce the
+            // run it continues.
+            //
+            detJ_cc[crse_lev]->FillBoundary(geom[crse_lev].periodicity());
         }
     }
 
@@ -654,6 +667,10 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
              (solverChoice.coupling_type == CouplingType::TwoWay) ) {
             for (int crse_lev = lev-1; crse_lev >= 0; crse_lev--) {
                 average_down(*detJ_cc[crse_lev+1], *detJ_cc[crse_lev], 0, 1, refRatio(crse_lev));
+
+                // Keep the halo in step with the valid cells we just replaced (see the note on
+                // the first average-down in MakeNewLevelFromCoarse).
+                detJ_cc[crse_lev]->FillBoundary(geom[crse_lev].periodicity());
             }
         }
 
@@ -1079,6 +1096,10 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
         //       of the fine detJ for that average-down to telescope and stay conservative.
         for (int crse_lev = lev-1; crse_lev >= 0; crse_lev--) {
             average_down(  *detJ_cc[crse_lev+1],   *detJ_cc[crse_lev], 0, 1, refRatio(crse_lev));
+
+            // Keep the halo in step with the valid cells we just replaced (see the note on
+            // the first average-down in MakeNewLevelFromCoarse).
+            detJ_cc[crse_lev]->FillBoundary(geom[crse_lev].periodicity());
         }
     }
 
