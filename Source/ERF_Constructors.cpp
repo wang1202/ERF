@@ -295,6 +295,15 @@ ERF::ERF_shared ()
         std::vector<amrex::Real> candidate(static_cast<std::size_t>(layout.ncomp()),
                                            amrex::Real(0.0));
         if (!solverChoice.sbm_fixture_initial_state.empty()) {
+            // ReadParameters checks the length against sbm_nbins and sbm_moment_mode;
+            // check it against the layout itself before writing into candidate.
+            if (solverChoice.sbm_fixture_initial_state.size() !=
+                static_cast<amrex::Long>(layout.ncomp())) {
+                amrex::Error("sbm_fixture_initial_state has " +
+                    std::to_string(solverChoice.sbm_fixture_initial_state.size()) +
+                    " entries but the SBM layout has " + std::to_string(layout.ncomp()) +
+                    " components");
+            }
             std::copy(solverChoice.sbm_fixture_initial_state.begin(),
                       solverChoice.sbm_fixture_initial_state.end(), candidate.begin());
         }
@@ -333,6 +342,7 @@ ERF::ERF_shared ()
     // InitData can read restart metadata or write an output on restart.
     execution_provenance = erf_provenance::initialize_execution_provenance();
     initializeMicrophysics(nlevs_max);
+    initializeFire(nlevs_max);
 
 #ifdef ERF_USE_WINDFARM
     initializeWindFarm(nlevs_max);
@@ -390,24 +400,25 @@ ERF::ERF_shared ()
                  geom,
                  refRatio(),
                  solverChoice.grid_stretching_ratio,
-                 solverChoice.zsurf,
                  solverChoice.dz0);
 
     if (SolverChoice::mesh_type == MeshType::StretchedDz ||
         SolverChoice::mesh_type == MeshType::VariableDz) {
+        // The vertical levels, not geometry.prob_lo[2] and prob_hi[2], are the physical extent
+        //    of the domain on these meshes; prob_lo[2] and prob_hi[2] only bound the
+        //    computational coordinate.  A mismatch is allowed (the top of a stretched grid is
+        //    not obvious from erf.initial_dz and erf.grid_stretching_ratio), so only warn.
         int nz = geom[0].Domain().length(2) + 1; // staggered
         if (std::fabs(zlevels_stag[0][nz-1]-geom[0].ProbHi(2)) > Real(1.0e-4)) {
-            Print() << "Note: prob_hi[2]=" << geom[0].ProbHi(2)
-                << " does not match highest requested z level " << zlevels_stag[0][nz-1]
-                << std::endl;
+            Print() << "WARNING: geometry.prob_hi[2] = " << geom[0].ProbHi(2)
+                << " does not match the highest z level, " << zlevels_stag[0][nz-1]
+                << "; the domain top is z = " << zlevels_stag[0][nz-1] << std::endl;
         }
         if (std::fabs(zlevels_stag[0][0]-geom[0].ProbLo(2)) > Real(1.0e-4)) {
-            Print() << "Note: prob_lo[2]=" << geom[0].ProbLo(2)
-                << " does not match lowest requested level " << zlevels_stag[0][0]
-                << std::endl;
+            Print() << "WARNING: geometry.prob_lo[2] = " << geom[0].ProbLo(2)
+                << " does not match the lowest z level, " << zlevels_stag[0][0]
+                << "; the domain bottom is z = " << zlevels_stag[0][0] << std::endl;
         }
-
-        // Redefine the problem domain here?
     }
 
     // Get lo/hi indices for massflux calc
@@ -449,7 +460,18 @@ ERF::ERF_shared ()
     extern void erf_probinit_link_anchor_func () noexcept;
     erf_probinit_link_anchor_func();
 #endif
-    prob = amrex_probinit(geom[0].ProbLo(),geom[0].ProbHi());
+    {
+        // The problem sees the physical extent of the domain: on a mesh other than ConstantDz
+        //    that is the vertical levels, not geometry.prob_lo[2] and prob_hi[2]
+        RealArray problo{AMREX_D_DECL(geom[0].ProbLo(0), geom[0].ProbLo(1), geom[0].ProbLo(2))};
+        RealArray probhi{AMREX_D_DECL(geom[0].ProbHi(0), geom[0].ProbHi(1), geom[0].ProbHi(2))};
+        if (SolverChoice::mesh_type != MeshType::ConstantDz) {
+            problo[2] = zlevels_stag[0].front();
+            probhi[2] = zlevels_stag[0].back();
+        }
+        prob = amrex_probinit(problo.data(), probhi.data());
+    }
+    prob->set_zlevels_stag(zlevels_stag);
 
     ParmParse pp_erf("erf");
     std::string prob_name;
@@ -590,6 +612,7 @@ ERF::ERF_shared ()
     ba1d.resize(nlevs_max);
     ba2d.resize(nlevs_max);
     column_kextent.resize(nlevs_max);
+    cf_implicit_mask.resize(nlevs_max);
 
     // MultiFabs needed to convert WRFBdy data
     mf_PSFC.resize(nlevs_max);
@@ -700,6 +723,8 @@ ERF::ERF_shared ()
     surface_state_1.resize(nlevs_max);
     surface_state_2.resize(nlevs_max);
     surface_state_interp.resize(nlevs_max);
+
+    mfvec_surface_fluxes.resize(nlevs_max);
 }
 
 ERF::~ERF () = default;

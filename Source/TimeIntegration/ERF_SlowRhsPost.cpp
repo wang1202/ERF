@@ -138,12 +138,10 @@ void erf_slow_rhs_post (int level, int finest_level,
     const bool l_anelastic     = solverChoice.anelastic[level];
     const bool l_anelastic_rk2 = (solverChoice.anelastic_type[level] == AnelasticType::RK2);
 
-    // Only add to the flux registers on the final RK stage.  The anelastic integrator
-    // takes two stages (nrk = 0,1) and the compressible one takes three (nrk = 0,1,2),
-    // so testing nrk == 2 alone would never reflux the scalar and moisture fluxes in an
-    // anelastic run.  This matches the condition used in erf_slow_rhs_pre.
-    const bool l_reflux = ( (solverChoice.coupling_type == CouplingType::TwoWay) && (finest_level > 0) &&
-                            ( (l_anelastic && nrk == 1) || (!l_anelastic && nrk == 2) ) );
+    // Add to the flux registers only in the stages whose fluxes the step's update applies,
+    // weighted as in that update (RefluxStageWeight)
+    const bool l_reflux    = IsRefluxStage(solverChoice, level, finest_level, nrk);
+    const Real l_reflux_dt = RefluxStageWeight(solverChoice, level, finest_level, nrk) * dt;
 
     const bool l_use_KE         = ( tc.use_tke );
     const bool l_need_SmnSmn    = ( tc.les_type  == LESType::Deardorff ||
@@ -267,22 +265,11 @@ void erf_slow_rhs_post (int level, int finest_level,
     //       components come from the LES model or are left as zero.
     // *************************************************************************
 
-    // EB Anelastic: Copy projected momentum with ghost-cell synchronization
-    if (l_anelastic && l_use_eb) {
-        avg_xmom.ParallelCopy(S_data[IntVars::xmom], 0, 0, 1, 0, 1, geom.periodicity());
-        avg_ymom.ParallelCopy(S_data[IntVars::ymom], 0, 0, 1, 0, 1, geom.periodicity());
-        avg_zmom.ParallelCopy(S_data[IntVars::zmom], 0, 0, 1, 0, 1, geom.periodicity());
-    }
-
-    // Non-EB Anelastic: the slow scalars are advected with the projected momentum.  Copy it
-    // before the tile loop below: a copy per tile inside that loop left the faces of the tiles
-    // not yet visited at their values from the previous stage while earlier tiles were already
-    // advecting with them, so the scalars depended on the tile size.
-    if (l_anelastic && !l_use_eb) {
-        MultiFab::Copy(avg_xmom, S_data[IntVars::xmom], 0, 0, 1, 0);
-        MultiFab::Copy(avg_ymom, S_data[IntVars::ymom], 0, 0, 1, 0);
-        MultiFab::Copy(avg_zmom, S_data[IntVars::zmom], 0, 0, 1, 0);
-    }
+    // Anelastic: the slow scalars are advected with the momenta (EB)AdvectionSrcForRho set in
+    // erf_slow_rhs_pre from the start of this stage (ax rho_u / mf_uy, ay rho_v / mf_vx,
+    // az Omega / (mf_mx mf_my); with EB the area fractions are applied to the fluxes instead),
+    // the same faces that advect theta.  These momenta are already projected, by the previous
+    // stage or step.
 
     // M2 proof consumer: run after the stage carrier is final and before the
     // caller copies S_data over S_new, preserving the predictor density view.
@@ -367,6 +354,14 @@ void erf_slow_rhs_post (int level, int finest_level,
         }
         const GpuArray<const Array4<Real>, AMREX_SPACEDIM>
             flx_arr{{AMREX_D_DECL(flux[0].array(), flux[1].array(), flux[2].array())}};
+
+        // In the stage whose fluxes are refluxed, the diffusion adds its face fluxes to flux[]
+        // too, so that the flux registers see the diffusive as well as the advective transport
+        // (EB diffusion does not do this).  Nothing is counted twice: flux[] holds the faces of
+        // tbx alone and is zeroed above for each box, and the registers take each coarse/fine
+        // face once, from the box holding the cell on its coarse side (CrseAdd) or on its fine
+        // side (FineAdd), tiled or not.
+        const ScalarDiffusionRefluxViews* l_reflux_diffusion = (l_reflux && !l_use_eb) ? &flx_arr : nullptr;
 
         // *************************************************************************
         // Define Array4's
@@ -649,7 +644,8 @@ void erf_slow_rhs_post (int level, int finest_level,
                                                hfx_x, hfx_y, hfx_z, q1fx_x, q1fx_y, q1fx_z,q2fx_z,
                                                mu_turb, solverChoice, level,
                                                bc_ptr_d,
-                                               l_apply_surface_layer_fluxes_in_diffusion, SurfLayer, l_vert_implicit_fac);
+                                               l_apply_surface_layer_fluxes_in_diffusion, SurfLayer, l_vert_implicit_fac,
+                                               l_reflux_diffusion);
                     } else if (l_use_terrain) {
                         DiffusionSrcForState_T(tbx, domain, diffusion_start, diffusion_num, l_rotate,
                                                new_cons, cur_prim, cell_rhs,
@@ -660,8 +656,9 @@ void erf_slow_rhs_post (int level, int finest_level,
                                                mf_my, mf_uy, mf_vy,
                                                hfx_x, hfx_y, hfx_z, q1fx_x, q1fx_y, q1fx_z,q2fx_z,
                                                mu_turb, solverChoice, level,
-                                               bc_ptr_d,
-                                               l_apply_surface_layer_fluxes_in_diffusion, SurfLayer, l_vert_implicit_fac);
+                                               bc_ptr_d, bc_ptr_h,
+                                               l_apply_surface_layer_fluxes_in_diffusion, SurfLayer, l_vert_implicit_fac,
+                                               l_reflux_diffusion);
                     } else if (l_use_eb) {
                         DiffusionSrcForState_EB(tbx, domain, diffusion_start, diffusion_num, u, v,
                                                 new_cons, cur_prim, cell_rhs,
@@ -681,7 +678,8 @@ void erf_slow_rhs_post (int level, int finest_level,
                                                hfx_x, hfx_y, hfx_z, q1fx_x, q1fx_y, q1fx_z, q2fx_z,
                                                mu_turb, solverChoice, level,
                                                bc_ptr_d,
-                                               l_apply_surface_layer_fluxes_in_diffusion, SurfLayer, l_vert_implicit_fac);
+                                               l_apply_surface_layer_fluxes_in_diffusion, SurfLayer, l_vert_implicit_fac,
+                                               l_reflux_diffusion);
                     }
                     if (use_physical_chamber_wall_flux) {
                         // Apply the physical wall correction immediately to
@@ -912,19 +910,19 @@ void erf_slow_rhs_post (int level, int finest_level,
 
         {
         BL_PROFILE("rhs_post_10");
-        // We only add to the flux registers in the final RK step
+        // Only in the stages RefluxStageWeight weights
         if (l_reflux) {
             int strt_comp_reflux = RhoTheta_comp + 1;
             int  num_comp_reflux = nvars - strt_comp_reflux;
             if (level < finest_level) {
                 fr_as_crse->CrseAdd(mfi,
                     {{AMREX_D_DECL(&(flux[0]), &(flux[1]), &(flux[2]))}},
-                    dx, dt, strt_comp_reflux, strt_comp_reflux, num_comp_reflux, RunOn::Device);
+                    dx, l_reflux_dt, strt_comp_reflux, strt_comp_reflux, num_comp_reflux, RunOn::Device);
             }
             if (level > 0) {
                 fr_as_fine->FineAdd(mfi,
                     {{AMREX_D_DECL(&(flux[0]), &(flux[1]), &(flux[2]))}},
-                    dx, dt, strt_comp_reflux, strt_comp_reflux, num_comp_reflux, RunOn::Device);
+                    dx, l_reflux_dt, strt_comp_reflux, strt_comp_reflux, num_comp_reflux, RunOn::Device);
             }
 
             // This is necessary here so we don't go on to the next FArrayBox without

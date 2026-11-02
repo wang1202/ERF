@@ -257,10 +257,8 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
     // These are just time averaged fields for diagnostics
     // ********************************************************************************************
 
-    // NOTE: We are not completing a fillpatch call on the time averaged data;
-    //       which would copy on intersection and interpolate from coarse.
-    //       Therefore, we are restarting the averaging when the ba changes,
-    //       this may give poor statistics for dynamic mesh refinement.
+    // NOTE: The time averages start empty here.  RemakeLevel and MakeNewLevelFromCoarse then
+    //       fill them from the old grids and the coarse level, so a regrid keeps the averages.
     vel_t_avg[lev] = nullptr;
     if (solverChoice.time_avg_vel) {
         vel_t_avg[lev] = std::make_unique<MultiFab>(ba, dm, 4, 0); // Each vel comp and the mag
@@ -435,15 +433,16 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
         forecast_state_2[lev].resize(nvars + 1);
         forecast_state_interp[lev].resize(nvars + 1);
 
-        // Define the "normal" components
+        // Define the "normal" components, with the same staggering as the state they
+        //    stand for: the velocities live on faces
         for (int comp = 0; comp < nvars; ++comp) {
             const MultiFab& src = vars_new[lev][comp];
             ncomp = src.nComp();
-            ngrow = src.nGrow();
+            const BoxArray ba_comp = convert(ba, src.ixType());
 
-            forecast_state_1[lev][comp].define(ba, dm, ncomp, ng);
-            forecast_state_2[lev][comp].define(ba, dm, ncomp, ng);
-            forecast_state_interp[lev][comp].define(ba, dm, ncomp, ng);
+            forecast_state_1[lev][comp].define(ba_comp, dm, ncomp, ng);
+            forecast_state_2[lev][comp].define(ba_comp, dm, ncomp, ng);
+            forecast_state_interp[lev][comp].define(ba_comp, dm, ncomp, ng);
         }
 
         // Define the "extra" component (last slot)
@@ -547,7 +546,8 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
     {
         turbPert.init_tpi_type(lev, solverChoice.pert_type[lev], max_level);
         turbPert.init_tpi(lev, subdomains[lev], geom[lev].CellSizeArray(),
-                          ba, dm, ngrow_state, pp_prefix, refRatio(), max_level);
+                          ba, dm, ngrow_state, pp_prefix, refRatio(), max_level,
+                          solverChoice.perturbation_auto);
     }
 
     //
@@ -596,6 +596,9 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
         build_fft_solvers(lev);
     }
 #endif
+
+    mfvec_surface_fluxes[lev].define(ba2d[lev],dm,2,0);
+    mfvec_surface_fluxes[lev].setVal(0.0);
 }
 
 /**
@@ -723,7 +726,7 @@ ERF::update_diffusive_arrays (int lev, const BoxArray& ba, const DistributionMap
     BoxArray ba23 = convert(ba, IntVect(0,1,1));
 
     Tau[lev].resize(9);
-    Tau_corr[lev].resize(3);
+    Tau_corr[lev].resize(2);
 
     // Always resize Tau_EB structure, even if not used, because other code checks nullptr
     Tau_EB[lev].resize(2);  // tau_eb13 and tau_eb23
@@ -785,16 +788,9 @@ ERF::update_diffusive_arrays (int lev, const BoxArray& ba, const DistributionMap
             Tau_corr[lev][1] = std::make_unique<MultiFab>( ba23, dm, 1, IntVect(1,1,1) ); // Tau32
             Tau_corr[lev][0]->setVal(zero);
             Tau_corr[lev][1]->setVal(zero);
-#ifdef ERF_IMPLICIT_W
-            Tau_corr[lev][2] = std::make_unique<MultiFab>( ba  , dm, 1, IntVect(1,1,1) ); // Tau33
-            Tau_corr[lev][2]->setVal(zero);
-#else
-            Tau_corr[lev][2] = nullptr;
-#endif
         } else {
             Tau_corr[lev][0] = nullptr;
             Tau_corr[lev][1] = nullptr;
-            Tau_corr[lev][2] = nullptr;
         }
 
         SFS_hfx1_lev[lev] = std::make_unique<MultiFab>( convert(ba,IntVect(1,0,0)), dm, 1, IntVect(1,1,1) );
@@ -875,9 +871,14 @@ ERF::fill_terrain_surface (int lev, MultiFab& z_phys, double elapsed_time)
     //    but we need to use a flat terrain for the mesh itself (the EB data has already been made
     //    from the correct terrain)
     //
+    // A flat surface sits on the lowest z level, which is geometry.prob_lo[2] on a stretched
+    //    grid, so that the mesh built from the levels spans them (#4442)
+    //
     if (solverChoice.terrain_type != TerrainType::StaticFittedMesh &&
         solverChoice.terrain_type != TerrainType::MovingFittedMesh) {
-            terrain_fab.template setVal<RunOn::Device>(zero);
+            terrain_fab.template setVal<RunOn::Device>(zlevels_stag[lev][0]);
+    } else if (!prob->terrain_is_specified()) {
+            terrain_fab.template setVal<RunOn::Device>(zlevels_stag[lev][0]);
     } else {
         //
         // Fill the values of the terrain height at k=0 only
@@ -939,13 +940,14 @@ ERF::init_zphys (int lev, double elapsed_time)
 
         //
         // Save the interpolated mesh before the fine terrain overwrites the k=0 slab,
-        // since the transform is expressed relative to it
+        // since the transform is expressed relative to it.  The ghost nodes are
+        // included because the transform corrects the ghost columns as well.
         //
         MultiFab z_phys_interp;
         if (fine_terrain == FineTerrain::Transform) {
             z_phys_interp.define(z_phys_nd[lev]->boxArray(), z_phys_nd[lev]->DistributionMap(),
                                  1, z_phys_nd[lev]->nGrowVect());
-            MultiFab::Copy(z_phys_interp, *z_phys_nd[lev], 0, 0, 1, 0); // valid region only
+            MultiFab::Copy(z_phys_interp, *z_phys_nd[lev], 0, 0, 1, z_phys_nd[lev]->nGrowVect());
         }
 
         if (fine_terrain != FineTerrain::Interpolate) {
@@ -1074,7 +1076,13 @@ ERF::remake_zphys (int lev, Real time, std::unique_ptr<MultiFab>& temp_zphys_nd)
             if (fine_terrain == FineTerrain::Transform) {
                 z_phys_interp.define(temp_zphys_nd->boxArray(), temp_zphys_nd->DistributionMap(),
                                      1, temp_zphys_nd->nGrowVect());
-                MultiFab::Copy(z_phys_interp, *temp_zphys_nd, 0, 0, 1, 0); // valid region only
+                // Ghost nodes included: the transform corrects the ghost columns too
+                MultiFab::Copy(z_phys_interp, *temp_zphys_nd, 0, 0, 1, temp_zphys_nd->nGrowVect());
+            }
+
+            // As in init_zphys, every mode except Interpolate builds on the terrain at the
+            //    fine resolution rather than the surface interpolated from the coarse level
+            if (fine_terrain != FineTerrain::Interpolate) {
                 fill_terrain_surface(lev, *temp_zphys_nd, time);
             }
 
@@ -1150,12 +1158,9 @@ ERF::remake_zphys (int lev, Real time, std::unique_ptr<MultiFab>& temp_zphys_nd)
 void
 ERF::make_terrain_blanking (int lev)
 {
-    // Read the small_volfrac threshold from eb2 namespace. The EB build (ERF::initializeEB, in
-    // the constructor) has already recorded it, with AMReX's own default when the inputs do not
-    // set it, so the 0.005 here is not what a deck without the key gets.
-    Real small_volfrac = 0.005;
-    ParmParse pp_eb2("eb2");
-    pp_eb2.queryAdd("small_volfrac", small_volfrac);
+    // eb2.small_volfrac, read once in SolverChoice before the EB build, so the blanking, the EB
+    // and the forcing kernels share it
+    const Real small_volfrac = solverChoice.if_small_volfrac;
 
     // Cell-centered terrain blanking
     terrain_blanking[lev]->setVal(one);
@@ -1227,6 +1232,8 @@ ERF::update_terrain_arrays (int lev)
 {
     if (SolverChoice::mesh_type == MeshType::StretchedDz ||
         SolverChoice::mesh_type == MeshType::VariableDz) {
+        // Every path that builds or rebuilds z_phys_nd (new level, regrid, restart) comes here
+        validate_flat_top(lev, geom[lev], *z_phys_nd[lev]);
         make_J(geom[lev],*z_phys_nd[lev],*detJ_cc[lev]);
         make_areas(geom[lev],*z_phys_nd[lev],*ax[lev],*ay[lev],*az[lev]);
         make_zcc(geom[lev],*z_phys_nd[lev],*z_phys_cc[lev]);

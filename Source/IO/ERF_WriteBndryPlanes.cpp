@@ -95,20 +95,23 @@ WriteBndryPlanes::WriteBndryPlanes (Vector<BoxArray>& grids,
         Box box_this_lev(IntVect(ilo,jlo,0),
                          IntVect(ihi,jhi,domain.bigEnd(2)));
 
-        // Test if the target box at this level fits in the grids at this level
-        Box gbx = box_this_lev; gbx.grow(IntVect(1,1,0));
+        // The boundary register reaches m_out_rad cells outside the box in x and y. Those cells
+        // may lie outside the domain: write_planes reads them from the ghost cells, which
+        // ERF::write_bndry_planes fills first. Only the part inside the domain has to be
+        // covered by the grids at this level.
+        Box gbx = box_this_lev; gbx.grow(IntVect(m_out_rad,m_out_rad,0));
+        gbx &= domain;
 
-        // Ensure that the box is no larger than can fit in the (periodically grown) domain
-        // at level 0
+        // The box itself has to lie inside the domain: past the m_out_rad ghost cells there
+        // is no data to copy from
         if (ilev == 0) {
-            Box per_grown_domain(domain);
-            int growx = (geom[0].isPeriodic(0)) ? 1 : 0;
-            int growy = (geom[0].isPeriodic(1)) ? 1 : 0;
-            per_grown_domain.grow(IntVect(growx,growy,0));
-            /*
-            if (!per_grown_domain.contains(gbx))
-                Error("WriteBndryPlanes: Requested box is too large to fill");
-            */
+            if (!box_this_lev.ok()) {
+                Abort("WriteBndryPlanes: erf.bndry_output_box_lo/hi do not contain any cell centers");
+            }
+            if (!domain.contains(box_this_lev)) {
+                Abort("WriteBndryPlanes: the box given by erf.bndry_output_box_lo/hi must lie"
+                      " inside the domain");
+            }
 
             // Default to level 0
             target_box = box_this_lev;
@@ -267,6 +270,23 @@ void WriteBndryPlanes::write_planes (const int t_step, const double time_d,
     MultiFab& yvel = vars_new[bndry_lev][Vars::yvel];
     MultiFab& zvel = vars_new[bndry_lev][Vars::zvel];
 
+    // A moist temperature plane is computed with qv (erf_dermoisttemp), and the reader needs that
+    // qv to convert it back to theta: without a qv plane it cannot be read correctly
+    if (is_moist) {
+        bool writes_temperature = false;
+        bool writes_qv          = false;
+        for (const auto& name : m_var_names) {
+            if (name == "temperature") { writes_temperature = true; }
+            if (name == "qv")          { writes_qv          = true; }
+        }
+        if (writes_temperature && !writes_qv) {
+            Abort("erf.bndry_output_var_names writes temperature but not qv in a moist run: the"
+                  " temperature includes qv, and the reader needs the qv planes to convert it back"
+                  " to theta.  Add qv to erf.bndry_output_var_names, or write theta instead of"
+                  " temperature");
+        }
+    }
+
     const std::string chkname =
         m_filename + Concatenate("/bndry_output", t_step);
 
@@ -299,16 +319,17 @@ void WriteBndryPlanes::write_planes (const int t_step, const double time_d,
         BndryRegister bndry        (ba        , dm, m_in_rad, m_out_rad, m_extent_rad, ncomp);
         BndryRegister bndry_shifted(ba_shifted, dm, m_in_rad, m_out_rad, m_extent_rad, ncomp);
 
-        int nghost = 0;
+        // Read the cells around the box from the ghost cells where they lie outside the grids
+        int nghost = m_out_rad;
         if (var_name == "density")
         {
             bndry.copyFrom(S, nghost, Rho_comp, 0, ncomp, m_geom[bndry_lev].periodicity());
 
         } else if (var_name == "temperature") {
-            MultiFab Temp(S.boxArray(),S.DistributionMap(),ncomp,0);
+            MultiFab Temp(S.boxArray(),S.DistributionMap(),ncomp,m_out_rad);
             for (MFIter mfi(Temp, TilingIfNotGPU()); mfi.isValid(); ++mfi)
             {
-                const Box& bx = mfi.tilebox();
+                const Box& bx = mfi.growntilebox(m_out_rad);
                 Real time = static_cast<Real>(time_d);
                 if (is_moist) {
                     // NOTE: we send in S[mfi] where we should send in (*z_phys_cc[lev])[mfi] because we know this routine doesn't use it
@@ -320,35 +341,35 @@ void WriteBndryPlanes::write_planes (const int t_step, const double time_d,
             }
             bndry.copyFrom(Temp, nghost, 0, 0, ncomp, m_geom[bndry_lev].periodicity());
         } else if (var_name == "theta") {
-            MultiFab Temp(S.boxArray(),S.DistributionMap(),ncomp,0);
+            MultiFab Temp(S.boxArray(),S.DistributionMap(),ncomp,m_out_rad);
             for (MFIter mfi(Temp, TilingIfNotGPU()); mfi.isValid(); ++mfi)
             {
-                const Box& bx = mfi.tilebox();
+                const Box& bx = mfi.growntilebox(m_out_rad);
                 derived::erf_derrhodivide(bx, Temp[mfi], S[mfi], RhoTheta_comp);
             }
             bndry.copyFrom(Temp, nghost, 0, 0, ncomp, m_geom[bndry_lev].periodicity());
         } else if (var_name == "scalar") {
-            MultiFab Temp(S.boxArray(),S.DistributionMap(),ncomp,0);
+            MultiFab Temp(S.boxArray(),S.DistributionMap(),ncomp,m_out_rad);
             for (MFIter mfi(Temp, TilingIfNotGPU()); mfi.isValid(); ++mfi)
             {
-                const Box& bx = mfi.tilebox();
+                const Box& bx = mfi.growntilebox(m_out_rad);
                 derived::erf_derrhodivide(bx, Temp[mfi], S[mfi], RhoScalar_comp);
             }
             bndry.copyFrom(Temp, nghost, 0, 0, ncomp, m_geom[bndry_lev].periodicity());
         } else if (var_name == "ke") {
-            MultiFab Temp(S.boxArray(),S.DistributionMap(),ncomp,0);
+            MultiFab Temp(S.boxArray(),S.DistributionMap(),ncomp,m_out_rad);
             for (MFIter mfi(Temp, TilingIfNotGPU()); mfi.isValid(); ++mfi)
             {
-                const Box& bx = mfi.tilebox();
+                const Box& bx = mfi.growntilebox(m_out_rad);
                 derived::erf_derrhodivide(bx, Temp[mfi], S[mfi], RhoKE_comp);
             }
             bndry.copyFrom(Temp, nghost, 0, 0, ncomp, m_geom[bndry_lev].periodicity());
         } else if (var_name == "qv") {
-            MultiFab Temp(S.boxArray(),S.DistributionMap(),ncomp,0);
+            MultiFab Temp(S.boxArray(),S.DistributionMap(),ncomp,m_out_rad);
             if (S.nComp() > RhoQ2_comp) {
                 for (MFIter mfi(Temp, TilingIfNotGPU()); mfi.isValid(); ++mfi)
                 {
-                    const Box& bx = mfi.tilebox();
+                    const Box& bx = mfi.growntilebox(m_out_rad);
                     derived::erf_derrhodivide(bx, Temp[mfi], S[mfi], RhoQ1_comp);
                 }
             } else {
@@ -356,11 +377,11 @@ void WriteBndryPlanes::write_planes (const int t_step, const double time_d,
             }
             bndry.copyFrom(Temp, nghost, 0, 0, ncomp, m_geom[bndry_lev].periodicity());
         } else if (var_name == "qc") {
-            MultiFab Temp(S.boxArray(),S.DistributionMap(),ncomp,0);
+            MultiFab Temp(S.boxArray(),S.DistributionMap(),ncomp,m_out_rad);
             if (S.nComp() > RhoQ2_comp) {
                 for (MFIter mfi(Temp, TilingIfNotGPU()); mfi.isValid(); ++mfi)
                 {
-                    const Box& bx = mfi.tilebox();
+                    const Box& bx = mfi.growntilebox(m_out_rad);
                     derived::erf_derrhodivide(bx, Temp[mfi], S[mfi], RhoQ2_comp);
                 }
             } else {
@@ -369,7 +390,7 @@ void WriteBndryPlanes::write_planes (const int t_step, const double time_d,
             bndry.copyFrom(Temp, nghost, 0, 0, ncomp, m_geom[bndry_lev].periodicity());
         } else if (var_name == "velocity") {
             MultiFab Vel(S.boxArray(), S.DistributionMap(), 3, m_out_rad);
-            average_face_to_cellcenter(Vel,0,Array<const MultiFab*,3>{&xvel,&yvel,&zvel});
+            average_face_to_cellcenter(Vel,0,Array<const MultiFab*,3>{&xvel,&yvel,&zvel},m_out_rad);
             bndry.copyFrom(Vel, nghost, 0, 0, ncomp, m_geom[bndry_lev].periodicity());
         } else {
             //Print() << "Trying to write planar output for " << var_name << std::endl;
