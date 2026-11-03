@@ -2,6 +2,7 @@
 #include "ERF_EOS.H"
 #include "ERF_MOSTStress.H"
 #include "ERF_MicrophysicsUtils.H"
+#include "Diagnostics/ERF_NearSurfaceDiagnostics.H"
 #include "ERF_TerrainMetrics.H"
 
 #include <algorithm>
@@ -12,6 +13,27 @@
 using namespace amrex;
 
 namespace {
+
+// Height-dependent resistance factor, following Noah-MP's shifted logarithm
+// and bounded stability correction. ERF exposes one effective aerodynamic
+// roughness and one set of flux scales; tile-specific thermal roughness and
+// resistance histories are not available here. This is therefore a MOST
+// extension anchored to the native Noah-MP 2-m bundle, not a re-evaluation of
+// the full canopy/bare-ground solver.
+Real
+groundStationScalarFactor (Real height, Real z0, Real olen)
+{
+    const Real log_height = std::log1p(height / z0);
+    Real psi = Real(0.0);
+    if (std::abs(olen) > Real(1.0e-12) &&
+        std::abs(olen) < bogus_large_value * Real(0.5)) {
+        const similarity_funs sfuns;
+        const Real zeta = std::min((height + z0) / olen, Real(1.0));
+        psi = sfuns.calc_psi_h2(zeta);
+    }
+    // Noah-MP limits the unstable correction to 90% of the logarithm.
+    return log_height - std::min(psi, Real(0.9) * log_height);
+}
 
 bool
 validNoahMPGroundStationSurfaceTemperature (Real t_sfc, Real t_flux, int land_mask)
@@ -257,7 +279,7 @@ ERF::makeMOSTGroundStationSample (const GroundStationSample& ref_sample,
     if (std::abs(olen) > tiny && std::abs(olen) < bogus_large_value * Real(0.5)) {
         const Real zeta = z_eval / olen;
         psi_m = sfuns.calc_psi_m2(zeta);
-        psi_h = sfuns.calc_psi_h2(zeta);
+        psi_h = sfuns.calc_psi_h2(std::min(zeta, Real(1.0)));
     }
 
     const Real profile_factor = std::max(std::log(z_eval / amrex::max(z0, tiny)) - psi_m, tiny);
@@ -329,6 +351,60 @@ ERF::writeGroundStationData (GroundStationConfig& station, Real time, int nstep)
     Real accumulated_precip = Real(0.0);
 
     sampleGroundStationColumn(lev, station, z_agl, column_samples, surface_pressure, accumulated_precip);
+
+    // Fetch the native 2-m reference for any requested sub-grid height.
+    // The integrated MOST profile difference below supplies height dependence;
+    // at 2 m its correction is exactly zero.
+    Vector<Real> native_2m(2, Real(0.0));
+    int found_native_2m = 0;
+    const bool need_native_2m = !z_agl.empty() &&
+        std::any_of(station.heights.begin(), station.heights.end(),
+                    [&](Real height) { return height > Real(0.0) && height <= z_agl.front(); });
+    if (need_native_2m && lsm.Has_Model() &&
+        solverChoice.moisture_type != MoistureType::None) {
+        // Ground-station indices and the surface-layer fields are on level 0.
+        const int mlev = 0;
+        const Array<const MultiFab*, 5> fields{{
+            lsm.Get_Data_Ptr(mlev, "noahmp_temperature_2m_vegetated"),
+            lsm.Get_Data_Ptr(mlev, "noahmp_temperature_2m_bare"),
+            lsm.Get_Data_Ptr(mlev, "noahmp_water_vapor_mixing_ratio_2m_vegetated"),
+            lsm.Get_Data_Ptr(mlev, "noahmp_water_vapor_mixing_ratio_2m_bare"),
+            lsm.Get_Data_Ptr(mlev, "noahmp_vegetation_fraction")
+        }};
+        const iMultiFab* land_mask =
+            (mlev < static_cast<int>(lmask_lev.size()) && !lmask_lev[mlev].empty())
+                ? lmask_lev[mlev][0].get() : nullptr;
+        if (land_mask && std::all_of(fields.begin(), fields.end(),
+                                     [](const MultiFab* field) { return field != nullptr; })) {
+            const IntVect point(station.i_loc, station.j_loc, 0);
+            for (MFIter mfi(*fields[0]); mfi.isValid(); ++mfi) {
+                if (!mfi.validbox().contains(point)) { continue; }
+                // These copies also work when the surface fields live on a GPU.
+                int is_land = 0;
+                Gpu::dtoh_memcpy(&is_land, &land_mask->const_array(mfi)(point), sizeof(int));
+                if (is_land != 1) { break; }
+                Array<Real, 5> values;
+                for (int n = 0; n < 5; ++n) {
+                    Gpu::dtoh_memcpy(&values[n], &fields[n]->const_array(mfi)(point), sizeof(Real));
+                }
+                const near_surface_diagnostics::NativeBundle bundle{
+                    values[0], values[1], values[2], values[3], values[4]
+                };
+                if (near_surface_diagnostics::native_bundle_is_valid(bundle)) {
+                    const auto native = near_surface_diagnostics::aggregate_native_bundle(bundle);
+                    native_2m[0] = native.temperature;
+                    // The Noah-MP ERF interface already converts specific
+                    // humidity to mixing ratio. Do not convert it a second time.
+                    native_2m[1] = native.mixing_ratio;
+                    found_native_2m = 1;
+                }
+                break;
+            }
+        }
+        ParallelDescriptor::ReduceIntSum(found_native_2m);
+        ParallelDescriptor::ReduceRealSum(native_2m.data(), static_cast<int>(native_2m.size()));
+        AMREX_ALWAYS_ASSERT(found_native_2m <= 1);
+    }
 
     const auto& surface_layer = m_SurfaceLayer[Orientation::zlo()];
     bool have_surface_layer = (surface_layer != nullptr);
@@ -430,11 +506,45 @@ ERF::writeGroundStationData (GroundStationConfig& station, Real time, int nstep)
 
         for (const auto& height : station.heights) {
             GroundStationSample sample;
-            if (have_surface_layer && !z_agl.empty() && height <= z_agl.front()) {
+            const bool below_first = !z_agl.empty() && height > Real(0.0) &&
+                                     height <= z_agl.front();
+            const bool use_native = found_native_2m == 1 && below_first;
+            const Real theta_2m = use_native
+                ? getThgivenTandP(native_2m[0], surface_pressure, R_d / Cp_d) : Real(0.0);
+            if (have_surface_layer && below_first) {
+                // For native scalars, compute only the wind profile here. Zero
+                // scalar scales avoid evaluating the discarded skin profile.
                 sample = makeMOSTGroundStationSample(column_samples.front(), height, surface_pressure,
-                                                     ustar, tstar, qstar, olen, theta_surf, qv_surf, z0);
+                    ustar, use_native ? Real(0.0) : tstar, use_native ? Real(0.0) : qstar,
+                    olen, use_native ? theta_2m : theta_surf, use_native ? native_2m[1] : qv_surf, z0);
             } else {
                 sample = interpolateGroundStationSample(height, z_agl, column_samples);
+            }
+            if (use_native) {
+                Real delta_factor = Real(0.0);
+                bool valid_profile = height == Real(2.0);
+                if (height != Real(2.0) && have_surface_layer &&
+                    std::isfinite(z0) && z0 > Real(0.0) &&
+                    std::isfinite(olen) && std::isfinite(tstar) && std::isfinite(qstar)) {
+                    delta_factor = (groundStationScalarFactor(height, z0, olen) -
+                                    groundStationScalarFactor(Real(2.0), z0, olen)) / KAPPA;
+                    valid_profile = std::isfinite(delta_factor);
+                }
+                sample.theta = height == Real(2.0) ? theta_2m : theta_2m + tstar * delta_factor;
+                sample.temp = height == Real(2.0) ? native_2m[0] :
+                    getTgivenPandTh(surface_pressure, sample.theta, R_d / Cp_d);
+                sample.qv = height == Real(2.0) ? native_2m[1] : native_2m[1] + qstar * delta_factor;
+                // A negative extrapolated moisture value is unavailable, not
+                // a physical zero-humidity observation.
+                valid_profile = valid_profile && std::isfinite(sample.temp) &&
+                    sample.temp > Real(0.0) && std::isfinite(sample.qv) && sample.qv >= Real(0.0);
+                if (valid_profile) {
+                    Real qsat = Real(0.0);
+                    erf_qsatw(sample.temp, surface_pressure * Real(0.01), qsat);
+                    sample.rh = qsat > Real(0.0) ? Real(100.0) * sample.qv / qsat : Real(-999.0);
+                } else {
+                    sample.theta = sample.temp = sample.qv = sample.rh = Real(-999.0);
+                }
             }
             out << " "
                 << sample.u << " "
