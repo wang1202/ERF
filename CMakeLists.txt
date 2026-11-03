@@ -191,6 +191,8 @@ option(ERF_ENABLE_NOAHMP "Enable Noah-MP" OFF)
 
 #Other parameterizations
 option(ERF_ENABLE_WINDFARM "Enable wind farm parameterizations" OFF)
+option(ERF_ENABLE_FIRE "Enable the fire coupling (the atmosphere side; fire engines plug into it)" OFF)
+set(ERF_FIRE_ENGINE_DIRS "" CACHE STRING "Fire engine directories (each with ERFFireEngine.cmake) to compile in; needs ERF_ENABLE_FIRE")
 option(ERF_ENABLE_WSM6_FORT "Enable WSM6 Fortran bridge calls" OFF)
 option(ERF_ENABLE_WDM6_FORT "Enable WDM6 Fortran bridge calls" OFF)
 
@@ -206,7 +208,7 @@ endif()
 option(ERF_ENABLE_TOOLS "Enable building of additional tools" OFF)
 
 #Options for C++
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -430,11 +432,13 @@ if(ERF_ENABLE_EKAT)
     set(Kokkos_ENABLE_SYCL_LAMBDA ON CACHE BOOL "kokkos enable sycl lambda")
   endif()
 
-  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD 20)
   set(EKAT_ENABLE_MPI ON CACHE BOOL "ekat enable mpi")
   set(EKAT_ENABLE_TESTS OFF CACHE BOOL "ekat enable tests")
   set(EKAT_ENABLE_KOKKOS ON CACHE BOOL "ekat enable kokkos")
   set(EKAT_ENABLE_LOGGING ON CACHE BOOL "ekat enable spdlog")
+  # Kokkos deprecation used inside EKAT or RRTMGP is theirs to fix
+  set(Kokkos_ENABLE_DEPRECATION_WARNINGS OFF CACHE BOOL "kokkos deprecation warnings")
   set(EKAT_BIN ${PROJECT_BINARY_DIR}/Submodules/ekat)
 
   # Force use of internal spdlog from EKAT

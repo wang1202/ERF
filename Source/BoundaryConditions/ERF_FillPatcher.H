@@ -144,6 +144,9 @@ public:
     void Fill (amrex::MultiFab& mf, double time,
                BC& cbc, amrex::Vector<amrex::BCRec> const& bcs, int mask_val);
 
+    //! The times of the coarse data last registered (RegisterCoarseData)
+    [[nodiscard]] amrex::Vector<double> const& crse_times () const { return m_crse_times; }
+
 private:
 
     amrex::BoxArray m_fba;
@@ -226,9 +229,6 @@ ERFFillPatcher::Fill (amrex::MultiFab& mf, double time_d,
         fac_old = amrex::Real(1) - fac_new;
     }
 
-    // Boundary condition operator
-    cbc(*(m_cf_crse_data_old), 0, m_ncomp, amrex::IntVect(0), time, 0);
-
     // Coarse MF to hold time interpolated data
     amrex::MultiFab crse_data_time_interp(m_cf_crse_data_old->boxArray(),
                                           m_cf_crse_data_old->DistributionMap(),
@@ -239,6 +239,12 @@ ERFFillPatcher::Fill (amrex::MultiFab& mf, double time_d,
                              fac_old, *(m_cf_crse_data_old), 0,
                              fac_new, *(m_cf_crse_data_new), 0,
                              0, m_ncomp, amrex::IntVect{0});
+
+    // Boundary condition operator, at the time it is asked for, on the data at that time.
+    // Applied to the old coarse data before the interpolation it would be weighted by
+    // fac_old -- and vanish at the new coarse time -- and would overwrite the registered
+    // old data the next fill interpolates from.
+    cbc(crse_data_time_interp, 0, m_ncomp, amrex::IntVect(0), time, 0);
 
     // Call correct spatial interpolation type
     amrex::IndexType m_ixt = mf.boxArray().ixType();

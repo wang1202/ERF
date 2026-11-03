@@ -13,8 +13,11 @@
 #include "ERF_Plotfile2DUtils.H"
 #include "Diagnostics/ERF_NearSurfaceDiagnostics.H"
 #include "ERF_EpochTime.H"
+#include "ERF_LatLonMap.H"
+#include "ERF_PlanarBoundary.H"
 #include "ERF_SrcHeaders.H"
 #include "ERF_StormDiagnostics.H"
+#include "ERF_SurfaceTemperature.H"
 #include "ERF_TerrainMetrics.H"
 #include "ERF_Utils.H"
 #include <AMReX_buildInfo.H>
@@ -228,6 +231,44 @@ ERF::FillPlot2DVars (int lev,
     int klo = geom[lev].Domain().smallEnd(2);
     int khi = geom[lev].Domain().bigEnd(2);
 
+    // The boxes of ba2d[lev] are the footprints of the level's 3D boxes, one for one.  When
+    //    some 3D box does not run from the ground to the top of the domain (a BoxArray split
+    //    in z, a refined level that does not span the domain in z), several 2D boxes can
+    //    cover one column, and the 3D box of some of them does not hold the ground or the top.
+    //    The fields read at the ground or the top are then read from copies of that plane laid
+    //    out on ba2d[lev], which every 2D box can read, and once every component is filled the
+    //    boxes whose 3D box does not reach the ground are given the values of the one that
+    //    does (see the end of this routine).  A level whose grids all span the domain in z
+    //    reads the fields themselves, as before.
+    bool spans_z = true;
+    for (int ib = 0; ib < static_cast<int>(grids[lev].size()); ++ib) {
+        if (grids[lev][ib].smallEnd(2) != klo || grids[lev][ib].bigEnd(2) != khi) {
+            spans_z = false;
+        }
+    }
+    Vector<std::unique_ptr<MultiFab>> planes;
+    // The ground plane of a field on the level's 3D grids; a field on ba2d[lev] (the surface
+    //    layer, the land surface) is read as it is
+    auto at_ground = [&] (const MultiFab* src) -> const MultiFab* {
+        if (spans_z || !src || !src->boxArray().CellEqual(grids[lev])) { return src; }
+        planes.push_back(copy_ground_plane(*src, klo));
+        return planes.back().get();
+    };
+    // The plane k = khi+1 (a z ghost cell) of a cell-centered field on the level's 3D grids,
+    //    -999 over the columns in which no box reaches the top
+    auto above_top = [&] (const MultiFab* src) -> const MultiFab* {
+        if (spans_z || !src) { return src; }
+        BoxList bl;
+        for (int ib = 0; ib < static_cast<int>(grids[lev].size()); ++ib) {
+            Box b = grids[lev][ib];
+            b.setRange(2, khi+1);
+            bl.push_back(b);
+        }
+        planes.push_back(std::make_unique<MultiFab>(BoxArray(std::move(bl)), dmap[lev], src->nComp(), 0));
+        planes.back()->setVal(-999);
+        planes.back()->ParallelCopy(*src, 0, 0, src->nComp(), IntVect(0,0,1), IntVect(0));
+        return planes.back().get();
+    };
     const MultiFab* pblh_source = nullptr;
     const MultiFab* sens_flux_source = nullptr;
     const MultiFab* laten_flux_source = nullptr;
@@ -252,11 +293,24 @@ ERF::FillPlot2DVars (int lev,
     // NOTE: the SurfaceLayer pblh holds only the bogus value it was initialized
     //       with unless erf.most.pblh_calc was set (the default is "none"), so we
     //       leave the source null in that case and emit the missing value.
+    // The surface layer's PBL height is set in every column of the level, including the
+    //    columns in which no box reaches the ground: a level that does not reach the domain
+    //    top takes the coarser level's there (SurfaceLayer::fill_pblh_from_coarser)
+    bool pblh_in_every_column = false;
     if (!pblh_source && surf_layer && surf_layer->computes_pblh()) {
         pblh_source = surf_layer->get_pblh(lev);
+        pblh_in_every_column = true;
     }
+    int pblh_comp = -1;
+    pblh_source       = at_ground(pblh_source);
+    sens_flux_source  = at_ground(sens_flux_source);
+    laten_flux_source = at_ground(laten_flux_source);
+    shoc_ustar_source = at_ground(shoc_ustar_source);
+    shoc_olen_source  = at_ground(shoc_olen_source);
+    shoc_wthv_source  = at_ground(shoc_wthv_source);
 
     if (containerHasElement(plot_var_names, "z_surf")) {
+        const MultiFab* z_ground = at_ground(z_phys_nd[lev].get());
 #ifdef _OPENMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -264,7 +318,7 @@ ERF::FillPlot2DVars (int lev,
         {
             const Box& bx = mfi.tilebox();
             const Array4<Real>& derdat = mf_dst.array(mfi);
-            const Array4<const Real>& z_phys_arr = z_phys_nd[lev]->const_array(mfi);
+            const Array4<const Real>& z_phys_arr = z_ground->const_array(mfi);
             ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
                derdat(i, j, k, mf_comp) = Compute_Z_AtWFace(i, j, 0, z_phys_arr);
             });
@@ -391,6 +445,7 @@ ERF::FillPlot2DVars (int lev,
     if (containerHasElement(plot_var_names, "pblh")) {
         plotfile2d::fill_component_from_klevel_or_value(
             mf_dst, mf_comp, pblh_source, 0, -999);
+        if (pblh_in_every_column) { pblh_comp = mf_comp; }
         mf_comp++;
     } // pblh
 
@@ -415,12 +470,48 @@ ERF::FillPlot2DVars (int lev,
         mf_comp++;
     } // z0
 
+    // 10 m winds from the surface-layer momentum profile, in the direction of the
+    //    first-cell wind; -999 without a surface layer
+    {
+        const bool want_u10  = containerHasElement(plot_var_names, "u_10m");
+        const bool want_v10  = containerHasElement(plot_var_names, "v_10m");
+        const bool want_ue10 = containerHasElement(plot_var_names, "u_east_10m");
+        const bool want_vn10 = containerHasElement(plot_var_names, "v_north_10m");
+        const int u10_comp  = want_u10  ? mf_comp++ : -1;
+        const int v10_comp  = want_v10  ? mf_comp++ : -1;
+        const int ue10_comp = want_ue10 ? mf_comp++ : -1;
+        const int vn10_comp = want_vn10 ? mf_comp++ : -1;
+        if (want_u10 || want_v10 || want_ue10 || want_vn10) {
+            near_surface_diagnostics::WindSources wind10;
+            wind10.u_star           = surf_layer ? surf_layer->get_u_star(lev) : nullptr;
+            wind10.roughness_height = surf_layer ? surf_layer->get_z0(lev)     : nullptr;
+            wind10.obukhov_length   = surf_layer ? surf_layer->get_olen(lev)   : nullptr;
+            wind10.xvel = at_ground(&vars_new[lev][Vars::xvel]);
+            wind10.yvel = at_ground(&vars_new[lev][Vars::yvel]);
+            wind10.klo  = klo;
+            // The grid orientation for the earth-relative components, as for the
+            //    sampled u_east and v_north; without lat/lon the grid is aligned with east
+            MultiFab cos_alpha_10m, sin_alpha_10m;
+            const bool latlon = (lev < static_cast<int>(lat_m.size())) &&
+                                lat_m[lev] != nullptr && lon_m[lev] != nullptr;
+            if ((want_ue10 || want_vn10) && latlon) {
+                cos_alpha_10m.define(ba2d[lev], dmap[lev], 1, 0);
+                sin_alpha_10m.define(ba2d[lev], dmap[lev], 1, 0);
+                fill_grid_rotation(cos_alpha_10m, sin_alpha_10m, *lat_m[lev], *lon_m[lev], geom[lev]);
+                wind10.cos_alpha = &cos_alpha_10m;
+                wind10.sin_alpha = &sin_alpha_10m;
+            }
+            near_surface_diagnostics::fill_wind_10m(mf_dst, u10_comp, v10_comp,
+                                                    ue10_comp, vn10_comp, wind10);
+        }
+    } // u_10m, v_10m, u_east_10m, v_north_10m
+
     if (containerHasElement(plot_var_names, "OLR")) {
         // Outgoing longwave: the upward LW at the top-of-atmosphere
         // interface, which rad_fluxes keeps in the z-ghost cell above the
         // top layer (index khi holds the lower interface of the top layer).
         plotfile2d::fill_component_from_klevel_or_value(
-            mf_dst, mf_comp, rad_fluxes[lev].get(), khi + 1, -999, 2);
+            mf_dst, mf_comp, above_top(rad_fluxes[lev].get()), khi + 1, -999, 2);
         mf_comp++;
     } // OLR
 
@@ -483,7 +574,13 @@ ERF::FillPlot2DVars (int lev,
     } // laten_flux
 
     if (containerHasElement(plot_var_names, "surf_pres")) {
+        // The pressure at the ground, as WRF's PSFC: the lowest cell's pressure plus
+        //    rho g times the height of that cell's centre above the ground, the same
+        //    surface pressure the radiation and surface layer use
         bool moist = (solverChoice.moisture_type != MoistureType::None);
+        const Real dz = geom[lev].CellSize(2);
+        const MultiFab* cons_ground = at_ground(&vars_new[lev][Vars::cons]);
+        const MultiFab* z_ground    = at_ground(z_phys_nd[lev].get());
 #ifdef _OPENMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -491,12 +588,16 @@ ERF::FillPlot2DVars (int lev,
         {
             const Box& bx = mfi.tilebox();
             const auto& derdat   = mf_dst.array(mfi);
-            const auto& cons_arr = vars_new[lev][Vars::cons].const_array(mfi);
+            const auto& cons_arr = cons_ground->const_array(mfi);
+            const auto& z_arr    = (z_ground) ? z_ground->const_array(mfi)
+                                              : Array4<const Real>{};
             ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
-                auto rt = cons_arr(i,j,klo,RhoTheta_comp);
-                auto qv = (moist) ? cons_arr(i,j,klo,RhoQ1_comp)/cons_arr(i,j,klo,Rho_comp)
-                                  : zero;
-                derdat(i, j, k, mf_comp) = getPgivenRTh(rt, qv);
+                const Real rho = cons_arr(i,j,klo,Rho_comp);
+                const Real qv  = (moist) ? cons_arr(i,j,klo,RhoQ1_comp)/rho : zero;
+                const Real z_cc_agl = (z_arr) ? Compute_Zrel_AtCellCenter(i,j,klo,z_arr)
+                                              : myhalf*dz;
+                derdat(i, j, k, mf_comp) = erf_surface_temperature::pressure_at_surface(
+                    rho, cons_arr(i,j,klo,RhoTheta_comp), qv, z_cc_agl);
             });
         }
         mf_comp++;
@@ -504,8 +605,8 @@ ERF::FillPlot2DVars (int lev,
 
     if (containerHasElement(plot_var_names, "sea_level_pressure")) {
         sea_level_pressure_diagnostics::fill_sea_level_pressure(
-            mf_dst, mf_comp, vars_new[lev][Vars::cons], *z_phys_nd[lev],
-            solverChoice.moisture_indices.qv, klo);
+            mf_dst, mf_comp, *at_ground(&vars_new[lev][Vars::cons]),
+            *at_ground(z_phys_nd[lev].get()), solverChoice.moisture_indices.qv, klo);
         mf_comp++;
     } // sea_level_pressure
 
@@ -553,6 +654,10 @@ ERF::FillPlot2DVars (int lev,
                                                selected_water_paths,
                                                geom[lev],
                                                *detJ_cc[lev]);
+        // On grids split in z each 2D box holds only its own box's part of the column
+        for (int n = 0; n < selected_water_paths.n; ++n) {
+            sum_over_stacked_boxes(mf_dst, selected_water_paths.dst_comp[n], 1);
+        }
     }
 
     if (containerHasElement(plot_var_names, "integrated_qc")) { mf_comp++; }
@@ -660,8 +765,8 @@ ERF::FillPlot2DVars (int lev,
             surf_layer ? surf_layer->get_surface_diagnostic_source(lev) : nullptr;
         near_surface_sources.land_mask =
             (lmask_lev[lev].empty()) ? nullptr : lmask_lev[lev][0].get();
-        near_surface_sources.cons = &vars_new[lev][Vars::cons];
-        near_surface_sources.z_phys_nd = z_phys_nd[lev].get();
+        near_surface_sources.cons = at_ground(&vars_new[lev][Vars::cons]);
+        near_surface_sources.z_phys_nd = at_ground(z_phys_nd[lev].get());
         near_surface_sources.dz = geom[lev].CellSize(2);
         near_surface_sources.klo = klo;
         near_surface_sources.moist = solverChoice.moisture_type != MoistureType::None;
@@ -683,6 +788,29 @@ ERF::FillPlot2DVars (int lev,
     //    the pressure vertical coordinate.  This matches the 3-D plotfile path.
     MultiFab p_hse(base_state[lev], make_alias, BaseState::p0_comp, 1);
     const MultiFab* p_hse_ptr = (solverChoice.anelastic[lev] == 1) ? &p_hse : nullptr;
+    // The grid orientation, for the earth-relative u_east, v_north and wind_dir:
+    //    from this level's lat/lon when the run has them (a WRF or metgrid
+    //    initialization), otherwise the grid is taken to be aligned with east
+    const bool have_latlon = (lev < static_cast<int>(lat_m.size())) &&
+                             lat_m[lev] != nullptr && lon_m[lev] != nullptr;
+    // Every level is given lat/lon when level 0 has them (interpolated from the
+    //    coarser level, or read from the checkpoint). A level without them would
+    //    write grid-relative winds beside earth-relative ones in one plotfile.
+    const bool any_sampled = static_output_count < static_cast<int>(output_descriptors.size());
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!any_sampled || have_latlon || lat_m.empty() || lat_m[0] == nullptr,
+        "2D plotfile: level 0 has latitude/longitude arrays but this level does not, so its "
+        "sampled u_east, v_north and wind_dir could not be rotated to earth-relative");
+    // The sampled-level fields search the whole column above each point within one box
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!any_sampled || spans_z,
+        "2D plotfile: the sampled-level fields need every grid at level " + std::to_string(lev) +
+        " to run from the bottom to the top of the domain.  Choose grids that are not decomposed "
+        "in z (amr.max_grid_size_z) and refined regions that span the domain in z.");
+    MultiFab cos_alpha, sin_alpha;
+    if (have_latlon && any_sampled) {
+        cos_alpha.define(ba2d[lev], dmap[lev], 1, 0);
+        sin_alpha.define(ba2d[lev], dmap[lev], 1, 0);
+        fill_grid_rotation(cos_alpha, sin_alpha, *lat_m[lev], *lon_m[lev], geom[lev]);
+    }
     for (int out_idx = static_output_count; out_idx < static_cast<int>(output_descriptors.size()); ++out_idx) {
         const auto& descriptor = output_descriptors[out_idx];
         // Sampled-level descriptors are dynamic. The interpolator owns
@@ -692,6 +820,10 @@ ERF::FillPlot2DVars (int lev,
         wind_sources.xvel = &vars_new[lev][Vars::xvel];
         wind_sources.yvel = &vars_new[lev][Vars::yvel];
         wind_sources.zvel = &vars_new[lev][Vars::zvel];
+        if (have_latlon) {
+            wind_sources.cos_alpha = &cos_alpha;
+            wind_sources.sin_alpha = &sin_alpha;
+        }
         plotfile2d::fill_sampled_level_component(
             mf_dst, mf_comp, descriptor,
             vars_new[lev][Vars::cons],
@@ -705,6 +837,27 @@ ERF::FillPlot2DVars (int lev,
         mf_comp++;
     }
 
+    // A level whose grids do not all span the domain in z: give every 2D box the values of
+    //    the one whose 3D box holds the ground, so that the boxes stacked over a column agree
+    if (!spans_z) {
+        PlanarBoundary planar;
+        planar.define(grids[lev], ba2d[lev], dmap[lev], klo);
+
+        // Columns in which no box reaches the ground have no ground values: -999 there,
+        //    except the PBL height, which the surface layer sets in those columns too.
+        //    Elsewhere the copy below overwrites these boxes with the one that reaches the ground.
+        for (MFIter mfi(mf_dst); mfi.isValid(); ++mfi) {
+            if (!planar.is_surface_copy(mfi.index())) {
+                for (int n = 0; n < mf_dst.nComp(); ++n) {
+                    if (n != pblh_comp) {
+                        mf_dst[mfi].setVal<RunOn::Device>(-999, mf_dst[mfi].box(), n, 1);
+                    }
+                }
+            }
+        }
+        planar.fill(mf_dst, geom[lev].periodicity());
+    }
+
     if (mf_comp != ncomp_mf) {
         Abort(plotfile2d::format_2d_component_count_error(lev, mf_comp, ncomp_mf));
     }
@@ -713,6 +866,10 @@ ERF::FillPlot2DVars (int lev,
 void
 ERF::Write2DPlotFile (int which, PlotFileType plotfile_type, Vector<std::string> plot_var_names)
 {
+    // Station rows are buffered, and a run that aborts never reaches the next
+    // flush: flushing here keeps the station series as far along as the plotfiles.
+    flush_stations();
+
     const int plot_step = istep[0];
     const std::string plotfilename = make_2d_plotfile_name(which, plot_step,
                                                            plot2d_file_1, plot2d_file_2,
