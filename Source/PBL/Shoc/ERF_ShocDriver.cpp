@@ -1050,9 +1050,16 @@ ShocDriver::update_entrainment_diagnostics (const MultiFab& mapfac_mx,
                     ? my(i,j,0) * (H(i,j,k) - H(i,jb,k)) * dyinv
                     : my(i,j,0) * (H(i,jt,k) - H(i,jb,k)) * (0.5_rt * dyinv);
 
+            // A finite missing sentinel in a neighboring height must not enter
+            // the differencing stencil and turn into an apparently valid slope.
+            const bool stencil_valid = !include_hadv ||
+                (shoc_entrainment::valid_diagnostic(H(il,j,k)) &&
+                 shoc_entrainment::valid_diagnostic(H(ir,j,k)) &&
+                 shoc_entrainment::valid_diagnostic(H(i,jb,k)) &&
+                 shoc_entrainment::valid_diagnostic(H(i,jt,k)));
             const auto result = shoc_entrainment::kinematic(
                 H(i,j,k), Hprev(i,j,k), dt_real, u(i,j,k), v(i,j,k), w(i,j,k),
-                dHdx, dHdy, history_valid, include_hadv);
+                dHdx, dHdy, history_valid && stencil_valid, include_hadv);
             we(i,j,k) = result.we_kinematic;
             tendency(i,j,k) = result.pblh_tendency;
             hadv(i,j,k) = result.pblh_hadv;

@@ -33,6 +33,12 @@ bool finite (amrex::Real value) noexcept
 }
 
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+bool valid_diagnostic (amrex::Real value) noexcept
+{
+    return finite(value) && value != missing_value;
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 KinematicResult kinematic (amrex::Real H,
                            amrex::Real H_previous,
                            amrex::Real dt,
@@ -45,10 +51,12 @@ KinematicResult kinematic (amrex::Real H,
                            bool include_horizontal_advection) noexcept
 {
     KinematicResult result;
-    if (!history_valid || !(dt > amrex::Real(0)) ||
-        !finite(H) || !finite(H_previous) || !finite(w_at_pblh) ||
-        !finite(u_at_pblh) || !finite(v_at_pblh) ||
-        !finite(dHdx) || !finite(dHdy)) {
+    if (!history_valid || !finite(dt) || !(dt > amrex::Real(0)) ||
+        !valid_diagnostic(H) || !valid_diagnostic(H_previous) ||
+        !valid_diagnostic(w_at_pblh) ||
+        (include_horizontal_advection &&
+         (!valid_diagnostic(u_at_pblh) || !valid_diagnostic(v_at_pblh) ||
+          !valid_diagnostic(dHdx) || !valid_diagnostic(dHdy)))) {
         return result;
     }
 
@@ -56,6 +64,10 @@ KinematicResult kinematic (amrex::Real H,
     result.pblh_hadv = include_horizontal_advection
         ? u_at_pblh * dHdx + v_at_pblh * dHdy : amrex::Real(0.0);
     result.we_kinematic = result.pblh_tendency + result.pblh_hadv - w_at_pblh;
+    if (!finite(result.pblh_tendency) || !finite(result.pblh_hadv) ||
+        !finite(result.we_kinematic)) {
+        return KinematicResult{};
+    }
     return result;
 }
 

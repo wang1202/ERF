@@ -107,6 +107,9 @@ struct MoveSchedule
   amrex::Vector<amrex::Real> stop_time;
   amrex::Vector<amrex::Real> speed_x;
   amrex::Vector<amrex::Real> speed_y;
+  // Optional per-site switch. An empty vector preserves the historical
+  // behavior where every configured site follows the shared schedule.
+  amrex::Vector<int> site_move;
 
   void init(amrex::ParmParse& pp, const std::string& prefix)
   {
@@ -114,6 +117,7 @@ struct MoveSchedule
     pp.queryarr("move_stop_time", stop_time);
     pp.queryarr("move_speed_x", speed_x);
     pp.queryarr("move_speed_y", speed_y);
+    pp.queryarr("site_move", site_move);
 
     const auto ns = start_time.size();
     const auto ne = stop_time.size();
@@ -172,6 +176,24 @@ struct MoveSchedule
 
   bool moving() const { return !start_time.empty(); }
 
+  bool site_moving(int site) const
+  {
+    return moving() && (site_move.empty() || site_move[site] != 0);
+  }
+
+  void validate_site_count(int nsites, const std::string& prefix) const
+  {
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+      site_move.empty() || static_cast<int>(site_move.size()) == nsites,
+      (prefix + ": site_move must have one entry per i_loc/j_loc site")
+        .c_str());
+    for (int s = 0; s < static_cast<int>(site_move.size()); ++s) {
+      AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+        site_move[s] == 0 || site_move[s] == 1,
+        (prefix + ": site_move entries must be 0 or 1").c_str());
+    }
+  }
+
   [[nodiscard]] bool is_valid() const
   {
     if (start_time.size() != stop_time.size() ||
@@ -195,16 +217,19 @@ site_location_at_time(
   int j0,
   amrex::Real time,
   const amrex::Geometry& geom,
-  const MoveSchedule& move)
+  const MoveSchedule& move,
+  int site)
 {
   const amrex::Real dx = geom.CellSize(0);
   const amrex::Real dy = geom.CellSize(1);
+  const amrex::Real offset_x = move.site_moving(site) ? move.offset_x(time) : 0.0;
+  const amrex::Real offset_y = move.site_moving(site) ? move.offset_y(time) : 0.0;
   const amrex::Real x = geom.ProbLo(0) +
                         (static_cast<amrex::Real>(i0) + 0.5) * dx +
-                        move.offset_x(time);
+                        offset_x;
   const amrex::Real y = geom.ProbLo(1) +
                         (static_cast<amrex::Real>(j0) + 0.5) * dy +
-                        move.offset_y(time);
+                        offset_y;
 
   const amrex::Box& dom = geom.Domain();
   int i = static_cast<int>(std::floor((x - geom.ProbLo(0)) / dx));
@@ -419,6 +444,7 @@ struct CeilometerSimulator
     pp.query("r_eff_ice_default", m_r_eff_ice_default);
     pp.query("beta_thresh", m_beta_thresh);
     m_move.init(pp, "erf.ceilometer");
+    m_move.validate_site_count(m_nsites, "erf.ceilometer");
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
       m_output_interval > 0,
       "erf.ceilometer: output_interval must be positive");
@@ -439,7 +465,7 @@ struct CeilometerSimulator
                       << "# initial_i_loc=" << m_iloc[s]
                       << "  initial_j_loc=" << m_jloc[s] << "\n"
                       << "# move_enabled="
-                      << (m_move.moving() ? "true" : "false") << "\n"
+                      << (m_move.site_moving(s) ? "true" : "false") << "\n"
                       << "# backscatter_model=" << m_backscatter_model << "\n"
                       << "# Col 1: time [s]\n"
                       << "# Col 2: x [m]\n"
@@ -461,13 +487,13 @@ struct CeilometerSimulator
   int ILoc(int s, amrex::Real t, const amrex::Geometry& geom) const
   {
     return InstrumentSimUtil::site_location_at_time(
-             m_iloc[s], m_jloc[s], t, geom, m_move)
+             m_iloc[s], m_jloc[s], t, geom, m_move, s)
       .i;
   }
   int JLoc(int s, amrex::Real t, const amrex::Geometry& geom) const
   {
     return InstrumentSimUtil::site_location_at_time(
-             m_iloc[s], m_jloc[s], t, geom, m_move)
+             m_iloc[s], m_jloc[s], t, geom, m_move, s)
       .j;
   }
   bool is_write_step(int istep) const
@@ -500,7 +526,7 @@ struct CeilometerSimulator
 
     for (int s = 0; s < m_nsites; ++s) {
       auto loc = InstrumentSimUtil::site_location_at_time(
-        m_iloc[s], m_jloc[s], t, geom, m_move);
+        m_iloc[s], m_jloc[s], t, geom, m_move, s);
       int iloc = loc.i;
       int jloc = loc.j;
 
@@ -625,13 +651,13 @@ struct DopplerLidarSimulator
   int ILoc(int s, amrex::Real t, const amrex::Geometry& geom) const
   {
     return InstrumentSimUtil::site_location_at_time(
-             m_iloc[s], m_jloc[s], t, geom, m_move)
+             m_iloc[s], m_jloc[s], t, geom, m_move, s)
       .i;
   }
   int JLoc(int s, amrex::Real t, const amrex::Geometry& geom) const
   {
     return InstrumentSimUtil::site_location_at_time(
-             m_iloc[s], m_jloc[s], t, geom, m_move)
+             m_iloc[s], m_jloc[s], t, geom, m_move, s)
       .j;
   }
   bool is_write_step(int istep) const
@@ -667,6 +693,7 @@ struct DopplerLidarSimulator
     pp.query("do_backscatter", m_do_backscatter);
     pp.query("r_eff_default", m_r_eff_default);
     m_move.init(pp, "erf.doppler_lidar");
+    m_move.validate_site_count(m_nsites, "erf.doppler_lidar");
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
       m_output_interval > 0,
       "erf.doppler_lidar: output_interval must be positive");
@@ -703,7 +730,7 @@ struct DopplerLidarSimulator
               "  initial_j_loc=" + std::to_string(m_jloc[s]) +
               "\n"
               "# move_enabled=" +
-              std::string(m_move.moving() ? "true" : "false") + "\n" + cnr_hdr +
+              std::string(m_move.site_moving(s) ? "true" : "false") + "\n" + cnr_hdr +
               "# Col 1: time [s]\n"
               "# Col 2: x [m]\n"
               "# Col 3: y [m]\n"
@@ -724,7 +751,7 @@ struct DopplerLidarSimulator
               "  initial_j_loc=" + std::to_string(m_jloc[s]) +
               "\n"
               "# move_enabled=" +
-              std::string(m_move.moving() ? "true" : "false") +
+              std::string(m_move.site_moving(s) ? "true" : "false") +
               "\n"
               "# Col 1: time [s]\n"
               "# Col 2: x [m]\n"
@@ -746,7 +773,7 @@ struct DopplerLidarSimulator
               "  initial_j_loc=" + std::to_string(m_jloc[s]) +
               "\n"
               "# move_enabled=" +
-              std::string(m_move.moving() ? "true" : "false") +
+              std::string(m_move.site_moving(s) ? "true" : "false") +
               "\n"
               "# Col 1: time [s]\n"
               "# Col 2: x [m]\n"
@@ -789,7 +816,7 @@ struct DopplerLidarSimulator
     int stare_idx = 0, vad_idx = 0, beta_idx = 0;
     for (int s = 0; s < m_nsites; ++s) {
       auto loc = InstrumentSimUtil::site_location_at_time(
-        m_iloc[s], m_jloc[s], t, geom, m_move);
+        m_iloc[s], m_jloc[s], t, geom, m_move, s);
       int iloc = loc.i;
       int jloc = loc.j;
 
@@ -1107,6 +1134,7 @@ struct MWRSimulator
     pp.query("output_file", m_output_prefix);
     pp.query("do_brightness_temp", m_do_tb);
     m_move.init(pp, "erf.mwr");
+    m_move.validate_site_count(m_nsites, "erf.mwr");
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
       m_output_interval > 0, "erf.mwr: output_interval must be positive");
 
@@ -1131,7 +1159,7 @@ struct MWRSimulator
             "  initial_j_loc=" + std::to_string(m_jloc[s]) +
             "\n"
             "# move_enabled=" +
-            std::string(m_move.moving() ? "true" : "false") +
+            std::string(m_move.site_moving(s) ? "true" : "false") +
             "\n"
             "# Col 1: time [s]\n"
             "# Col 2: x [m]\n"
@@ -1151,7 +1179,7 @@ struct MWRSimulator
             "  initial_j_loc=" + std::to_string(m_jloc[s]) +
             "\n"
             "# move_enabled=" +
-            std::string(m_move.moving() ? "true" : "false") +
+            std::string(m_move.site_moving(s) ? "true" : "false") +
             "\n"
             "# Col 1: time [s]\n"
             "# Col 2: x [m]\n"
@@ -1171,7 +1199,7 @@ struct MWRSimulator
               "  initial_j_loc=" + std::to_string(m_jloc[s]) +
               "\n"
               "# move_enabled=" +
-              std::string(m_move.moving() ? "true" : "false") +
+              std::string(m_move.site_moving(s) ? "true" : "false") +
               "\n"
               "# Col 1: time [s]\n"
               "# Col 2: x [m]\n"
@@ -1214,7 +1242,7 @@ struct MWRSimulator
 
     for (int s = 0; s < m_nsites; ++s) {
       auto loc = InstrumentSimUtil::site_location_at_time(
-        m_iloc[s], m_jloc[s], t, geom, m_move);
+        m_iloc[s], m_jloc[s], t, geom, m_move, s);
       int iloc = loc.i;
       int jloc = loc.j;
 

@@ -127,6 +127,8 @@ void PBLDiagnosticRecorder::init (const amrex::Geometry& geom, int max_level,
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_summary_interval > 0, "erf.pbl_recorder.summary_output_interval must be positive");
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_profile_interval > 0, "erf.pbl_recorder.profile_output_interval must be positive");
     m_move.init(pp, "erf.pbl_recorder");
+    m_move.validate_site_count(static_cast<int>(m_iloc.size()),
+                               "erf.pbl_recorder");
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(driver.entrainment_diagnostics_enabled(),
         "erf.pbl_recorder requires erf.shoc.diagnose_entrainment = true");
     m_restarting = restarting;
@@ -143,7 +145,7 @@ void PBLDiagnosticRecorder::write_summary_header (std::fstream& os, int site) co
 {
     os << "# ERF native-SHOC moving-column PBL diagnostic recorder\n"
        << "# site=" << site << " initial_cell_i=" << m_iloc[site]
-       << " initial_cell_j=" << m_jloc[site] << " moving=" << (m_move.moving()?1:0)
+       << " initial_cell_j=" << m_jloc[site] << " moving=" << (m_move.site_moving(site)?1:0)
        << " restart_append=" << (m_restarting?1:0) << "\n"
        << "# missing_value=-999; heights=z_phys_cc; provenance=ERF build metadata\n"
        << "# jump_layers=erf.shoc.entrainment_jump_ncell; min_delta_theta_v=erf.shoc.entrainment_min_delta_theta_v\n"
@@ -153,7 +155,7 @@ void PBLDiagnosticRecorder::write_summary_header (std::fstream& os, int site) co
 void PBLDiagnosticRecorder::write_profile_header (std::fstream& os, int site) const
 {
     os << "# ERF native-SHOC profile; site=" << site << " initial_cell_i=" << m_iloc[site]
-       << " initial_cell_j=" << m_jloc[site] << " moving=" << (m_move.moving()?1:0)
+       << " initial_cell_j=" << m_jloc[site] << " moving=" << (m_move.site_moving(site)?1:0)
        << " missing_value=-999; z_msl=z_phys_cc; optional moisture fields use the active map\n"
        << "# provenance=ERF build metadata\n"
        << "# columns: time[s] step x[m] y[m] i_loc j_loc pblh_agl[m] we_kinematic[m/s] we_flux_jump[m/s] k z_msl[m] z_agl[m] theta[K] theta_v[K] qv[kg/kg] qc[kg/kg] qi[kg/kg] u[m/s] v[m/s] w[m/s] KE[m2/s2] wthv_sec[K m/s] wthl_sec[K m/s] wqw_sec[kg/kg m/s] w_sec[m/s] w3[m3/s3] brunt[s-2] shear_prod[m2/s3] buoy_prod[m2/s3] diss_tke[m2/s3] Lturb[m] Kmv[m2/s] Khv[m2/s] shoc_cldfrac[-] shoc_ql[kg/kg] shoc_cond[kg/kg] qsrc_sw[K/s] qsrc_lw[K/s]\n";
@@ -170,7 +172,7 @@ void PBLDiagnosticRecorder::write (amrex::Real time, int step, const amrex::Mult
     if (!summary && !profile) return;
     const int klo = geom.Domain().smallEnd(2), khi = geom.Domain().bigEnd(2), nz = khi-klo+1;
     for (int site = 0; site < static_cast<int>(m_iloc.size()); ++site) {
-        const auto loc = InstrumentSimUtil::site_location_at_time(m_iloc[site], m_jloc[site], time, geom, m_move);
+        const auto loc = InstrumentSimUtil::site_location_at_time(m_iloc[site], m_jloc[site], time, geom, m_move, site);
         const int i=loc.i, j=loc.j;
         auto z = InstrumentSimUtil::extract_column(z_phys_cc,0,i,j,klo,khi);
         auto rho = InstrumentSimUtil::extract_column(cons,Rho_comp,i,j,klo,khi);
