@@ -79,6 +79,7 @@ public:
    * @param[in]     low_time_interval   low-boundary-data time interval
    * @param[in]     eb_vec              optional embedded-boundary geometry data
    * @param[in]     surf_model          optional weighted surface-model interface
+   * @param[in]     a_has_immersed_buildings  whether building immersed forcing is configured
    */
   explicit SurfaceLayer (amrex::Orientation face,
                          const amrex::Vector<amrex::Geometry>& geom,
@@ -95,7 +96,8 @@ public:
                          double final_low_time,
                          double low_time_interval = 0.0,
                          const amrex::Vector<const eb_*>& eb_vec = {},
-                         SurfaceModel* surf_model = nullptr)
+                         SurfaceModel* surf_model = nullptr,
+                         bool a_has_immersed_buildings = false)
   : m_face(face),
     m_pp_prefix(a_pp_prefix),
     m_geom(geom),
@@ -105,6 +107,7 @@ public:
     m_low_time_interval(low_time_interval),
     m_eb_vec(eb_vec),
     m_terrain_type(a_terrain_type),
+    m_has_immersed_buildings(a_has_immersed_buildings),
     m_rdOcp(a_rdOcp),
     m_ma(face, geom, (z_phys_nd[0] != nullptr), a_pp_prefix, a_mesh_type, a_terrain_type,
          zlevels_stag, eb_vec),
@@ -430,7 +433,37 @@ public:
           theta_ref = a_turb_choice.theta_ref;
       }
 
+      // Stable-side similarity functions (most.stable_functions): Businger-Dyer, or QNSE for
+      // the prescribed-flux kernels and their companions; see check_similarity_funs_use
+      m_sfuns = read_most_similarity_funs(pp);
+      check_similarity_funs_use();
+
   } // constructor
+
+  /**
+   * Stop when most.stable_functions = qnse would be read by nothing on this face.
+   *
+   * The choice selects the stable arm of the Businger-Dyer pair, which the prescribed-flux
+   * (moeng) kernels use, with their companions: the PBL surface gradients, the 2 m and 10 m
+   * diagnostics and the MYNN surface TKE production. The prescribed-temperature kernels use the Jimenez
+   * (2012) pair on both sides, the adiabatic kernels no stability function, and the custom,
+   * rico and bulk_coeff fluxes none at all. Called at construction and again where a surface
+   * file, SST/TSK data or a land model switch the flux or temperature mode.
+   */
+  void check_similarity_funs_use () const
+  {
+      if (!m_sfuns.uses_qnse()) { return; }
+      const std::string key = m_pp_prefix + ".most.stable_functions = qnse";
+      if (flux_type != FluxCalcType::MOENG && flux_type != FluxCalcType::ROTATE) {
+          amrex::Abort(key + " needs the moeng flux type: the custom, rico and bulk_coeff fluxes "
+                       "use no similarity functions");
+      }
+      if (theta_type != ThetaCalcType::HEAT_FLUX) {
+          amrex::Abort(key + " needs a prescribed heat flux (most.surf_temp_flux): the "
+                       "prescribed-temperature kernels use the Jimenez (2012) functions on both "
+                       "sides and the adiabatic kernels no stability function");
+      }
+  }
 
   /**
    * Allocate and initialize surface-layer data for one AMR level.
@@ -527,6 +560,7 @@ public:
           olen.resize(nlevs);
           pblh.resize(nlevs);
           m_planar_bndry.resize(nlevs);
+          m_lsm_held_columns.resize(nlevs);
       }
 
       // Get pointers to SST,TSK and LANDMASK data
@@ -616,6 +650,7 @@ public:
               amrex::Print() << "Using MOST with prescribed time-varying surface fluxes from '" << sfc_file << "'" << std::endl;
           }
       }
+      check_similarity_funs_use();
 
       // The constructor's check of most.abs_surf_temp sees only most.flux_type; the
       // modes known here replace the prescribed temperature too.  The surface-flux file
@@ -790,6 +825,24 @@ public:
           read_custom_roughness(lev, fname);
       }
 
+      // The surface layer normalises with ln(zref / z0), so the reference height
+      // must lie above the roughness length in every column.  With the default
+      // (the first cell center) a fine mesh over a rough surface can fail this.
+      {
+          const amrex::MultiFab* zref = m_ma.get_zref(lev);
+          if (zref && zref->boxArray() == z_0[lev].boxArray()) {
+              amrex::MultiFab margin(ba_flux, dm, ncomp, 0);
+              amrex::MultiFab::Copy(margin, *zref, 0, 0, ncomp, 0);
+              amrex::MultiFab::Subtract(margin, z_0[lev], 0, 0, ncomp, 0);
+              if (margin.min(0) <= zero) {
+                  amrex::Abort(m_pp_prefix + ".most.zref (or the first cell center), "
+                               + std::to_string(zref->min(0)) + " m at its lowest, must exceed "
+                               + m_pp_prefix + ".most.z0, " + std::to_string(z_0[lev].max(0))
+                               + " m at its largest, in every column");
+              }
+          }
+      }
+
       // 2D MFs for U*, T*, T_surf
       //--------------------------------------------------------
       u_star[lev] = std::make_unique<amrex::MultiFab>(ba_flux, dm, ncomp, ng);
@@ -816,6 +869,23 @@ public:
       q_surf[lev] = std::make_unique<amrex::MultiFab>(ba_flux, dm, ncomp, ng);
       q_surf[lev]->setVal(default_land_surf_moist);
 
+      // Columns of a refined level that a grid touching the surface holds, one cell beyond
+      // each grid (see LsmFluxColumn).  A grid that starts above the ground collapses onto
+      // the same columns but holds no surface fluxes there, so it does not count.  Level 0
+      // has no coarse/fine boundary and needs no mask.
+      m_lsm_held_columns[lev].clear();
+      if (lev > 0 && dir == 2 && m_face.isLow() && m_terrain_type != TerrainType::EB) {
+          amrex::iMultiFab& held = m_lsm_held_columns[lev];
+          held.define(ba_flux, dm, 1, amrex::IntVect(1,1,0));
+          held.setVal(0);
+          for (amrex::MFIter mfi(held); mfi.isValid(); ++mfi) {
+              if (m_planar_bndry[lev].is_surface_copy(mfi.index())) {
+                  held[mfi].setVal<amrex::RunOn::Device>(1, mfi.validbox());
+              }
+          }
+          held.FillBoundary(m_geom[lev].periodicity());
+      }
+
       const amrex::iMultiFab& surface_mask = *m_lmask_lev[lev][0];
       AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
           surface_mask.boxArray().size() == mf.boxArray().size(),
@@ -830,6 +900,8 @@ public:
           surface_mask.DistributionMap() == u_star[lev]->DistributionMap(),
           "Surface-layer mask and parameters must have identical ownership.");
 
+      set_immersed_surface_params(lev);
+
       surface_diagnostic_source[lev] = std::make_unique<amrex::MultiFab>(ba_flux, dm, ncomp, ng);
       surface_diagnostic_source[lev]->setVal(
           surface_diagnostics::to_plot_value(surface_diagnostics::SurfaceDiagnosticSource::Missing));
@@ -841,6 +913,7 @@ public:
           // fluxes (avoids extended lambda capture) Note that land temp will be set
           // from m_tsk_lev while sea temp will be set from m_sst_lev
           theta_type = ThetaCalcType::SURFACE_TEMPERATURE;
+          check_similarity_funs_use();
 
           // Pathways in fill_tsurf_with_sst_and_tsk
           amrex::Print() << "Using MOST with specified surface temperature ";
@@ -874,6 +947,15 @@ public:
           amrex::Print() << std::endl;
       }
   }
+
+  /**
+   * Set benign surface scales in immersed columns (land mask 2), including ghosts.
+   * Called after allocation, checkpoint restoration, and surface-scale updates.
+   * Preserve PBL height, roughness, surface temperature, and surface moisture.
+   *
+   * @param[in] lev level index
+   */
+  void set_immersed_surface_params (const int& lev);
 
   /**
    * Update surface fluxes and related surface-layer state.
@@ -1063,6 +1145,22 @@ public:
    */
   void compute_sfc_params_from_lsm_fluxes (const int& lev,
                                            amrex::MultiFab& cons_in);
+
+  /**
+   * The four LSM fluxes on one grid: from the surface model when it supplies fluxes,
+   * otherwise from the registered LSM fluxes.  A flux that is not available is left null,
+   * and SurfaceFluxView::valid then rejects every cell.  compute_fluxes,
+   * compute_sfc_params_from_lsm_fluxes and get_lsm_tsurf all take their fluxes from here,
+   * so they agree on which land columns use the LSM flux.  Each decides a ghost column
+   * outside a non-periodic domain from the nearest column inside it; compute_SurfaceLayer_bcs
+   * also reads the fluxes one ghost cell beyond the grid, so they must carry one filled
+   * lateral ghost cell.
+   *
+   * @param[in] lev level index
+   * @param[in] mfi iterator over a MultiFab with the cons BoxArray and DistributionMapping
+   */
+  [[nodiscard]] SurfaceFluxView get_lsm_flux_view (const int& lev,
+                                                   const amrex::MFIter& mfi) const;
 
   /**
    * Set kinematic u*, t*, and q* from the fluxes interpolated from most.sfc_file.
@@ -1354,6 +1452,9 @@ public:
    * @param[in] lev level index
    */
   amrex::MultiFab* get_olen (const int& lev) { return olen[lev].get(); }
+
+  /** Similarity functions of this surface layer (most.stable_functions). */
+  const similarity_funs& similarity_functions () const { return m_sfuns; }
 
   /**
    * Return the planetary-boundary-layer-height field.
@@ -1774,6 +1875,7 @@ public:
   RoughCalcType rough_type_land{RoughCalcType::CONSTANT};
   RoughCalcType rough_type_sea{RoughCalcType::CHARNOCK};
   PBLHeightCalcType pblh_type{PBLHeightCalcType::None};
+  similarity_funs m_sfuns; ///< stable-side similarity functions (most.stable_functions)
 
 private:
   // Set in constructor
@@ -1848,6 +1950,7 @@ private:
 
   amrex::Vector<const eb_*> m_eb_vec;
   TerrainType m_terrain_type;
+  bool m_has_immersed_buildings = false;
   amrex::Real m_rdOcp = RdoCp;
   MOSTAverage m_ma;
   SurfaceModel* m_surf_model = nullptr;
@@ -1866,6 +1969,9 @@ private:
   // this for u*, w* (only when it is computed), t*, q*, L, t_surf, q_surf, pblh and the
   // diagnostic source, after each is computed on the surface copies.
   amrex::Vector<PlanarBoundary> m_planar_bndry;
+  // 1 in the columns of a refined level that a grid touching the surface holds, within one
+  // cell of each grid; empty on level 0.  Built by make_SurfaceLayer_at_level.
+  amrex::Vector<amrex::iMultiFab> m_lsm_held_columns;
   // Columns for the PBL-height estimator.  The estimator scans each box it is given from its
   // lowest cell to its highest, so the box must start at the ground.  When some box of a
   // level does not (grids stacked in z, or a refined region aloft), compute_pblh runs the

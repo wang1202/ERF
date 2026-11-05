@@ -158,11 +158,11 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
             eb[lev]->make_all_factories(lev, geom[lev], grids[lev], dmap[lev], eb_level);
         } else if (solverChoice.terrain_type == TerrainType::ImmersedForcing ||
                    solverChoice.buildings_type == BuildingsType::ImmersedForcing) {
-#if USE_FC_FACTORY
-            eb[lev]->make_all_factories(lev, geom[lev], grids[lev], dmap[lev], eb_level);
-#else
-            eb[lev]->make_cc_factory(lev, geom[lev], grids[lev], dmap[lev], eb_level);
-#endif
+            if (use_native_fc_factories()) {
+                eb[lev]->make_all_factories(lev, geom[lev], grids[lev], dmap[lev], eb_level);
+            } else {
+                eb[lev]->make_cc_factory(lev, geom[lev], grids[lev], dmap[lev], eb_level);
+            }
         }
     }
 
@@ -174,6 +174,15 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
     //      terrain arrays, metric terms and base state.
     // *******************************************************************************************
     init_stuff(lev, ba, dm, lev_new, lev_old, base_state[lev], z_phys_nd[lev]);
+
+    // init_stuff leaves map factors of 1.  A refined level with no init file of its own takes them
+    // from the coarser level; do that now, before the initial data, the terrain metrics and the
+    // initial projection use them (Interp2DArrays, called only after every level has been made,
+    // does it again, to the same values).  Otherwise the initial momenta on this level are made
+    // divergence-free with the wrong map factors, and the first step does not keep a uniform
+    // scalar uniform (erf-model/ERF#4905).
+    if (lev > 0 && !has_own_init_file(lev)) { interp_mapfac_from_coarse(lev); }
+
     if (auxiliary_inert_tracer) {
         auxiliary_inert_tracer->define(lev, ba, dm);
     }
@@ -598,11 +607,11 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
             eb[lev]->make_all_factories(lev, geom[lev], ba, dm, eb_level);
         } else if (solverChoice.terrain_type == TerrainType::ImmersedForcing ||
                    solverChoice.buildings_type == BuildingsType::ImmersedForcing) {
-#if USE_FC_FACTORY
-            eb[lev]->make_all_factories(lev, geom[lev], ba, dm, eb_level);
-#else
-            eb[lev]->make_cc_factory(lev, geom[lev], ba, dm, eb_level);
-#endif
+            if (use_native_fc_factories()) {
+                eb[lev]->make_all_factories(lev, geom[lev], ba, dm, eb_level);
+            } else {
+                eb[lev]->make_cc_factory(lev, geom[lev], ba, dm, eb_level);
+            }
         }
     }
     init_zphys(lev, time);
@@ -809,8 +818,7 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
         // interpolate the atmospheric state from coarse (just like a level with no init file)
         //
         if (use_surface_only) {
-            // Rebuild base state from wrfinput on top of the fine terrain (must happen before
-            // FillCoarsePatch, which interpolates perturbational quantities relative to base state)
+            // Rebuild base state from wrfinput on top of the fine terrain
             rebuild_base_state_from_wrfinput(lev, base_state[lev]);
             (*physbcs_base[lev])(base_state[lev],0,base_state[lev].nComp(),base_state[lev].nGrowVect());
 
@@ -830,8 +838,7 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
     //
     // A WRFInput level created by refinement rather than read from a file: build its base
     // state by the same construction level 0 used, on top of the coarse interpolation done
-    // above.  This must happen BEFORE FillCoarsePatch, which interpolates perturbational
-    // quantities relative to the base state.
+    // above.
     //
     if ( (solverChoice.init_type == InitType::WRFInput) && nc_init_file[lev].empty() ) {
         rebuild_base_state_from_wrfinput(lev, base_state[lev]);
@@ -1232,11 +1239,11 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
             eb[lev]->make_all_factories(lev, geom[lev], ba, dm, eb_level);
         } else if (solverChoice.terrain_type == TerrainType::ImmersedForcing ||
                    solverChoice.buildings_type == BuildingsType::ImmersedForcing) {
-#if USE_FC_FACTORY
-            eb[lev]->make_all_factories(lev, geom[lev], ba, dm, eb_level);
-#else
-            eb[lev]->make_cc_factory(lev, geom[lev], ba, dm, eb_level);
-#endif
+            if (use_native_fc_factories()) {
+                eb[lev]->make_all_factories(lev, geom[lev], ba, dm, eb_level);
+            } else {
+                eb[lev]->make_cc_factory(lev, geom[lev], ba, dm, eb_level);
+            }
         }
     }
     remake_zphys(lev, time, temp_zphys_nd);
@@ -1329,9 +1336,7 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
         // with its parent in the way it did at t = 0.
         //
         // Note this must come AFTER the FillPatchTwoLevels above (which fills the region of
-        // this level outside the fine grids, and the ghost cells) and BEFORE the
-        // FillPatchFineLevel below, which interpolates perturbational quantities relative to
-        // the new base state.
+        // this level outside the fine grids, and the ghost cells).
         // *************************************************************************************************
         if (solverChoice.init_type == InitType::WRFInput) {
             rebuild_base_state_from_wrfinput(lev, temp_base_state);
@@ -1342,13 +1347,11 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
         // *************************************************************************************************
         // This will fill the temporary MultiFabs with data from vars_new
         // NOTE: the momenta here are only used as scratch space, the momenta themselves are not fillpatched
-        // NOTE: we must create the new base state before calling FillPatch because we will
-        //       interpolate perturbational quantities
         // *************************************************************************************************
         FillPatchFineLevel(lev, time, {&temp_lev_new[Vars::cons],&temp_lev_new[Vars::xvel],
                            &temp_lev_new[Vars::yvel],&temp_lev_new[Vars::zvel]},
                           {&temp_lev_new[Vars::cons],&rU_new[lev],&rV_new[lev],&rW_new[lev]},
-                           base_state[lev], temp_base_state, false);
+                           false);
     } else {
         //
         // The base state may be copied from its halo as well as its valid region: the
@@ -1590,8 +1593,8 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
     // level's first step after the regrid.
     //
     // At lev > 0 this is cheap and lossless when the level takes its land state from level 0:
-    // NOAHMP::Advance calls interp_from_lev0 every step, so such a level carries no
-    // prognostic state of its own.  A level that runs the driver on a land setup file of its
+    // NOAHMP::Advance calls interp_from_lev0 after every level-0 land step and after a
+    // rebuild, so such a level carries no prognostic state of its own.  A level that runs the driver on a land setup file of its
     // own (level 0 always; a finer level with erf.nc_init_file_<lev>, or in an idealized run
     // with ERF_SETUP_FILE_0<lev+1> in namelist.erf) keeps its state in the per-box Fortran
     // NoahmpIO_type objects, for which no redistribution onto a new decomposition exists.

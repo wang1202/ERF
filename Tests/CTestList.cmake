@@ -178,6 +178,124 @@ function(add_test_anelastic_wall_diffusion TEST_NAME TEST_AXIS)
         ATTACHED_FILES_ON_FAIL "${test_simulation_log};${test_checker_log}")
 endfunction(add_test_anelastic_wall_diffusion)
 
+# Two-level immersed-forcing case checked against the fluid-mass-weighted fine average
+# (Tests/ImmersedAverageDownCheck.cpp). EXPECT_CHECKER_FAIL ON registers the leg that must fail
+# the check (the plain average), so the test proves the check sees the difference.
+function(add_test_immersed_average_down TEST_NAME TEST_FILES_DIR TOL EXPECT_CHECKER_FAIL RUNTIME_OPTIONS)
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/${TEST_FILES_DIR}.i")
+    set(test_simulation_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    set(test_checker_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.checker.log")
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=${NP}"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DCONFIG=$<CONFIG>"
+        "-DINPUT=${test_input}"
+        "-DRUNTIME_OPTIONS=${RUNTIME_OPTIONS}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DSIMULATION_LOG=${test_simulation_log}"
+        "-DCHECKER_LOG=${test_checker_log}"
+        "-DCHECKER=$<TARGET_FILE:erf_immersed_average_down_check>"
+        "-DPLOTFILE=${CURRENT_TEST_BINARY_DIR}/plt00005"
+        "-DTOL=${TOL}"
+        "-DEXPECT_CHECKER_FAIL=${EXPECT_CHECKER_FAIL}"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunImmersedAverageDown.cmake)
+    set_tests_properties(${TEST_NAME}
+        PROPERTIES
+        TIMEOUT 1800
+        PROCESSORS ${NP}
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "regression;multilevel;immersed"
+        ATTACHED_FILES_ON_FAIL "${test_simulation_log};${test_checker_log}")
+endfunction(add_test_immersed_average_down)
+
+# Run a one- or two-level immersed-forcing case and check the fluid-mass-weighted mean theta of its
+# plotfile against THETA0 (Tests/ImmersedCFHeatBalanceCheck.cpp); EXPECT_CHECKER_FAIL ON requires
+# the check to fail (the explicit solid freeze), so the test proves the checker sees the difference;
+# EXPECT_WARNING ON requires the coarse/fine surface-mismatch warning in the run's output;
+# EXTRA_LABELS adds CTest labels (for example multilevel) to regression;immersed.
+function(add_test_immersed_cf_heat_balance TEST_NAME TEST_FILES_DIR THETA0 TOL EXPECT_CHECKER_FAIL EXPECT_WARNING RUNTIME_OPTIONS EXTRA_LABELS)
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/${TEST_FILES_DIR}.i")
+    set(test_simulation_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    set(test_checker_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.checker.log")
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=${NP}"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DCONFIG=$<CONFIG>"
+        "-DINPUT=${test_input}"
+        "-DRUNTIME_OPTIONS=${RUNTIME_OPTIONS}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DSIMULATION_LOG=${test_simulation_log}"
+        "-DCHECKER_LOG=${test_checker_log}"
+        "-DCHECKER=$<TARGET_FILE:erf_immersed_cf_heat_balance_check>"
+        "-DPLOTFILE=${CURRENT_TEST_BINARY_DIR}/plt00020"
+        "-DTHETA0=${THETA0}"
+        "-DTOL=${TOL}"
+        "-DEXPECT_CHECKER_FAIL=${EXPECT_CHECKER_FAIL}"
+        "-DEXPECT_WARNING=${EXPECT_WARNING}"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunImmersedCFHeatBalance.cmake)
+    set_tests_properties(${TEST_NAME}
+        PROPERTIES
+        TIMEOUT 1800
+        PROCESSORS ${NP}
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "regression;immersed;${EXTRA_LABELS}"
+        ATTACHED_FILES_ON_FAIL "${test_simulation_log};${test_checker_log}")
+endfunction(add_test_immersed_cf_heat_balance)
+
+# Run the flat-ground and immersed-plane decks of TEST_FILES_DIR (flat.i and plane.i, the plane on a
+# cell face K_OFFSET cells above the domain bottom) and compare their profiles
+# (Tests/ImmersedFlatEquivalenceCheck.cpp); EXPECT_CHECKER_FAIL ON requires the comparison to fail
+# (the legacy wall law), so the test proves the checker sees the difference.
+# RUNTIME_OPTIONS go to the plane run only, COMMON_OPTIONS to both runs.
+function(add_test_immersed_flat_equivalence TEST_NAME TEST_FILES_DIR K_OFFSET TOL K_COUNT EXPECT_CHECKER_FAIL RUNTIME_OPTIONS COMMON_OPTIONS)
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+
+    set(test_simulation_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    set(test_checker_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.checker.log")
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=${NP}"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DCONFIG=$<CONFIG>"
+        "-DINPUT_FLAT=${CURRENT_TEST_BINARY_DIR}/flat.i"
+        "-DINPUT_PLANE=${CURRENT_TEST_BINARY_DIR}/plane.i"
+        "-DRUNTIME_OPTIONS=${RUNTIME_OPTIONS}"
+        "-DCOMMON_OPTIONS=${COMMON_OPTIONS}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DSIMULATION_LOG=${test_simulation_log}"
+        "-DCHECKER_LOG=${test_checker_log}"
+        "-DCHECKER=$<TARGET_FILE:erf_immersed_flat_equivalence_check>"
+        "-DPLOTFILE_FLAT=${CURRENT_TEST_BINARY_DIR}/plt_flat00100"
+        "-DPLOTFILE_PLANE=${CURRENT_TEST_BINARY_DIR}/plt_plane00100"
+        "-DK_OFFSET=${K_OFFSET}"
+        "-DTOL=${TOL}"
+        "-DK_COUNT=${K_COUNT}"
+        "-DEXPECT_CHECKER_FAIL=${EXPECT_CHECKER_FAIL}"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunImmersedFlatEquivalence.cmake)
+    set_tests_properties(${TEST_NAME}
+        PROPERTIES
+        TIMEOUT 1800
+        PROCESSORS ${NP}
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "regression;immersed;rans"
+        ATTACHED_FILES_ON_FAIL "${test_simulation_log};${test_simulation_log}.flat;${test_checker_log}")
+endfunction(add_test_immersed_flat_equivalence)
+
 # Checker-driven Cloud Chamber tests.  The short run checks the exact initial
 # conserved-state correction and a bounded early buoyant response; it
 # intentionally avoids a fragile turbulent gold file.
@@ -187,7 +305,7 @@ function(add_test_cloud_chamber TEST_NAME MODE)
     set(test_input "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.i")
     set(test_simulation_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
     set(test_checker_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.checker.log")
-    add_test(${TEST_NAME} ${CMAKE_COMMAND}
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
         "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
         "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
         "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
@@ -208,6 +326,182 @@ function(add_test_cloud_chamber TEST_NAME MODE)
         LABELS "regression;cloud-chamber"
         ATTACHED_FILES_ON_FAIL "${test_simulation_log};${test_checker_log}")
 endfunction(add_test_cloud_chamber)
+
+# Short physical-temperature chamber runs for the moisture configurations
+# enabled by the typed Cloud Chamber allowlist. Each model requests only the
+# species and diagnostics its active component map publishes.
+function(add_test_cloud_chamber_bulk_model TEST_NAME MODEL)
+    set(TEST_FILES_DIR "CloudChamber_Bulk")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    set(bulk_plot_vars "")
+    if(MODEL STREQUAL "Kessler" OR MODEL STREQUAL "SAM_NoIce")
+        set(bulk_plot_vars "qrain rain_accum")
+    elseif(MODEL STREQUAL "SAM" OR MODEL STREQUAL "WSM6")
+        set(bulk_plot_vars "qi qrain qsnow qgraup rain_accum snow_accum graupel_accum")
+    elseif(MODEL STREQUAL "WDM6")
+        set(bulk_plot_vars "qi qrain qsnow qgraup nc nn nr rain_accum snow_accum graupel_accum")
+    elseif(MODEL STREQUAL "Morrison_NoIce")
+        set(bulk_plot_vars "qrain nc nr rain_accum")
+    elseif(MODEL STREQUAL "Morrison")
+        set(bulk_plot_vars "qi qrain qsnow qgraup nc ni nr ns ng rain_accum snow_accum graupel_accum")
+    elseif(NOT MODEL STREQUAL "Kessler_NoRain" AND
+           NOT MODEL STREQUAL "SAM_NoPrecip_NoIce" AND
+           NOT MODEL STREQUAL "MoistNoCondensation")
+        message(FATAL_ERROR "No Cloud Chamber bulk plot mapping for ${MODEL}")
+    endif()
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/CloudChamber_Bulk.i")
+    set(test_simulation_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    set(test_checker_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.checker.log")
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=${NP}"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DINPUT=${test_input}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DSIMULATION_LOG=${test_simulation_log}"
+        "-DCHECKER_LOG=${test_checker_log}"
+        "-DCHECKER=${CLOUD_CHAMBER_CHECKER}"
+        "-DBULK_MODEL=${MODEL}"
+        "-DBULK_PLOT_VARS=${bulk_plot_vars}"
+        "-DBULK_BUDGET=0"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunCloudChamberBulk.cmake)
+    set_tests_properties(${TEST_NAME}
+        PROPERTIES
+        TIMEOUT 600
+        PROCESSORS ${NP}
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "regression;cloud-chamber;bulk-microphysics"
+        ATTACHED_FILES_ON_FAIL "${test_simulation_log};${test_checker_log}")
+endfunction(add_test_cloud_chamber_bulk_model)
+
+# Longer, dry-wall warm-rain case with a matching no-condensation control. The
+# short bulk matrix above remains startup/initialization smoke coverage.
+function(add_test_cloud_chamber_active_condensation TEST_NAME)
+    set(TEST_FILES_DIR "CloudChamber_ActiveCondensation")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/CloudChamber_ActiveCondensation.i")
+    set(simulation_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    set(checker_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.checker.log")
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=${NP}"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DINPUT=${test_input}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DSIMULATION_LOG=${simulation_log}"
+        "-DCHECKER_LOG=${checker_log}"
+        "-DCHECKER=${CLOUD_CHAMBER_CHECKER}"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunCloudChamberActiveCondensation.cmake)
+    set_tests_properties(${TEST_NAME}
+        PROPERTIES
+        TIMEOUT 1300
+        PROCESSORS ${NP}
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "regression;cloud-chamber;bulk-microphysics;active-physics"
+        ATTACHED_FILES_ON_FAIL "${simulation_log};${CURRENT_TEST_BINARY_DIR}/control.simulation.log;${checker_log}")
+endfunction(add_test_cloud_chamber_active_condensation)
+
+function(add_test_cloud_chamber_parser_reject TEST_NAME MODEL)
+    cmake_parse_arguments(ADD_TEST_CCP "" "EXPECTED_TEXT" "" ${ARGN})
+    set(expected_text "selected moisture model is unsupported")
+    if(NOT "${ADD_TEST_CCP_EXPECTED_TEXT}" STREQUAL "")
+        set(expected_text "${ADD_TEST_CCP_EXPECTED_TEXT}")
+    endif()
+    set(TEST_FILES_DIR "CloudChamber_ActiveCondensation")
+    setup_test()
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/CloudChamber_ActiveCondensation.i")
+    set(test_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.parser.log")
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DTEST_EXE=${CLOUD_CHAMBER_PARSER_CHECKER}"
+        "-DINPUT=${test_input}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DEXPECTED_MODEL=${MODEL}"
+        "-DEXPECTED_TEXT=${expected_text}"
+        "-DLOG_FILE=${test_log}"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunCloudChamberParserReject.cmake)
+    set_tests_properties(${TEST_NAME}
+        PROPERTIES
+        TIMEOUT 180
+        PROCESSORS 1
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "regression;cloud-chamber;configuration;parser-allowlist"
+        ATTACHED_FILES_ON_FAIL "${CURRENT_TEST_BINARY_DIR}/positive.log;${test_log}")
+endfunction(add_test_cloud_chamber_parser_reject)
+
+# Legacy theta/qv path regression: keep the bulk enablement compatible with
+# the original profile and per-face legacy wall keys.
+function(add_test_cloud_chamber_bulk_legacy TEST_NAME MODEL)
+    set(TEST_FILES_DIR "CloudChamber_Bulk_Legacy")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/CloudChamber_Bulk_Legacy.i")
+    set(test_simulation_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    set(test_checker_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.checker.log")
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=${NP}"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DINPUT=${test_input}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DSIMULATION_LOG=${test_simulation_log}"
+        "-DCHECKER_LOG=${test_checker_log}"
+        "-DCHECKER=${CLOUD_CHAMBER_CHECKER}"
+        "-DBULK_MODEL=${MODEL}"
+        "-DBULK_PLOT_VARS="
+        "-DBULK_BUDGET=0"
+        "-DCHECKER_MODE=bulk_legacy"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunCloudChamberBulk.cmake)
+    set_tests_properties(${TEST_NAME}
+        PROPERTIES
+        TIMEOUT 600
+        PROCESSORS ${NP}
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "regression;cloud-chamber;bulk-microphysics;legacy"
+        ATTACHED_FILES_ON_FAIL "${test_simulation_log};${test_checker_log}")
+endfunction(add_test_cloud_chamber_bulk_legacy)
+
+function(add_test_cloud_chamber_bulk_reject TEST_NAME MODEL BUDGET EXPECTED_TEXT)
+    set(TEST_FILES_DIR "CloudChamber_Bulk")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    set(test_input "${CURRENT_TEST_BINARY_DIR}/CloudChamber_Bulk.i")
+    set(test_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.simulation.log")
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=${NP}"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DINPUT=${test_input}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DSIMULATION_LOG=${test_log}"
+        "-DCHECKER_LOG=${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.checker.log"
+        "-DCHECKER=${CLOUD_CHAMBER_CHECKER}"
+        "-DBULK_MODEL=${MODEL}"
+        "-DBULK_PLOT_VARS=qrain rain_accum"
+        "-DBULK_BUDGET=${BUDGET}"
+        "-DEXPECT_FAILURE=ON"
+        "-DEXPECT_FAILURE_TEXT=${EXPECTED_TEXT}"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunCloudChamberBulk.cmake)
+    set_tests_properties(${TEST_NAME}
+        PROPERTIES
+        TIMEOUT 180
+        PROCESSORS ${NP}
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "regression;cloud-chamber;configuration"
+        ATTACHED_FILES_ON_FAIL "${test_log}")
+endfunction(add_test_cloud_chamber_bulk_reject)
 
 # Gold-free TwoStream radiation regression: run a short SW + LW column case
 # and verify the vertical structure of qsrc_sw / qsrc_lw in the plotfile
@@ -423,7 +717,7 @@ function(add_test_cloud_chamber_parity TEST_NAME)
     endif()
     setup_test()
     resolve_test_exe("" "erf_exec" TEST_EXE)
-    add_test(${TEST_NAME} ${CMAKE_COMMAND}
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
         "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
         "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
         "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
@@ -732,6 +1026,15 @@ if(ERF_TEST_PYTHON)
       TIMEOUT 120
       PROCESSORS 1
       LABELS "unit")
+  # The schema generator's unit tests (Exec/Tools/erf_inputs_schema): a synthetic source tree, git-archive mode
+  # (needs git on PATH), the checker's --schema path.
+  add_test(NAME InputsSchema_UnitTests
+      COMMAND ${ERF_TEST_PYTHON} -m unittest discover -s ${PROJECT_SOURCE_DIR}/Exec/Tools/erf_inputs_schema/tests)
+  set_tests_properties(InputsSchema_UnitTests
+      PROPERTIES
+      TIMEOUT 300
+      PROCESSORS 1
+      LABELS "unit")
 endif()
 
 # Restart parity: run one deck straight, then to a checkpoint and on from it, and
@@ -748,10 +1051,25 @@ endif()
 # REQUIRE_LEVEL0_REMAKE makes a regrid test fail if the restart stopped regridding, which
 # would otherwise leave it silently comparing an ordinary restart and passing.
 function(add_test_restart_parity TEST_NAME TEST_FILES_DIR STEP_CHK STEP_END)
-    set(oneValueArgs "COMMON_OPTIONS" "RESTART_OPTIONS" "CHK_OPTIONS" "CHK_LEG_END" "CHK_NRANKS" "RESTART_NRANKS" "FCOMPARE_RTOL" "FCOMPARE_ATOL" "RUN_TIMEOUT" "DATALOG" "DATALOG_SIGDIGITS" "PLT2DFILE" "BNDRY_PLANES_DIR" "BNDRY_PLANES_FIRST_STEP" "BNDRY_PLANES_STEPS" "BNDRY_PLANES_READ_INPUT")
+    set(oneValueArgs "COMMON_OPTIONS" "RESTART_OPTIONS" "CHK_OPTIONS" "CHK_LEG_END" "CHK_NRANKS" "RESTART_NRANKS" "FCOMPARE_RTOL" "FCOMPARE_ATOL" "RUN_TIMEOUT" "DATALOG" "DATALOG_SIGDIGITS" "PLT2DFILE" "BNDRY_PLANES_DIR" "BNDRY_PLANES_FIRST_STEP" "BNDRY_PLANES_STEPS" "BNDRY_PLANES_READ_INPUT" "CHECKER" "CHECK_MODE" "CHECKER_LOG")
     cmake_parse_arguments(ADD_TEST_RP "ALLOW_DIFF_GRIDS;REQUIRE_LEVEL0_REMAKE;BNDRY_PLANES_STALE;BNDRY_PLANES_CUT_NEWLINE;BNDRY_PLANES_EARLY_STOP" "${oneValueArgs}" "" ${ARGN})
     setup_test()
     resolve_test_exe("" "erf_exec" TEST_EXE)
+    set(_checker_log "")
+    set(_post_checkpoint_log "")
+    if(NOT "${ADD_TEST_RP_CHECK_MODE}" STREQUAL "")
+        if("${ADD_TEST_RP_CHECKER}" STREQUAL "")
+            message(FATAL_ERROR "${TEST_NAME}: CHECKER is required when CHECK_MODE is set")
+        endif()
+        if("${ADD_TEST_RP_CHECKER_LOG}" STREQUAL "")
+            set(_checker_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.checkpoint-activity.log")
+        else()
+            set(_checker_log "${ADD_TEST_RP_CHECKER_LOG}")
+        endif()
+        if(ADD_TEST_RP_CHECK_MODE STREQUAL "wdm6_active")
+            set(_post_checkpoint_log "${CURRENT_TEST_BINARY_DIR}/post_checkpoint_parity.log")
+        endif()
+    endif()
 
     set(_fcompare_rtol "${ERF_TEST_FCOMPARE_RTOL}")
     set(_fcompare_atol "${ERF_TEST_FCOMPARE_ATOL}")
@@ -801,6 +1119,9 @@ function(add_test_restart_parity TEST_NAME TEST_FILES_DIR STEP_CHK STEP_END)
         "-DBNDRY_PLANES_CUT_NEWLINE=${ADD_TEST_RP_BNDRY_PLANES_CUT_NEWLINE}"
         "-DBNDRY_PLANES_EARLY_STOP=${ADD_TEST_RP_BNDRY_PLANES_EARLY_STOP}"
         "-DBNDRY_PLANES_READ_INPUT=${ADD_TEST_RP_BNDRY_PLANES_READ_INPUT}"
+        "-DCHECKER=${ADD_TEST_RP_CHECKER}"
+        "-DCHECK_MODE=${ADD_TEST_RP_CHECK_MODE}"
+        "-DCHECKER_LOG=${_checker_log}"
         -P ${PROJECT_SOURCE_DIR}/Tests/RunRestartParity.cmake)
     # The reservation has to cover the widest leg, which need not be NP.
     set(_procs "${NP}")
@@ -816,7 +1137,7 @@ function(add_test_restart_parity TEST_NAME TEST_FILES_DIR STEP_CHK STEP_END)
         PROCESSORS ${_procs}
         WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
         LABELS "regression;restart-parity"
-        ATTACHED_FILES_ON_FAIL "${CURRENT_TEST_BINARY_DIR}/straight/simulation.log;${CURRENT_TEST_BINARY_DIR}/restart/checkpoint.log;${CURRENT_TEST_BINARY_DIR}/restart/restart.log;${CURRENT_TEST_BINARY_DIR}/parity.log")
+        ATTACHED_FILES_ON_FAIL "${CURRENT_TEST_BINARY_DIR}/straight/simulation.log;${CURRENT_TEST_BINARY_DIR}/restart/checkpoint.log;${CURRENT_TEST_BINARY_DIR}/restart/restart.log;${CURRENT_TEST_BINARY_DIR}/parity.log;${_checker_log};${_post_checkpoint_log}")
 endfunction(add_test_restart_parity)
 
 # Restart abort: run a deck to a checkpoint, restart from it, and require the restart to stop
@@ -922,7 +1243,7 @@ function(add_test_cloud_chamber_budget TEST_NAME MODE SOURCE_NAME)
     set(TEST_FILES_DIR "${SOURCE_NAME}")
     setup_test()
     resolve_test_exe("" "erf_exec" TEST_EXE)
-    add_test(${TEST_NAME} ${CMAKE_COMMAND}
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
         "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
         "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
         "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
@@ -1122,7 +1443,7 @@ function(add_test_cloud_chamber_neutral_momentum TEST_NAME)
     set(TEST_FILES_DIR "CloudChamber_Dry_NeutralMomentum")
     setup_test()
     resolve_test_exe("" "erf_exec" TEST_EXE)
-    add_test(${TEST_NAME} ${CMAKE_COMMAND}
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
         "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
         "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
         "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
@@ -1147,7 +1468,7 @@ function(add_test_cloud_chamber_fixed_momentum TEST_NAME)
     set(TEST_FILES_DIR "CloudChamber_Dry_FixedMomentum")
     setup_test()
     resolve_test_exe("" "erf_exec" TEST_EXE)
-    add_test(${TEST_NAME} ${CMAKE_COMMAND}
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
         "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
         "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
         "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
@@ -1173,7 +1494,7 @@ function(add_test_cloud_chamber_most TEST_NAME)
     set(TEST_FILES_DIR "CloudChamber_SatAdj_MOSTMixedWalls")
     setup_test()
     resolve_test_exe("" "erf_exec" TEST_EXE)
-    add_test(${TEST_NAME} ${CMAKE_COMMAND}
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
         "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
         "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
         "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
@@ -1217,7 +1538,7 @@ function(add_test_cloud_chamber_openmp TEST_NAME)
     endif()
     setup_test()
     resolve_test_exe("" "erf_exec" TEST_EXE)
-    add_test(${TEST_NAME} ${CMAKE_COMMAND}
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
         "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
         "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
         "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
@@ -1369,6 +1690,40 @@ add_test_cloud_chamber_legacy_config(CloudChamber_Legacy_Config)
 add_test_cloud_chamber_neutral_momentum(CloudChamber_Dry_NeutralMomentumActivation)
 add_test_cloud_chamber_fixed_momentum(CloudChamber_Dry_FixedMomentumActivation)
 add_test_cloud_chamber(CloudChamber_SatAdj cloudy)
+add_test_cloud_chamber_bulk_model(CloudChamber_BulkSmoke_Kessler_NoRain Kessler_NoRain)
+add_test_cloud_chamber_bulk_model(CloudChamber_BulkSmoke_Kessler Kessler)
+add_test_cloud_chamber_bulk_model(CloudChamber_BulkSmoke_SAM_NoPrecip_NoIce SAM_NoPrecip_NoIce)
+add_test_cloud_chamber_bulk_model(CloudChamber_BulkSmoke_SAM_NoIce SAM_NoIce)
+add_test_cloud_chamber_bulk_model(CloudChamber_BulkSmoke_SAM SAM)
+add_test_cloud_chamber_bulk_model(CloudChamber_BulkSmoke_WSM6 WSM6)
+add_test_cloud_chamber_bulk_model(CloudChamber_BulkSmoke_WDM6 WDM6)
+add_test_cloud_chamber_bulk_model(CloudChamber_BulkSmoke_Morrison_NoIce Morrison_NoIce)
+add_test_cloud_chamber_bulk_model(CloudChamber_BulkSmoke_Morrison Morrison)
+add_test_cloud_chamber_bulk_model(CloudChamber_BulkSmoke_MoistNoCondensation MoistNoCondensation)
+if(ERF_PRECISION STREQUAL "DOUBLE")
+add_test_cloud_chamber_active_condensation(CloudChamber_Active_KesslerNoRain)
+endif()
+add_test_cloud_chamber_bulk_legacy(CloudChamber_BulkSmoke_Legacy_Kessler_NoRain Kessler_NoRain)
+# These runs exercise initialization rejection through global solver guards or
+# the Cloud Chamber typed allowlist. Direct parser failures have separate tests.
+add_test_cloud_chamber_bulk_reject(CloudChamber_GlobalReject_SBM SBM 0
+    "SBM M3 does not support scalar or particle diffusion")
+# Motivation: Anelastic SDM is valid in ERF, but Cloud Chamber still rejects
+# particle models before time stepping or output. Without particle support,
+# the earlier global build-capability guard must reject the same input.
+if(ERF_ENABLE_PARTICLES)
+    set(_cloud_chamber_sdm_reject "Cloud Chamber: selected moisture model is unsupported")
+else()
+    set(_cloud_chamber_sdm_reject "Lagrangian microphysics can be used when compiled with ERF_USE_PARTICLES")
+endif()
+add_test_cloud_chamber_bulk_reject(CloudChamber_GlobalReject_SuperDroplets SuperDroplets 0
+    "${_cloud_chamber_sdm_reject}")
+add_test_cloud_chamber_bulk_reject(CloudChamber_GlobalReject_Budget Kessler 1
+    "cloud_chamber_budget_interval supports only physical_temperature_rh")
+add_test_cloud_chamber_parser_reject(CloudChamber_ParserReject_SBM SBM)
+add_test_cloud_chamber_parser_reject(CloudChamber_ParserReject_SuperDroplets SuperDroplets)
+add_test_cloud_chamber_parser_reject(CloudChamber_ParserReject_None None
+    EXPECTED_TEXT "omit erf.moisture_model for dry mode")
 add_test_cloud_chamber_parity(CloudChamber_SatAdj_Parity)
 add_test_cloud_chamber_budget(CloudChamber_SatAdj_AllDry all_dry CloudChamber_SatAdj_AllDry)
 add_test_cloud_chamber_budget(CloudChamber_SatAdj_WetBudget wet_budget CloudChamber_SatAdj_WetBudget)
@@ -1417,6 +1772,12 @@ add_test_field_bounds(BndryPlanes_MoistTemperature "plt00050" theta 299.999 300.
 set_tests_properties(BndryPlanes_MoistTemperature PROPERTIES FIXTURES_SETUP BndryPlanesMoist)
 # Input sponge with a refined patch that does not reach the domain top: ran outside the patch's boxes at start-up
 add_test_field_bounds(InputSponge_FinePatch "plt00004" x_velocity 5.9 8.5)
+# Anelastic EB cylinder through the bottom wall on two levels: w below the wall was never filled
+# on level 1, and its first step diverged (erf-model/ERF#4876)
+add_test_field_bounds(EB_SquareCylinder_AnelasticAMR "plt00004" x_velocity -0.5 3.0)
+# The same with the refined patch 0.46 from the cylinder: on 2 ranks the singular level-1
+# projection stalled when its BiCGStab bottom solve broke down at roundoff, and the run aborted
+add_test_field_bounds(EB_SquareCylinder_AnelasticAMR_NarrowPatch "plt00004" x_velocity -0.5 3.0)
 # A refined patch below the inversion takes the coarse level's PBL height (~513 m), not its own
 add_test_field_bounds(PBLH_FinePatch "plt2d00004" pblh 450.0 600.0)
 
@@ -1653,6 +2014,146 @@ function(add_test_sdm TEST_NAME TEST_DIR TEST_EXE PLTFILE TEST_RTOL TEST_ATOL)
     )
 endfunction(add_test_sdm)
 
+if(ERF_ENABLE_PARTICLES AND Python3_Interpreter_FOUND)
+    set(_species_input "${CMAKE_CURRENT_SOURCE_DIR}/test_files/SDM_SpeciesDiffusion")
+    set(_species_mpi_exec "")
+    set(_species_ranks 1)
+    if(ERF_ENABLE_MPI)
+        set(_species_mpi_exec "${MPIEXEC_EXECUTABLE}")
+        set(_species_ranks ${ERF_TEST_NRANKS})
+    endif()
+    string(JOIN " " _species_mpi_preflags ${MPIEXEC_PREFLAGS})
+    if(ERF_PRECISION STREQUAL "SINGLE")
+        set(_species_tol 2.e-5)
+        set(_species_atol 2.e-8)
+    else()
+        set(_species_tol 2.e-11)
+        set(_species_atol 2.e-14)
+    endif()
+    foreach(_case
+        # Motivation: A stiff vapor slab must diffuse conservatively through the
+        # real SDM handoff, agree with resolved explicit evolution, and leave
+        # particle condensate unchanged rather than independently diffusing it.
+        column
+        # Motivation: Coarse/fine stage ghosts and reflux must conserve composite
+        # species mass while particle condensate is counted on its owning level.
+        amr
+        # Motivation: Active phase change must exchange vapor and particle mass
+        # without creating or losing their combined species reservoir.
+        phase
+        # Motivation: Removing and recreating fine coverage must preserve particle
+        # mass and refresh diagnostic condensate on the new composite hierarchy.
+        regrid
+        # Motivation: The same changing hierarchy must conserve represented mass
+        # when AMR splitting, merging and empty-cell repopulation are enabled.
+        regrid_splitmerge
+        # Motivation: Refined and interface-crossing injection must establish
+        # finest-level ownership even without advection, conserve analytic input
+        # mass, and agree with independent particle budgets with split/merge on/off.
+        injection
+        # Motivation: The injection ownership invariant must hold before phase
+        # change, not only before end-of-step deposition, while conserving the
+        # injected vapor-plus-particle reservoir across the same option matrix.
+        injection_phase
+        # Motivation: Refinement must not duplicate the prescribed initial
+        # population. Initial phase relaxation must run only after ownership
+        # and retain the conserved vapor/particle exchange before timestep 1.
+        initialization)
+        set(_species_dir "${CMAKE_CURRENT_BINARY_DIR}/test_files/SDM_SpeciesDiffusion_${_case}")
+        file(MAKE_DIRECTORY "${_species_dir}")
+        add_test(NAME SDM_SpeciesDiffusion_${_case}
+            COMMAND "${Python3_EXECUTABLE}" "${_species_input}/check_species_diffusion.py"
+                "--exe=$<TARGET_FILE:erf_exec>"
+                "--input=${_species_input}/SDM_SpeciesDiffusion.i"
+                "--reader-dir=${PROJECT_SOURCE_DIR}/Exec/Tools"
+                "--case=${_case}" "--tolerance=${_species_tol}"
+                "--mpi-exec=${_species_mpi_exec}"
+                "--mpi-numproc-flag=${MPIEXEC_NUMPROC_FLAG}"
+                "--mpi-preflags=${_species_mpi_preflags}" "--ranks=${_species_ranks}")
+        set_tests_properties(SDM_SpeciesDiffusion_${_case} PROPERTIES
+            WORKING_DIRECTORY "${_species_dir}" TIMEOUT 600
+            PROCESSORS ${_species_ranks} LABELS "regression;diffusion;particles"
+            ATTACHED_FILES_ON_FAIL "${_species_dir}/implicit/simulation.log;${_species_dir}/explicit/simulation.log")
+    endforeach()
+    foreach(_case
+        # Motivation: Stiff phase exchange must conserve vapor plus particle
+        # mass with anelastic base pressure and the configured heat capacity.
+        phase
+        # Motivation: Changing fine coverage with split/merge enabled must
+        # preserve represented mass and refresh anelastic condensate diagnostics.
+        regrid_splitmerge
+        # Motivation: Anelastic initial relaxation must retain vapor and latent
+        # exchange without duplicating particle mass in refined regions.
+        initialization)
+        set(_anelastic_name "SDM_Anelastic_${_case}")
+        set(_anelastic_dir "${CMAKE_CURRENT_BINARY_DIR}/test_files/${_anelastic_name}")
+        file(MAKE_DIRECTORY "${_anelastic_dir}")
+        add_test(NAME ${_anelastic_name}
+            COMMAND "${Python3_EXECUTABLE}" "${_species_input}/check_species_diffusion.py"
+                "--exe=$<TARGET_FILE:erf_exec>"
+                "--input=${_species_input}/SDM_SpeciesDiffusion.i"
+                "--reader-dir=${PROJECT_SOURCE_DIR}/Exec/Tools"
+                "--case=${_case}" "--tolerance=${_species_tol}" --anelastic
+                "--mpi-exec=${_species_mpi_exec}"
+                "--mpi-numproc-flag=${MPIEXEC_NUMPROC_FLAG}"
+                "--mpi-preflags=${_species_mpi_preflags}" "--ranks=${_species_ranks}")
+        set_tests_properties(${_anelastic_name} PROPERTIES
+            WORKING_DIRECTORY "${_anelastic_dir}" TIMEOUT 600
+            PROCESSORS ${_species_ranks} LABELS "regression;anelastic;particles")
+    endforeach()
+    set(_anelastic_options "erf.input_sounding_file=${_species_input}/input_sounding erf.c_p=1200 erf.Cs=2 super_droplets_moisture.include_phase_change=true super_droplets_moisture.num_substeps_phase_change=2 super_droplets_moisture.initial_phase_change_relaxation=true super_droplets_moisture.initial_phase_change_relaxation_time=0.02")
+    # Motivation: Restart reconstruction must preserve the active phase-change
+    # trajectory with base pressure and a nondefault heat capacity.
+    add_test_restart_parity(SDM_Anelastic_Restart SDM_SpeciesDiffusion 2 4
+        COMMON_OPTIONS "${_anelastic_options} erf.anelastic=1"
+        FCOMPARE_RTOL ${_species_tol} FCOMPARE_ATOL ${_species_atol})
+    set(_anelastic_amr "amr.max_level=1 amr.ref_ratio=2 erf.refinement_indicators=box1 erf.box1.max_level=1 erf.box1.in_box_lo=0 0 0 erf.box1.in_box_hi=8 4 8 erf.regrid_int=1")
+    # Motivation: An AMR restart on more MPI ranks must restore thermodynamics
+    # and particle ownership on the resumed grid decomposition.
+    add_test_restart_parity(SDM_Anelastic_AMRRestart SDM_SpeciesDiffusion 2 4
+        COMMON_OPTIONS "${_anelastic_options} ${_anelastic_amr} erf.anelastic=1"
+        CHK_NRANKS 1 RESTART_NRANKS ${_species_ranks}
+        FCOMPARE_RTOL ${_species_tol} FCOMPARE_ATOL ${_species_atol})
+    # Motivation: Both mixed mode orders must preserve per-level pressure
+    # selection and checkpointed coarse condensate through restart and regridding.
+    # Pure-mode cases cannot expose every coarse/fine coupling error.
+    foreach(_modes "0 1" "1 0")
+        string(REPLACE " " "" _mode_name "${_modes}")
+        add_test_restart_parity(SDM_Anelastic_Mixed${_mode_name}Restart SDM_SpeciesDiffusion 2 4
+            COMMON_OPTIONS "${_anelastic_options} ${_anelastic_amr} erf.anelastic=${_modes}"
+            FCOMPARE_RTOL ${_species_tol} FCOMPARE_ATOL ${_species_atol})
+    endforeach()
+    # Motivation: Box boundaries and their ghost fills must not change the
+    # base-pressure-driven particle and atmospheric evolution.
+    add_test_box_parity(SDM_Anelastic_BoxParity SDM_SpeciesDiffusion plt00004
+        COMMON_OPTIONS "${_anelastic_options} erf.anelastic=1"
+        REFERENCE_OPTIONS "amr.max_grid_size=32"
+        SPLIT_OPTIONS "amr.max_grid_size_x=4"
+        FCOMPARE_RTOL ${_species_tol} FCOMPARE_ATOL ${_species_atol})
+    # Motivation: Restart must preserve authoritative vapor and particle-owned
+    # condensate so resumed diffusion matches uninterrupted evolution.
+    add_test_restart_parity(SDM_SpeciesDiffusion_Restart SDM_SpeciesDiffusion 2 4
+        COMMON_OPTIONS "erf.input_sounding_file=${_species_input}/input_sounding"
+        FCOMPARE_RTOL ${_species_tol} FCOMPARE_ATOL ${_species_atol})
+    # Motivation: Restart with AMR and regridding must also preserve particle-level
+    # ownership and composite condensate, not just single-level field values.
+    add_test_restart_parity(SDM_SpeciesDiffusion_AMRRestart SDM_SpeciesDiffusion 2 4
+        COMMON_OPTIONS "erf.input_sounding_file=${_species_input}/input_sounding amr.max_level=1 amr.ref_ratio=2 erf.refinement_indicators=box1 erf.box1.max_level=1 erf.box1.in_box_lo=0 0 0 erf.box1.in_box_hi=8 4 8 erf.regrid_int=1"
+        FCOMPARE_RTOL ${_species_tol} FCOMPARE_ATOL ${_species_atol})
+    # Motivation: Resuming a relaxed initial population must not apply density
+    # scaling or initial phase relaxation again to checkpointed particle mass.
+    add_test_restart_parity(SDM_SpeciesDiffusion_InitialRelaxationRestart SDM_SpeciesDiffusion 2 4
+        COMMON_OPTIONS "erf.input_sounding_file=${_species_input}/input_sounding amr.max_level=1 amr.ref_ratio=2 erf.refinement_indicators=box1 erf.box1.max_level=1 erf.box1.in_box_lo=0 0 0 erf.box1.in_box_hi=8 4 8 super_droplets_moisture.include_phase_change=true super_droplets_moisture.initial_phase_change_relaxation=true super_droplets_moisture.initial_phase_change_relaxation_time=0.02 erf.Cs=2"
+        FCOMPARE_RTOL ${_species_tol} FCOMPARE_ATOL ${_species_atol})
+    # Motivation: Species transport and particle projection must not depend on
+    # whether the same physical domain is stored in one box or split boxes.
+    add_test_box_parity(SDM_SpeciesDiffusion_BoxParity SDM_SpeciesDiffusion plt00004
+        COMMON_OPTIONS "erf.input_sounding_file=${_species_input}/input_sounding"
+        REFERENCE_OPTIONS "amr.max_grid_size=32"
+        SPLIT_OPTIONS "amr.max_grid_size_x=4"
+        FCOMPARE_RTOL ${_species_tol} FCOMPARE_ATOL ${_species_atol})
+endif()
+
 #=============================================================================
 # Regression tests
 #=============================================================================
@@ -1854,6 +2355,18 @@ add_test_r(ABL_MOST_IMP_DIFF_TKE
     "erf_exec"
     "plt00010"
     FCOMPARE_ATOL "4.0e-10")
+# ABL_MOST_IMP_DIFF_TKE with a stable prescribed flux (-0.02 K m/s) and the QNSE stable-side
+# similarity functions (erf.most.stable_functions = qnse): the prescribed-flux kernel, the MYNN25
+# surface gradients and the surface TKE production all take the QNSE functions. The gold was
+# generated on Linux (GCC) from the code the option merged with, so the test guards the
+# wiring against regressions; the correctness of the functions, the fold and the kernel's
+# solution is pinned to closed forms and an independent bisection in Tests/Unit/BoundaryConditions/
+# ERF_GTestMOSTStableFunctions.cpp
+add_test_r(ABL_MOST_QNSE_StableFlux
+    ""
+    "erf_exec"
+    "plt00010"
+    FCOMPARE_ATOL "4.0e-10")
 # ABL_MOST_IMP_DIFF_TKE with erf.implicit_before_substep = false: the vertical implicit solves of
 # theta and momentum (ERF_ImplicitPre.H) run after the last acoustic substep of each stage
 add_test_r(ABL_MOST_IMP_DIFF_PostSubstep     ""  "erf_exec" "plt00010")
@@ -1866,6 +2379,54 @@ add_test_r(ABL_MYNN_PBL                      ""  "erf_exec" "plt00100" INPUT_SOU
 # RunTilingParity.cmake calls mpiexec and fcompare through execute_process,
 # which neither drops an empty MPIEXEC nor expands the Windows exe globs.
 if(ERF_ENABLE_MPI AND NOT WIN32)
+  # Immersed LES on two levels with the surface on a coarse mid-plane and a theta gradient: with
+  # erf.if_average_down = fluid_mass every covered coarse cell is the fluid-mass-weighted average
+  # of the fine cells over it; the plain average (the default) mixes the solid fine cell in,
+  # 0.10 K off here, and must fail the same check.
+  add_test_immersed_average_down(ImmersedLES2LevAverageDown ImmersedLES2LevAverageDown 0.001 OFF "")
+  add_test_immersed_average_down(ImmersedLES2LevAverageDown_Plain ImmersedLES2LevAverageDown 0.001 ON
+                                 "erf.if_average_down=plain")
+  # Immersed LES on two levels, a patch whose lateral coarse/fine faces cross the surface, theta
+  # uniform and no heat entering (erf-model/ERF#4920): with the implicit projection
+  # (erf.if_implicit_projection, FFT) the fluid-mean theta must hold within 1e-6 K; the explicit
+  # freeze of the solid after the projection leaves the partial cells at the patch edges a
+  # divergence (0.04 K in 20 steps on one build) and must fail the same check. The third leg runs
+  # the log-law coarse/fine fill and a mismatch threshold the surface crosses: the mean must hold
+  # and the start-up warning must be printed.
+  if(ERF_ENABLE_FFT)
+    add_test_immersed_cf_heat_balance(ImmersedLES2LevHeatBalance ImmersedLES2LevHeatBalance 300.0 1.0e-6 OFF OFF "" multilevel)
+    add_test_immersed_cf_heat_balance(ImmersedLES2LevHeatBalance_Freeze ImmersedLES2LevHeatBalance 300.0 1.0e-6 ON OFF
+                                      "erf.if_implicit_projection=false" multilevel)
+    add_test_immersed_cf_heat_balance(ImmersedLES2LevHeatBalance_LogLaw ImmersedLES2LevHeatBalance 300.0 1.0e-6 OFF ON
+                                      "erf.cf_loglaw_fill=true erf.if_cf_mismatch_warning=0.4" multilevel)
+    # Immersed-forcing building (a box whose walls and roof are half-solid cells), one level in four
+    # unequal boxes, theta uniform and no heat entering (erf-model/ERF#4887): with the implicit
+    # projection the fluid-mean theta must hold within 1e-6 K (4e-10 K measured), with and without the
+    # snap of the partial cells; the explicit treatment (the faces between two solid cells zeroed
+    # after the projection) leaves the partial cells at the walls and roof a divergence (0.012 K
+    # measured) and must fail the same check.
+    add_test_immersed_cf_heat_balance(ImmersedBuildingHeatBalance ImmersedBuildingHeatBalance 300.0 1.0e-6 OFF OFF "" "")
+    add_test_immersed_cf_heat_balance(ImmersedBuildingHeatBalance_Snap ImmersedBuildingHeatBalance 300.0 1.0e-6 OFF OFF
+                                      "erf.if_snap_partial_cells=true" "")
+    add_test_immersed_cf_heat_balance(ImmersedBuildingHeatBalance_Freeze ImmersedBuildingHeatBalance 300.0 1.0e-6 ON OFF
+                                      "erf.if_implicit_projection=false" "")
+    # Neutral ABL with the k-eqn RANS over an immersed plane on a cell face, two solid rows below it,
+    # against the same ABL on flat ground (erf-model/ERF#4134): with the fraction-stress wall law the
+    # profiles over the lowest 500 m must agree within 1 % (measured: wind 0.02 %, TKE 0.2 %); the legacy law leaves
+    # the fluid cell on the solid unforced (wind 18 % off, TKE 5x) and measures the wall distance from the domain bottom, and
+    # must fail the same check (that leg also has no wall TKE pin, since erf.if_wall_tke belongs to the new law).
+    add_test_immersed_flat_equivalence(ImmersedForm7Equivalence ImmersedForm7Equivalence 2 0.01 25 OFF "" "")
+    add_test_immersed_flat_equivalence(ImmersedForm7Equivalence_Legacy ImmersedForm7Equivalence 2 0.01 25 ON
+                                       "erf.if_wall_form=legacy erf.if_wall_tke=false" "")
+    # The same pair with a moisture model (MoistNoCondensation) and dry solid rows: the wall face is
+    # closed to the moisture species in the explicit and the implicit vertical diffusion, so the qv
+    # profile over the plane matches flat ground too (a wall face open to moisture dries the wall
+    # cell by tens of percent within the 100 steps). One leg per diffusion path.
+    add_test_immersed_flat_equivalence(ImmersedForm7MoistEquivalence ImmersedForm7MoistEquivalence 2 0.01 25 OFF ""
+                                       "erf.implicit_moisture_diffusion=false")
+    add_test_immersed_flat_equivalence(ImmersedForm7MoistEquivalence_Implicit ImmersedForm7MoistEquivalence 2 0.01 25 OFF ""
+                                       "erf.implicit_moisture_diffusion=true")
+  endif()
   # Box, rank and tiling parity of the other closures: one box on one rank without tiling
   # against four boxes on two ranks with 8 x 8 tiles (Tests/test_files/Closure_BoxParity).
   set(_cbp_ref   "amr.max_grid_size_x=32 amr.max_grid_size_y=32 fabarray.mfiter_tile_size=1024 1024 1024")
@@ -1928,8 +2489,10 @@ if(ERF_ENABLE_MPI AND NOT WIN32)
   add_test_tiling_parity(ABL_YSUNew_Tiling   ABL_MRF_Tiling "00010" "00010"
       RUNTIME_OPTIONS "erf.pbl_type=YSUNew erf.most.pblh_calc=YSU"
       VARYING_3D "Lturb Kmv" VARYING_2D "pblh u_star")
-  # Legacy YSU aborts in unstable conditions, so cool the surface (a stronger
-  # cooling than -0.02 with the 5 m/s wind stops the MOST iteration converging).
+  # Legacy YSU aborts in unstable conditions, so cool the surface. A stronger
+  # cooling than -0.02 with the 5 m/s wind passes the stable fold of the
+  # prescribed-flux MOST problem, where the surface layer then applies a weaker
+  # flux than prescribed (see "Limits on the similarity solution" in SurfaceLayer.rst).
   # It covers the full-column assert only: legacy YSU never calls set_pblh, so
   # pblh is left out of the 2D plotfile rather than compared as a constant.
   add_test_tiling_parity(ABL_YSU_Tiling      ABL_MRF_Tiling "00010" "00010"
@@ -2028,6 +2591,14 @@ endif()
 if(ERF_ENABLE_MPI AND NOT WIN32)
 add_test_restart_parity(MoistBubble_Kessler_Restart MoistBubble_Kessler_Restart 4 8
     FCOMPARE_RTOL "0.0" FCOMPARE_ATOL "0.0")
+add_test_restart_parity(CloudChamber_WDM6_Restart CloudChamber_WDM6_Restart 2 4
+    FCOMPARE_RTOL "0.0" FCOMPARE_ATOL "0.0")
+if(ERF_PRECISION STREQUAL "DOUBLE")
+add_test_restart_parity(CloudChamber_WDM6_ActiveRestart CloudChamber_WDM6_ActiveRestart 500 1000
+    FCOMPARE_RTOL "0.0" FCOMPARE_ATOL "0.0"
+    CHECKER "${CLOUD_CHAMBER_CHECKER}"
+    CHECK_MODE "wdm6_active")
+endif()
 endif()
 # Kessler rain over a uniform, laterally periodic layer, with the fine box moved at t = 30 s:
 # a regrid must keep the surface rain accumulator.  The centre column of the 2D plotfile lies
@@ -2144,6 +2715,38 @@ endif( )
 # registered only once someone adds the inputs.
 if(ERF_ENABLE_RRTMGP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_files/Radiation")
   add_test_r(Radiation                       ""  "erf_exec" "plt00010" RUNTIME_OPTIONS "erf.vert_implicit=false ")
+endif()
+
+# Exercise the complete RRTMGP -> raw forcing -> terrain correction -> SLM
+# path. Flat terrain has an exact factor of one, so no gold file is needed.
+if(ERF_ENABLE_RRTMGP AND ERF_ENABLE_FCOMPARE AND NOT WIN32)
+  set(TEST_NAME TopographicRadiation_FlatParity)
+  set(TEST_FILES_DIR TopographicRadiationFlat)
+  setup_test()
+  resolve_test_exe("" "erf_exec" TEST_EXE)
+  add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+      "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+      "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+      "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+      "-DNRANKS=${NP}"
+      "-DTEST_EXE=${TEST_EXE}"
+      "-DCONFIG=$<CONFIG>"
+      "-DINPUT=${CURRENT_TEST_BINARY_DIR}/TopographicRadiationFlat.i"
+      "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+      "-DFCOMPARE=${FCOMPARE_EXE}"
+      "-DFEXTREMA=${FEXTREMA_EXE}"
+      "-DRRTMGP_ROOT=${PROJECT_SOURCE_DIR}/Submodules/RRTMGP"
+      -P ${PROJECT_SOURCE_DIR}/Tests/RunTopographicRadiationFlat.cmake)
+  set_tests_properties(${TEST_NAME} PROPERTIES
+      TIMEOUT 900
+      PROCESSORS ${NP}
+      WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+      LABELS "regression;radiation;option-parity"
+      ATTACHED_FILES_ON_FAIL "${CURRENT_TEST_BINARY_DIR}/topo_off/simulation.log;${CURRENT_TEST_BINARY_DIR}/topo_on/simulation.log;${CURRENT_TEST_BINARY_DIR}/plt00003_parity.log;${CURRENT_TEST_BINARY_DIR}/plt_lsm_2D_00003_parity.log")
+  # setup_test() reads TEST_FILES_DIR whenever it is set, so leaving it here made every
+  # later setup_test() caller copy this folder (ThinBody_GradP then had no inputs file)
+  unset(TEST_NAME)
+  unset(TEST_FILES_DIR)
 endif()
 
 # TwoStream radiation needs no external library and no gold plotfiles: the
@@ -2652,8 +3255,16 @@ add_test_r(CouetteFlow_ImplicitCF            "" "erf_exec" "plt00050"
 
 # The same closure for the implicit moisture solve in slow_rhs_post (ERF_ImplicitPost.H): a
 # moist layer diffusing down through a fine patch over the lower half of the column
+set(_moist_cf_rtol "1.0e-8")
+if(ERF_PRECISION STREQUAL "SINGLE")
+    # Unchanged upstream accumulates ~6.6e-6 relative density roundoff over 200 steps.
+    # At this deck's qv <= 0.01, the unchanged 1e-7 absolute bound still controls
+    # moisture accuracy and rejects the >8e-7 absolute error of a lagged closure.
+    set(_moist_cf_rtol "1.0e-5")
+endif()
 add_test_r(MoistDiffusion_ImplicitCF         "" "erf_exec" "plt00200"
-           FCOMPARE_RTOL "1.0e-8" FCOMPARE_ATOL "1.0e-7")
+           FCOMPARE_RTOL "${_moist_cf_rtol}" FCOMPARE_ATOL "1.0e-7")
+unset(_moist_cf_rtol)
 
 # CouetteFlow_ImplicitCF with the implicit solves after the last acoustic substep of each stage
 # (erf.implicit_before_substep = false).  Until erf-model/ERF#4333 was fixed the new state's ghost
@@ -3106,6 +3717,14 @@ function(add_test_most_zref TEST_NAME)
 endfunction(add_test_most_zref)
 
 add_test_most_zref(MOST_Zref_Stretched)
+
+# The reference height must exceed the roughness length in every column: with the
+# default (the first cell center, 5 m on this column) a 6 m roughness stops at start-up
+add_test_abort(MOST_Zref_BelowRoughness
+               ${CMAKE_CURRENT_SOURCE_DIR}/test_files/MOST_Zref_Stretched
+               MOST_Zref_Stretched.i
+               "must exceed erf.most.z0"
+               "erf.most.z0=6.0")
 
 # Immersed-boundary surface energy balance on the faces of a height-map cube
 # (prognostic skin, slab conduction, heat flux into the air), 40 steps.
@@ -3943,12 +4562,14 @@ add_test_smag2d_ridge(Smag2D_Ridge_DiffusiveCheck check "plt00010"
     OPTIONS "erf.fixed_dt=-1 max_step=10 erf.plot_int_1=10"
     DIFFUSIVE_CFL 0.3)
 # erf.diffusive_dt_limit sets an adaptive dt and is never exceeded; the first diffusive dt
-# (3.6881 s in the reference run, Release, 1 and 2 ranks) must match to 2 %.
+# (4.7135 s in the reference run, Release, 1 and 2 ranks) must match to 2 %.  It was 3.6881 s
+# while the deck's surface layer was queried 10 m above the surface; the default reference is
+# now the first cell center, 18.5 to 25 m here (erf-model/ERF#4935).
 add_test_smag2d_ridge(Smag2D_Ridge_DiffusiveLimit limit "plt00010"
     OPTIONS "erf.fixed_dt=-1 max_step=10 erf.plot_int_1=10"
     DIFFUSIVE_CFL 0.2
-    REF_DIFFUSIVE_DT_LO 3.6143
-    REF_DIFFUSIVE_DT_HI 3.7619)
+    REF_DIFFUSIVE_DT_LO 4.6192
+    REF_DIFFUSIVE_DT_HI 4.8077)
 
 # Each new input is checked at start-up and aborts naming itself.  add_test_abort runs through
 # `sh -c ... | tee`, so these sit under the same guard as its other use.
@@ -3969,6 +4590,17 @@ add_test_abort(Smag2D_Abort_SlopeWithoutTerrain ${_smag2d_dir} Smag2D_Ridge.i
 add_test_abort(Smag2D_Abort_CapWithEB ${CMAKE_CURRENT_SOURCE_DIR}/test_files/HillEB HillEB.i
                "erf.smag2d_kh_cap is not supported with erf.terrain_type = EB"
                "erf.les_type=Smagorinsky2D erf.Cs=0.1 erf.smag2d_kh_cap=10")
+# EB advection has no WENO: in a Release build the fields were silently not advected (#4876).
+# The moist scalars default to WENO3, so they abort with moisture on and no choice given.
+add_test_abort(EBAdvection_Abort_WenoScalars ${CMAKE_CURRENT_SOURCE_DIR}/test_files/HillEB HillEB.i
+               "erf.dryscal_horiz_adv_type = WENO5 is not supported with erf.terrain_type = EB"
+               "erf.dryscal_horiz_adv_type=WENO5")
+add_test_abort(EBAdvection_Abort_WenoDycore ${CMAKE_CURRENT_SOURCE_DIR}/test_files/HillEB HillEB.i
+               "erf.dycore_vert_adv_type = WENOZ5 is not supported with erf.terrain_type = EB"
+               "erf.dycore_vert_adv_type=WENOZ5")
+add_test_abort(EBAdvection_Abort_MoistDefault ${CMAKE_CURRENT_SOURCE_DIR}/test_files/HillEB HillEB.i
+               "erf.moistscal_horiz_adv_type = WENO3 is not supported with erf.terrain_type = EB"
+               "erf.moisture_model=Kessler")
 add_test_abort(DiffusiveDt_Abort_CflRange ${_smag2d_dir} Smag2D_Ridge.i
                "erf.diffusive_cfl must be in"
                "erf.diffusive_cfl=1.5")
@@ -4642,6 +5274,24 @@ if(NOT WIN32 AND ERF_TEST_PYTHON AND ERF_PRECISION STREQUAL "DOUBLE")
   add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Hill_TwoWay inputs_hill 30
       RUNTIME_OPTIONS "${_hill_amr} ${_hill_full}"
       CHECK check_uniform_scalar.py PLOTFILES ${_hill_amr_tol} --require-level)
+  # Map factors that vary in space on level 0 (as if read from its init file), which the fine
+  # level, having no file of its own, interpolates.  The fine map factors must be in place before
+  # the initial projection, or the first step departs by ~1e-2 (erf-model/ERF#4905)
+  add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Hill_TwoLevels_VaryingMapFactor inputs_hill 30
+      RUNTIME_OPTIONS "${_hill_amr} ${_hill_full} erf.coupling_type=OneWay erf.test_mapfactor_amp=0.2"
+      CHECK check_uniform_scalar.py PLOTFILES ${_hill_amr_tol} --require-level)
+  add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Hill_TwoWay_VaryingMapFactor inputs_hill 30
+      RUNTIME_OPTIONS "${_hill_amr} ${_hill_full} erf.test_mapfactor_amp=0.2"
+      CHECK check_uniform_scalar.py PLOTFILES ${_hill_amr_tol} --require-level)
+  # The same with a patch that does not span the full depth: its coarse/fine faces in z take the
+  # vertical flux Omega / (m_x m_y) from the coarse level, not Omega, or with the map factors varying
+  # in a coarse column the level's boundary fluxes do not add up to zero (erf-model/ERF#4922)
+  add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Hill_PartialDepth_VaryingMapFactor inputs_hill 30
+      RUNTIME_OPTIONS "${_hill_amr} ${_hill_part} erf.coupling_type=OneWay erf.test_mapfactor_amp=0.2"
+      CHECK check_uniform_scalar.py PLOTFILES ${_hill_amr_tol} --require-level)
+  add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Hill_PartialDepth_TwoWay_VaryingMapFactor inputs_hill 30
+      RUNTIME_OPTIONS "${_hill_amr} ${_hill_part} erf.test_mapfactor_amp=0.2"
+      CHECK check_uniform_scalar.py PLOTFILES ${_hill_amr_tol} --require-level)
   add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Hill_PartialDepth_TwoWay inputs_hill 30
       RUNTIME_OPTIONS "${_hill_amr} ${_hill_part}"
       CHECK check_uniform_scalar.py PLOTFILES ${_hill_amr_tol} --require-level)
@@ -4657,6 +5307,15 @@ if(NOT WIN32 AND ERF_TEST_PYTHON AND ERF_PRECISION STREQUAL "DOUBLE")
   add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Inertial_MidPoint inputs_inertial 40
       RUNTIME_OPTIONS "erf.anelastic_type=MidPoint"
       CHECK check_inertial_drift.py PLOTFILES)
+  # The same with an EB plane that cuts layer k = 1, checked in the cut layer and a full one
+  # (measured 0.074 m at dt = 0.4 s for both; RK2 was 3.4 m when the EB redistribution step
+  # replaced the Heun average of the second stage with old + dt R2)
+  add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Inertial_EB_RK2 inputs_inertial_eb 40
+      RUNTIME_OPTIONS "erf.anelastic_type=RK2"
+      CHECK check_inertial_drift.py PLOTFILES --layers 1 2)
+  add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Inertial_EB_MidPoint inputs_inertial_eb 40
+      RUNTIME_OPTIONS "erf.anelastic_type=MidPoint"
+      CHECK check_inertial_drift.py PLOTFILES --layers 1 2)
   # The time step from erf.cfl with map factors
   add_test_anelastic_scalar_advection(AnelasticScalarAdvection_CFL_MapFactor inputs_mapfac_anelastic 5
       RUNTIME_OPTIONS "erf.fixed_dt=-1 erf.cfl=0.5 erf.change_max=100"

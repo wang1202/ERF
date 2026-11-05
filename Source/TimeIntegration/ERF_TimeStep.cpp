@@ -39,7 +39,7 @@ ERF::timeStep (int lev, double time, int /*iteration*/)
         Array<MultiFab*, AMREX_SPACEDIM> area_vec = {ax[lev].get(), ay[lev].get(), az[lev].get()};
 
         int ntimes = bdy_data_xlo.size();
-        double time_since_start_bdy = time + start_time - start_bdy_time;
+        double time_since_start_bdy = time + (start_time - start_bdy_time);
         int n_time_old = std::min(static_cast<int>( (time_since_start_bdy        ) /  bdy_time_interval), ntimes-1);
         int n_time_new = std::min(static_cast<int>( (time_since_start_bdy+dt[lev]) /  bdy_time_interval), ntimes-1);
         auto repack_runtime_bdy = [&] (const int itime) {
@@ -110,7 +110,7 @@ ERF::timeStep (int lev, double time, int /*iteration*/)
     if (!nc_low_file.empty() && (lev==0))
     {
         int ntimes = low_data_zlo.size();
-        double time_since_start_low = time + start_time - start_low_time;
+        double time_since_start_low = time + (start_time - start_low_time);
         int n_time_old = std::min(static_cast<int>( (time_since_start_low        ) /  low_time_interval), ntimes-1);
         int n_time_new = std::min(static_cast<int>( (time_since_start_low+dt[lev]) /  low_time_interval), ntimes-1);
 
@@ -176,8 +176,7 @@ ERF::timeStep (int lev, double time, int /*iteration*/)
         FillPatchCrseLevel(lev, time, {&S_new, &U_new, &V_new, &W_new});
     } else if (lev < finest_level) {
         FillPatchFineLevel(lev, time, {&S_new, &U_new, &V_new, &W_new},
-                           {&S_new, &rU_new[lev], &rV_new[lev], &rW_new[lev]},
-                           base_state[lev], base_state[lev]);
+                           {&S_new, &rU_new[lev], &rV_new[lev], &rW_new[lev]});
     }
 
     if (regrid_int > 0)  // We may need to regrid
@@ -254,6 +253,11 @@ ERF::timeStep (int lev, double time, int /*iteration*/)
                     // while clev = k-1 still holds the just-moved fines.
                     for (int k = old_finest; k >= 1; k--) {
                         pc->MergeParticlesAtDerefinement(k, old_pc_ba[k], refRatio(k-1));
+                    }
+                    if (solverChoice.diffChoice.n_qstate_nonmoist > 0) {
+                        for (int k = lev; k <= finest_level; ++k) {
+                            micro->Update_Diagnostic_State_Lev(k, vars_new[k][Vars::cons], *z_phys_nd[k]);
+                        }
                     }
                 }
 #endif

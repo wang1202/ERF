@@ -1,6 +1,8 @@
 #ifndef ERF_UTILS_H_
 #define ERF_UTILS_H_
 
+#include <utility>
+
 #include "AMReX.H"
 #include "AMReX_MultiFab.H"
 #include "AMReX_BCRec.H"
@@ -10,6 +12,7 @@
 #include "ERF_IndexDefines.H"
 #include "ERF_SurfaceLayer.H"
 #include "ERF_FillPatcher.H"
+#include "ERF_ImmersedWallCell.H"
 #include "ERF_ReadBndryPlanes.H"
 
 /** Build one density-weighted, nonnegative WRF moisture target. */
@@ -159,6 +162,116 @@ fill_wall_dist_ghost_cells (amrex::MultiFab& wdist, const amrex::Geometry& geom)
 void
 make_qt (const amrex::MultiFab& cons_state, amrex::MultiFab& qt, int n_qstate_into_total);
 
+/**
+ * Average down a cell-centred state over immersed-forcing levels (erf.if_average_down =
+ * fluid_mass). The fine cells are weighted by their fluid mass,
+ * (rho S)_c = rho_c * sum (1 - beta_f) V_f (rho S)_f / sum (1 - beta_f) V_f rho_f,
+ * with beta the solid fraction, V the fine cell volume (detJ / (m_x m_y), the weight the plain
+ * average carries in the state) and rho_c the coarse density: the fluid-volume-weighted mean of
+ * the fine density, sum (1 - beta_f) V_f rho_f / sum (1 - beta_f) V_f, when the density is in the
+ * component range, else the coarse cell's own. The coarse value is the fluid mean over the whole
+ * coarse cell (intensive), not the sum over the fine cells. Coarse cells that are solid on their
+ * own level, or with no fluid fine cell under them, keep their value. The plain average mixes the
+ * values of solid fine cells into coarse fluid cells.
+ * @param[in] S_fine Fine state (unscaled).
+ * @param[in,out] S_crse Coarse state (unscaled); the covered cells are written.
+ * @param[in] beta_fine Fine solid fraction (terrain_blanking).
+ * @param[in] beta_crse Coarse solid fraction.
+ * @param[in] vol_fine Fine cell volume weight (any constant factor cancels).
+ * @param[in] scomp First component to average.
+ * @param[in] ncomp Number of components.
+ * @param[in] ratio Refinement ratio.
+ */
+void
+if_average_down (const amrex::MultiFab& S_fine, amrex::MultiFab& S_crse,
+                 const amrex::MultiFab& beta_fine, const amrex::MultiFab& beta_crse,
+                 const amrex::MultiFab& vol_fine,
+                 int scomp, int ncomp, const amrex::IntVect& ratio);
+
+/**
+ * RANS wall distance over terrain represented by immersed forcing with the fraction-stress wall
+ * law (erf.if_wall_form = fraction_stress): measured vertically from the surface itself,
+ * h = z_bot + beta dz of the wall cell (the partial cell, or the fluid cell on a solid cell;
+ * ERF_ImmersedWallCell.H), the wall cell at its fluid centroid (1 - beta) dz / 2 above it and
+ * every other cell at |z_cc - h|; a column without solid measures from the bottom of the domain.
+ * A box that does not see the surface of a column (a fine box inside the solid, or above the
+ * surface without reaching the bottom) measures from the coarser level's wall height.
+ * @param[out] wdist Wall distance (valid cells; ghost cells are left untouched).
+ * @param[in] terrain_blank Cell-centred solid fraction.
+ * @param[in] z_phys_nd Node heights.
+ * @param[in] z_phys_cc Cell-centre heights.
+ * @param[in] domain Index domain of the level.
+ * @param[in] small_volfrac Solid fraction below which a cell counts as fluid.
+ * @param[out] wall_height Optional: the height measured from in each column, on the level's
+ *            BoxArray flattened to the bottom cell (same DistributionMapping).
+ * @param[in] wall_height_crse Optional, fine levels: wall_height of the coarser level brought to
+ *            this level's flattened BoxArray. Without it every box must hold whole columns.
+ */
+void
+immersed_wall_dist (amrex::MultiFab& wdist,
+                    const amrex::MultiFab& terrain_blank,
+                    const amrex::MultiFab& z_phys_nd,
+                    const amrex::MultiFab& z_phys_cc,
+                    const amrex::Box& domain,
+                    amrex::Real small_volfrac,
+                    amrex::MultiFab* wall_height = nullptr,
+                    const amrex::MultiFab* wall_height_crse = nullptr);
+
+/**
+ * Wall-face masks of the fraction-stress wall law (erf.if_wall_form = fraction_stress):
+ * zero on the xz (yz) edge that is the bottom face of the wall cell of an x-face (y-face)
+ * column, the spacing factor on the face above it, one elsewhere. The vertical flux of x (y)
+ * momentum is multiplied by them, so no resolved flux crosses the wall face (see
+ * ERF_ImmersedWallCell.H).
+ * @param[in] terrain_blank Cell-centred solid fraction; needs one more ghost cell than the masks.
+ * @param[out] mask13 On convert(ba, IntVect(1,0,1)), valid and ghost cells.
+ * @param[out] mask23 On convert(ba, IntVect(0,1,1)), valid and ghost cells.
+ * @param[out] mask33 On convert(ba, IntVect(0,0,1)): the same for the cell columns, applied to
+ *             the vertical diffusive fluxes of theta and TKE (zero on the bottom face of the wall cell).
+ * @param[in] domain Index domain of the level.
+ * @param[in] small_volfrac Solid fraction below which a cell counts as fluid.
+ * @param[in] spacing erf.if_wall_face_spacing (0 grid, 1 physical, 2 log): the face ABOVE the wall
+ *            cell gets ib_wall::face_above_factor instead of one.
+ * @param[in] dz Cell height (constant-dz mesh).
+ * @param[in] z0 Roughness length of the wall law.
+ */
+void
+make_ib_wall_face_masks (const amrex::MultiFab& terrain_blank,
+                         amrex::MultiFab& mask13,
+                         amrex::MultiFab& mask23,
+                         amrex::MultiFab& mask33,
+                         const amrex::Box& domain,
+                         amrex::Real small_volfrac,
+                         int spacing = 0,
+                         amrex::Real dz = amrex::Real(1.0),
+                         amrex::Real z0 = amrex::Real(0.1));
+
+/**
+ * Where the coarse and fine levels disagree on an immersed surface along the lateral coarse/fine
+ * faces of the fine level (erf.if_cf_mismatch_warning): the surface on a coarse cell's mid-plane
+ * leaves the coarse cell half solid over fine cells that are all solid and all fluid. For each
+ * coarse cell covered by the fine level and next to an uncovered one, the spread (max - min) of
+ * the fine solid fractions under it is formed; cells with a spread of at least warn are counted.
+ *
+ * @param[in] fine_tb    fine solid fraction (terrain_blanking)
+ * @param[in] fine_grids fine BoxArray
+ * @param[in] crse_grids coarse BoxArray
+ * @param[in] crse_dmap  coarse DistributionMapping
+ * @param[in] crse_geom  coarse Geometry
+ * @param[in] ratio      refinement ratio
+ * @param[in] warn       spread at or above which a cell is counted
+ * @return the number of counted cells over all ranks, and the largest spread along those faces
+ */
+std::pair<int, amrex::Real>
+if_cf_surface_mismatch (const amrex::MultiFab& fine_tb,
+                        const amrex::BoxArray& fine_grids,
+                        const amrex::BoxArray& crse_grids,
+                        const amrex::DistributionMapping& crse_dmap,
+                        const amrex::Geometry& crse_geom,
+                        const amrex::IntVect& ratio,
+                        amrex::Real warn);
+
+
 /*
  * Create the Jacobian for the metric transformation when use_terrain is true
  */
@@ -282,9 +395,51 @@ void realbdy_bc_bxs_xy (const amrex::Box& bx,
                         const amrex::IntVect& ng_vect=amrex::IntVect(0,0,0));
 
 /*
+ * The two boundary-data slices that bracket a time, and the weight of the later one
+ */
+struct BdyTimeWeights {
+    int n_lo;          // slice at or before the time
+    int n_hi;          // slice after it (n_lo once the data has run out)
+    amrex::Real alpha; // weight of slice n_hi; slice n_lo gets (1 - alpha)
+};
+
+/**
+ * Time interpolation weights for boundary data at fixed intervals.
+ *
+ * The time must be measured from the first slice, and formed as
+ * elapsed + (start_time - start_bdy_time), not as (elapsed + start_time) - start_bdy_time:
+ * start_time and start_bdy_time are epoch seconds (~1.7e9), where doubles are spaced
+ * ~2.4e-7 s apart, so the second form rounds the elapsed time to that spacing.  The
+ * difference of the two epoch times is exact.
+ *
+ * @param[in] time_since_start time since the first slice
+ * @param[in] data_span        time from the first slice to the last one
+ * @param[in] dT               interval between slices
+ */
+AMREX_FORCE_INLINE
+BdyTimeWeights
+bdy_time_weights (const double time_since_start, const double data_span, const double dT)
+{
+    BdyTimeWeights w;
+    if (time_since_start >= data_span) {
+        // Do not over run the last slice
+        w.n_lo  = static_cast<int>(data_span / dT);
+        w.n_hi  = w.n_lo;
+        w.alpha = zero;
+    } else {
+        w.n_lo  = static_cast<int>(time_since_start / dT);
+        w.n_hi  = w.n_lo + 1;
+        w.alpha = static_cast<amrex::Real>((time_since_start - w.n_lo * dT) / dT);
+    }
+    AMREX_ALWAYS_ASSERT(w.alpha >= zero && w.alpha <= one);
+    return w;
+}
+
+/*
  * Compute relaxation region RHS with wrfbdy
  */
-void realbdy_compute_interior_ghost_rhs (const double& total_time,
+void realbdy_compute_interior_ghost_rhs (const double& elapsed_time,
+                                         const double& start_time,
                                          const double& delta_t,
                                          const double& start_bdy_time,
                                          const double& final_bdy_time,

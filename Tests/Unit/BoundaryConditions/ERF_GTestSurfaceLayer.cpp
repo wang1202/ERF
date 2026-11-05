@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cfenv>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -443,7 +444,8 @@ struct SurfaceLayerFields
                    const std::string& lsm_name = "",
                    const Real lsm_value = Real(0.0),
                    const bool coupled_active = false,
-                   const Real rdOcp = RdoCp)
+                   const Real rdOcp = RdoCp,
+                   const bool has_immersed_buildings = false)
     {
         bool rotate = false;
         Vector<Geometry> geoms{geom};
@@ -460,7 +462,7 @@ struct SurfaceLayerFields
             face, geoms, rotate, prefix, qv_prim, z_phys_nd,
             Vector<Vector<Real>>{},
             MeshType::ConstantDz, TerrainType::None, TurbChoice{}, rdOcp,
-            0.0, 0.0);
+            0.0, 0.0, 0.0, Vector<const eb_*>{}, nullptr, has_immersed_buildings);
         layer->set_surface_layer_faces(active_faces);
         if (coupled_active) {
             layer->set_coupled_sst_active(true);
@@ -581,7 +583,7 @@ Long check_qsurf_values (const SurfaceLayerFields& fields,
 
 // nvcc rejects an extended __device__ lambda whose enclosing function has
 // private access, and gtest generates TestBody() as a private member, so the
-// device fills below live here rather than inside the TEST bodies.
+// device kernels below live here rather than inside the TEST bodies.
 void set_quadratic_node_heights (MultiFab& z_phys_nd)
 {
     for (MFIter mfi(z_phys_nd, false); mfi.isValid(); ++mfi) {
@@ -675,6 +677,71 @@ mf_grown_value (const MultiFab& mf, const IntVect& p)
             { return {arr(i,j,k)}; });
     }
     return get<0>(reduce_data.value());
+}
+
+void set_clamped_landmask (iMultiFab& lmask, int ilo)
+{
+    for (MFIter mfi(lmask); mfi.isValid(); ++mfi) {
+        const auto mask = lmask.array(mfi);
+        ParallelFor(mfi.fabbox(), [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+            mask(i,j,k) = amrex::min(amrex::max(i - ilo, 0), 2);
+        });
+    }
+}
+
+int count_parameter_mismatches (const MultiFab& parameter, int immersed_ilo,
+                                Real active_value, Real inactive_value)
+{
+    ReduceOps<ReduceOpSum> op;
+    ReduceData<int> data(op);
+    for (MFIter mfi(parameter); mfi.isValid(); ++mfi) {
+        const auto arr = parameter.const_array(mfi);
+        op.eval(mfi.fabbox(), data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> GpuTuple<int> {
+                return {arr(i,j,k) != ((i >= immersed_ilo) ? inactive_value : active_value)};
+            });
+    }
+    return get<0>(data.value());
+}
+
+void set_immersed_landmask (iMultiFab& lmask, int ib)
+{
+    for (MFIter mfi(lmask); mfi.isValid(); ++mfi) {
+        const auto mask = lmask.array(mfi);
+        ParallelFor(mfi.fabbox(), [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+            mask(i,j,k) = (i >= ib) ? 2 : 1;
+        });
+    }
+}
+
+void set_test_tau13 (MultiFab& tau13, int ib)
+{
+    for (MFIter mfi(tau13); mfi.isValid(); ++mfi) {
+        const auto arr = tau13.array(mfi);
+        ParallelFor(mfi.validbox(), [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+            arr(i,j,k) = (i < ib) ? Real(0.04) : Real(0);
+        });
+    }
+}
+
+void set_stale_immersed_values (MultiFab& parameter, int ib)
+{
+    for (MFIter mfi(parameter); mfi.isValid(); ++mfi) {
+        const auto arr = parameter.array(mfi);
+        ParallelFor(mfi.fabbox(), [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+            if (i >= ib) { arr(i,j,k) = bogus_large_value; }
+        });
+    }
+}
+
+void set_linear_node_heights (MultiFab& z_phys_nd)
+{
+    for (MFIter mfi(z_phys_nd); mfi.isValid(); ++mfi) {
+        const auto z = z_phys_nd.array(mfi);
+        ParallelFor(mfi.fabbox(), [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+            z(i,j,k) = Real(k);
+        });
+    }
 }
 
 } // namespace
@@ -1430,6 +1497,171 @@ TEST(SurfaceLayer, LsmDerivedParametersFillCoarseFineAndEdgeGhostColumns)
     }
 }
 
+// Immersed columns skip MOST. Their initial values must be safe even in
+// neighboring FABs' ghost cells, without losing the land/water first-call sentinel.
+TEST(SurfaceLayer, ImmersedColumnsHaveBenignInitialParameters)
+{
+    const std::string prefix = "unit_surface_layer_immersed_init";
+    ScopedSurfaceLayerParams params(prefix.c_str());
+    ParmParse pp(prefix);
+    // Water on lateral faces requires constant roughness.
+    pp.add("most.roughness_type_sea", std::string("constant"));
+    for (const auto face : all_faces()) {
+        SCOPED_TRACE(static_cast<int>(face));
+        SurfaceLayerFields fields(make_geometry(), true);
+        const int ilo = fields.domain.smallEnd(0);
+        set_clamped_landmask(*fields.lmask[0], ilo);
+        auto layer = fields.prepare_layer(face, active_faces({face}), prefix, false, false,
+                                          "", Real(0), false, RdoCp, true);
+        const std::array<MultiFab*, 9> parameters = {
+            layer->get_u_star(0), layer->get_w_star(0), layer->get_t_star(0),
+            layer->get_q_star(0), layer->get_olen(0), layer->get_pblh(0),
+            layer->get_z0(0), layer->get_t_surf(0), layer->get_q_surf(0)};
+        const std::array<Real, 9> ordinary = {
+            bogus_large_value, bogus_large_value, Real(0), Real(0),
+            bogus_large_value, bogus_large_value, Real(0.1), Real(300), Real(0)};
+        const std::array<Real, 9> immersed = {
+            Real(0), Real(0), Real(0), Real(0), immersed_neutral_obukhov_length,
+            bogus_large_value, Real(0.1), Real(300), Real(0)};
+        for (int n = 0; n < 9; ++n) {
+            SCOPED_TRACE(n);
+            // A ground-column mask must not clear the full height of a lateral wall.
+            const Real wall_or_immersed = face.coordDir() == 2 ? immersed[n] : ordinary[n];
+            EXPECT_EQ(count_parameter_mismatches(*parameters[n], ilo + 2,
+                                                 ordinary[n], wall_or_immersed), 0);
+        }
+    }
+    pp.remove("most.roughness_type_sea");
+}
+
+// Exercise the normal update with and without LSM fluxes, including stale
+// building values, and the downstream TKE initialization that squares u*.
+TEST(SurfaceLayer, ImmersedColumnsRemainBenignThroughFluxAndTkeUpdates)
+{
+    const std::string prefix = "unit_surface_layer_immersed_update";
+    ScopedSurfaceLayerParams params(prefix.c_str());
+    const Orientation face(Direction::z, Orientation::low);
+    for (const bool with_lsm : {false, true}) {
+        SCOPED_TRACE(with_lsm);
+        SurfaceLayerFields fields(make_qsurf_geometry());
+        // The density too, in the ghost cells: the LSM-flux update also sets the ghost
+        // columns from their own state, and a zero ghost density there made theta and z0
+        // non-finite
+        fields.cons.setVal(test_rho, Rho_comp, 1, fields.cons.nGrowVect());
+        fields.cons.setVal(test_rho * test_surface_temperature, RhoTheta_comp, 1,
+                           fields.cons.nGrowVect());
+        const int ib = fields.domain.bigEnd(0);
+        set_immersed_landmask(*fields.lmask[0], ib);
+        if (with_lsm) {
+            for (const char* name : {"t_flux", "q_flux", "tau13", "tau23"}) {
+                auto mf = std::make_unique<MultiFab>(collapse_z(fields.ba), fields.dm, 1, 0);
+                mf->setVal(Real(0));
+                if (std::string(name) == "tau13") {
+                    set_test_tau13(*mf, ib);
+                }
+                fields.lsm_flux_data.push_back(std::move(mf));
+                fields.lsm_flux_names.push_back(name);
+            }
+        }
+        auto layer = fields.prepare_layer(face, active_faces({face}), prefix, false, false,
+                                          "", Real(0), false, RdoCp, true);
+        const std::array<MultiFab*, 5> parameters = {
+            layer->get_u_star(0), layer->get_w_star(0), layer->get_t_star(0),
+            layer->get_q_star(0), layer->get_olen(0)};
+        const std::array<Real, 5> expected = {Real(0), Real(0), Real(0), Real(0),
+                                              immersed_neutral_obukhov_length};
+        // A diagnosed height must survive the inactive-column reset.
+        layer->get_pblh(0)->setVal(Real(500));
+        for (const bool stale_values : {false, true}) {
+            SCOPED_TRACE(stale_values);
+            if (stale_values) {
+                for (auto* mf : parameters) {
+                    set_stale_immersed_values(*mf, ib);
+                }
+            }
+            layer->update_fluxes(0, 1.0, 1.0, fields.cons, nullptr, fields.no_walldist, 20);
+            for (const int i : {ib, ib + 1}) {
+                const IntVect p(AMREX_D_DECL(i, 1, 0));
+                for (int n = 0; n < 5; ++n) {
+                    EXPECT_EQ(mf_grown_value(*parameters[n], p), expected[n]) << n;
+                }
+                EXPECT_EQ(mf_grown_value(*layer->get_pblh(0), p), Real(500));
+            }
+            EXPECT_GT(mf_value(*layer->get_u_star(0), IntVect(1, 1, 0)), Real(0));
+        }
+
+        auto z_phys_nd = std::make_unique<MultiFab>(
+            convert(fields.ba, IntVect(1)), fields.dm, 1, 1);
+        set_linear_node_heights(*z_phys_nd);
+        layer->init_tke_from_ustar(0, fields.cons, z_phys_nd, Real(1));
+        for (int k = 0; k <= fields.domain.bigEnd(2); ++k) {
+            const IntVect p(AMREX_D_DECL(ib, 1, k));
+            EXPECT_EQ(single_value(fields.cons, Box(p, p), RhoKE_comp), Real(0));
+        }
+    }
+}
+
+// Motivation (#4486): SLM leaves zero fluxes in building columns (mask 2).
+// Those finite values must not overwrite the existing surface parameters;
+// zero fluxes remain valid for ordinary land (mask 1).
+TEST(SurfaceLayer, LsmDerivedParametersPreserveWaterAndBuildingColumns)
+{
+    const std::string prefix = "unit_surface_layer_lsm_flux_mask";
+    ScopedSurfaceLayerParams params(prefix.c_str(), "most.pot_surf_temp",
+                                   test_surface_temperature + Real(1.0));
+    SurfaceLayerFields fields(make_qsurf_geometry());
+    const IntVect ng = fields.cons.nGrowVect();
+    fields.cons.setVal(test_rho, Rho_comp, 1, ng);
+    fields.cons.setVal(test_rho * test_surface_temperature, RhoTheta_comp, 1, ng);
+    fields.cons.setVal(test_rho * test_qv, RhoQ1_comp, 1, ng);
+
+    for (const char* name : {"t_flux", "q_flux", "tau13", "tau23"}) {
+        // Undefined fluxes make the time-zero update iterate MOST in every column.
+        auto mf = std::make_unique<MultiFab>(collapse_z(fields.ba), fields.dm, 1, 0);
+        mf->setVal(lsm_undefined);
+        fields.lsm_flux_data.push_back(std::move(mf));
+        fields.lsm_flux_names.push_back(name);
+    }
+
+    const Orientation face(Direction::z, Orientation::low);
+    // Initialize the reference values with MOST, then assign water, land, and
+    // building columns to the same state and supply valid zero LSM fluxes.
+    auto layer = fields.prepare_layer(face, active_faces({face}), prefix, true);
+    const std::array<MultiFab*, 5> parameters = {
+        layer->get_u_star(0), layer->get_t_star(0), layer->get_q_star(0),
+        layer->get_olen(0), layer->get_z0(0)};
+    const int ilo = fields.domain.smallEnd(0);
+    const int j = fields.domain.smallEnd(1);
+    std::array<std::array<Real, 5>, 3> before;
+    for (int mask = 0; mask < 3; ++mask) {
+        const IntVect p(AMREX_D_DECL(ilo + mask, j, 0));
+        for (int n = 0; n < 5; ++n) {
+            before[mask][n] = mf_value(*parameters[n], p);
+            ASSERT_TRUE(std::isfinite(before[mask][n]));
+        }
+    }
+    set_clamped_landmask(*fields.lmask[0], ilo);
+    for (auto& mf : fields.lsm_flux_data) {
+        mf->setVal(Real(0.0));
+    }
+
+    layer->compute_sfc_params_from_lsm_fluxes(0, fields.cons);
+    Gpu::streamSynchronize();
+
+    for (int mask : {0, 2}) {
+        SCOPED_TRACE(mask);
+        const IntVect p(AMREX_D_DECL(ilo + mask, j, 0));
+        for (int n = 0; n < 5; ++n) {
+            // Excluded columns receive no writes, so preservation is exact.
+            EXPECT_EQ(mf_value(*parameters[n], p), before[mask][n]) << n;
+        }
+    }
+    const Real eps = std::numeric_limits<Real>::epsilon();
+    const IntVect land(AMREX_D_DECL(ilo + 1, j, 0));
+    EXPECT_GT(before[1][0], eps);
+    EXPECT_EQ(mf_value(*layer->get_u_star(0), land), eps);
+}
+
 // Motivation: SLM exposes its surface field as theta. The SurfaceLayer must
 // preserve that canonical value, rather than treating every LSM temperature
 // field as an absolute-temperature Noah-MP field.
@@ -1938,4 +2170,88 @@ TEST(SurfaceLayer, SetPblhFillsEveryGhostCell)
     const auto [max_err, n_undiagnosed] = pblh_ghost_error(*pblh, geom.Domain());
     EXPECT_EQ(n_undiagnosed, 0);
     EXPECT_EQ(max_err, Real(0.0));
+}
+
+namespace {
+
+// Compute_roughness for one set of inputs, next to the expression without the
+// overflow guard (zref / exp(arg), bounded the same way), evaluated on the
+// device. A free function so the device lambda is not inside a TEST body.
+// The unguarded form is skipped where exp(arg) would overflow in this precision.
+std::array<Real, 2>
+roughness_new_and_old (const Real zref, const Real olen, const Real umm, const Real ustar)
+{
+    Gpu::DeviceVector<Real> out(2, Real(0.0));
+    Real* o = out.data();
+    const Box cell(IntVect(0), IntVect(0));
+    ParallelFor(cell, [=] AMREX_GPU_DEVICE (int, int, int)
+    {
+        o[0] = Compute_roughness(zref, olen, umm, ustar);
+        similarity_funs sfuns;
+        const Real arg = KAPPA*umm/ustar + sfuns.calc_psi_m2(zref / olen);
+        constexpr Real exp_max = std::numeric_limits<Real>::max();
+        o[1] = (arg < std::log(exp_max)) ? bound_inverted_roughness(zref / std::exp(arg), zref) : Real(-1.0);
+    });
+    std::array<Real, 2> h{};
+    Gpu::copy(Gpu::deviceToHost, out.begin(), out.end(), h.begin());
+    Gpu::streamSynchronize();
+    return h;
+}
+
+} // namespace
+
+// Compute_roughness inverts the log law, z0 = zref / exp(kappa U / u* + psi_m).
+// With no drag (bulk_coeff with most.Cd = 0, or an LSM that returns zero stress)
+// u* is the floor eps, and exp(kappa 5 / 2e-16) overflowed: a run with
+// amrex.fpe_trap_overflow = 1 stopped in compute_SurfaceLayer_bcs at step 1.
+// The floor z0 = 1e-7 is now returned before exp is evaluated. Every input at
+// or below the guard takes the old path and gives the same z0 to the bit; past
+// it the old code gave the floor too (zref / inf = 0, raised to 1e-7). On GPU
+// builds only the value is checked: the overflow flag of a device exp is not
+// observable from the host, so the CPU build is the one that fails on the old code.
+TEST(SurfaceLayer, ComputeRoughnessNoOverflowWithoutDrag)
+{
+    const Real eps = std::numeric_limits<Real>::epsilon();
+#ifndef AMREX_USE_GPU
+    std::feclearexcept(FE_ALL_EXCEPT);
+#endif
+    const auto none = roughness_new_and_old(Real(24.6), Real(1.0e6), Real(5.0), eps);
+#ifndef AMREX_USE_GPU
+    EXPECT_FALSE(std::fetestexcept(FE_OVERFLOW)) << "exp overflowed for u* = eps";
+#endif
+    EXPECT_EQ(none[0], Real(1.0e-7));
+
+    // The Obukhov length a zero-drag bulk_coeff cell reaches: u* = t* = eps gives
+    // L = eps theta / (kappa g), about 1.6e-14 m, so the stable arm of psi_m sees
+    // zeta ~ 1e15 as well
+#ifndef AMREX_USE_GPU
+    std::feclearexcept(FE_ALL_EXCEPT);
+#endif
+    const Real olen_nodrag = eps * Real(300.0) / (KAPPA * CONST_GRAV);
+    const auto nodrag = roughness_new_and_old(Real(32.0), olen_nodrag, Real(10.0), eps);
+#ifndef AMREX_USE_GPU
+    EXPECT_FALSE(std::fetestexcept(FE_OVERFLOW)) << "overflow at the no-drag Obukhov length";
+#endif
+    EXPECT_EQ(nodrag[0], Real(1.0e-7));
+
+    // Just below the guard: exp(arg) is finite, z0 sits just above the floor,
+    // and the guarded and unguarded forms agree to the bit
+    {
+        const Real zref = Real(10.0);
+        const Real arg  = std::log(zref / Real(1.0e-7)) - Real(1.0e-3);
+        const Real ustar = KAPPA * Real(5.0) / arg;   // L -> infinity, psi_m = 0
+        const auto z = roughness_new_and_old(zref, Real(1.0e30), Real(5.0), ustar);
+        EXPECT_EQ(z[0], z[1]);
+        EXPECT_GT(z[0], Real(1.0e-7));
+        EXPECT_LT(z[0], Real(1.01e-7));
+    }
+
+    // Ordinary inputs: unchanged to the bit
+    for (const auto& c : {std::array<Real, 4>{Real(10.0), Real(1.0e6), Real(5.0), Real(0.4)},
+                          std::array<Real, 4>{Real(24.6), Real(-50.0), Real(3.79), Real(0.3)},
+                          std::array<Real, 4>{Real(5.0), Real(200.0), Real(8.0), Real(0.25)},
+                          std::array<Real, 4>{Real(2.0), Real(50.0), Real(0.5), Real(0.3)}}) {
+        const auto z = roughness_new_and_old(c[0], c[1], c[2], c[3]);
+        EXPECT_EQ(z[0], z[1]) << "zref " << c[0] << " L " << c[1] << " U " << c[2] << " u* " << c[3];
+    }
 }

@@ -2277,8 +2277,8 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev, bool read_atmos_state)
     //
     // NOTE: On the interp_atmos_from_coarse path the caller rebuilds the base state
     //       itself, after this level's terrain has been finalized by init_zphys and
-    //       before it interpolates the (perturbational) atmospheric state from the
-    //       coarse level.  See MakeNewLevelFromCoarse.
+    //       before it interpolates the atmospheric state from the coarse level.
+    //       See MakeNewLevelFromCoarse.
     // **************************************************************************
     if (!read_atmos_state) {
         // The SST/TSK time slices, as at the end of this routine
@@ -3355,7 +3355,7 @@ ERF::init_fine_low_slices (int lev, bool restarting)
     if (!has_own_init_file(lev)) { return; }
 
     const int ntimes = static_cast<int>(low_data_zlo.size());
-    const double time_since_start_low = t_new[0] + start_time - start_low_time;
+    const double time_since_start_low = t_new[0] + (start_time - start_low_time);
     const int n_time_old = std::min(static_cast<int>(time_since_start_low / low_time_interval), ntimes-1);
     const int n_time_end = std::min(n_time_old+3, ntimes);
 
