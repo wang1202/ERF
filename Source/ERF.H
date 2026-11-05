@@ -44,6 +44,7 @@
 #include <ERF_NumericalConstants.H>
 #include <ERF_IndexDefines.H>
 #include <ERF_DataStruct.H>
+#include <ERF_TopographicShading.H>
 #include <ERF_PlotfileSelection.H>
 #include <ERF_BaseStateParams.H>
 #include <ERF_TurbPertStruct.H>
@@ -77,6 +78,7 @@
 #endif
 #include "ERF_Urban.H"
 #include "ERF_TwoStreamRadiation.H"
+#include "ERF_Plotfile2DCloudOptics.H"
 
 #ifdef ERF_USE_WINDFARM
 #include "ERF_WindFarm.H"
@@ -111,13 +113,6 @@ class MultiBlockContainer;
 // IO/ERF_Plotfile2DSampledLevel.H, which ERF.H does not need to include.
 namespace plotfile2d { struct Plotfile2DOutputDescriptor; }
 namespace erf_sbm { class SBMStateManager; class SBMTransport; }
-
-/**
- * Enum of possible interpolation types between coarse/fine
-*/
-AMREX_ENUM(StateInterpType,
-    FullState, Perturbational
-);
 
 /**
  * Main class in ERF code, instantiated from main.cpp
@@ -441,7 +436,12 @@ public:
 
     // Project the velocities to be divergence-free -- this is only relevant if anelastic == 1
     void project_initial_velocity (int lev, double time, double dt);
-    void project_momenta (int lev, double l_time, double l_dt, amrex::Vector<amrex::MultiFab >& vars);
+    void project_momenta (int lev, double l_time, double l_dt, amrex::Vector<amrex::MultiFab >& vars,
+                          bool apply_if_drag);
+
+    //! Face coefficients sigma = 1 / (1 + dt rate) of the implicit immersed drag in the projection
+    //! (erf.if_implicit_projection); 1 on faces on the boundary of the level's grids
+    void make_if_projection_sigma (int lev, amrex::Real l_dt, amrex::Array<amrex::MultiFab,AMREX_SPACEDIM>& sigma);
 
     // A refined level that stops inside the domain in z (ERF_CoarseFineFaces.cpp)
     void cf_zface_coarse_at (int lev, double tc, bool conserved_rho,
@@ -471,6 +471,12 @@ public:
     // ... and its vertical flux, as Omega
     amrex::Vector<amrex::MultiFab> m_cf_step_zflux;
     void FillSetHorizontalMomentaCF (int lev, double time, amrex::MultiFab& xmom, amrex::MultiFab& ymom);
+    // Give the face fills of level lev the log-law share of the wall coarse face's flux
+    // (erf.cf_loglaw_fill) for the set fills that follow, or clear it (on = false)
+    void set_cf_fill_options (int lev, bool on);
+    // Warn where a lateral coarse/fine boundary of level lev crosses the immersed surface so that
+    // the two levels describe it differently (erf.if_cf_mismatch_warning)
+    void check_if_cf_mismatch (int lev);
     void FillSetMomentaCF (int lev, double time, amrex::MultiFab& xmom, amrex::MultiFab& ymom,
                            amrex::MultiFab& zmom);
     void fill_surface_nodes (int lev, amrex::MultiFab& znd_surf);
@@ -487,6 +493,9 @@ public:
     // correction); called when the level is made and again whenever a regrid
     // remakes or adds it, since init_stuff resets the field on new grids
     void make_wall_dist (int lev);
+    //! Build the wall-face masks of the fraction-stress immersed wall law at this level
+    //! (erf.if_wall_form = fraction_stress; make_wall_dist calls it, so regrids rebuild them)
+    void make_ib_wall_face_masks_lev (int lev);
 
     void make_subdomains (const amrex::BoxList& ba, amrex::Vector<amrex::BoxArray>& bins);
 
@@ -503,6 +512,12 @@ public:
                                   amrex::MultiFab& az_sub,
                                   amrex::MultiFab& dJ_sub, amrex::MultiFab& znd_sub,
                                   bool use_gmres);
+    //! FFT-preconditioned GMRES solve of div(sigma grad phi) = rhs (erf.if_implicit_projection);
+    //! fluxes = -grad phi, without sigma
+    void solve_with_if_gmres (int lev, const amrex::Box& subdomain,
+                              amrex::MultiFab& rhs, amrex::MultiFab& phi,
+                              amrex::Array<amrex::MultiFab,AMREX_SPACEDIM>& fluxes,
+                              amrex::Array<amrex::MultiFab const*,AMREX_SPACEDIM> const& sigma);
     void solve_with_gmres (int lev, const amrex::Box& subdomain,
                            amrex::MultiFab& rhs, amrex::MultiFab& p,
                            amrex::Array<amrex::MultiFab,AMREX_SPACEDIM>& fluxes,
@@ -623,7 +638,8 @@ public:
                                amrex::Gpu::HostVector<amrex::Real>& h_avg_kw,
                                amrex::Gpu::HostVector<amrex::Real>& h_avg_p,
                                amrex::Gpu::HostVector<amrex::Real>& h_avg_pu, amrex::Gpu::HostVector<amrex::Real>& h_avg_pv,
-                               amrex::Gpu::HostVector<amrex::Real>& h_avg_pw, amrex::Gpu::HostVector<amrex::Real>& h_avg_wthv);
+                               amrex::Gpu::HostVector<amrex::Real>& h_avg_pw, amrex::Gpu::HostVector<amrex::Real>& h_avg_wthv,
+                               amrex::Gpu::HostVector<amrex::Real>& h_avg_thv);
     void derive_diag_profiles_stag (double time,
                                     amrex::Gpu::HostVector<amrex::Real>& h_avg_u   , amrex::Gpu::HostVector<amrex::Real>& h_avg_v,
                                     amrex::Gpu::HostVector<amrex::Real>& h_avg_w   , amrex::Gpu::HostVector<amrex::Real>& h_avg_rho,
@@ -645,7 +661,8 @@ public:
                                     amrex::Gpu::HostVector<amrex::Real>& h_avg_kw,
                                     amrex::Gpu::HostVector<amrex::Real>& h_avg_p,
                                     amrex::Gpu::HostVector<amrex::Real>& h_avg_pu, amrex::Gpu::HostVector<amrex::Real>& h_avg_pv,
-                                    amrex::Gpu::HostVector<amrex::Real>& h_avg_pw, amrex::Gpu::HostVector<amrex::Real>& h_avg_wthv);
+                                    amrex::Gpu::HostVector<amrex::Real>& h_avg_pw, amrex::Gpu::HostVector<amrex::Real>& h_avg_wthv,
+                                    amrex::Gpu::HostVector<amrex::Real>& h_avg_thv);
 
     void derive_stress_profiles (amrex::Gpu::HostVector<amrex::Real>& h_avg_tau11, amrex::Gpu::HostVector<amrex::Real>& h_avg_tau12,
                                  amrex::Gpu::HostVector<amrex::Real>& h_avg_tau13, amrex::Gpu::HostVector<amrex::Real>& h_avg_tau22,
@@ -1154,11 +1171,11 @@ public:
     void AverageDownTo (int crse_lev,
                         int scomp,
                         int ncomp,
-                        bool do_perturbational_and_momenta = true); // NOLINT
+                        bool do_full_state_and_momenta = true); // NOLINT
 
     /*! \brief Conservation-preserving fine-to-coarse average of RhoTheta and
      *  the active moist conserved components using detJ/mfac weighting, reusing
-     *  AverageDownTo with perturbational-state and momentum handling disabled. */
+     *  AverageDownTo with the full-state component checks and the momentum average-down disabled. */
     void AverageDownMoistStateTo (int crse_lev);
 
     // Write checkpoint file to disk
@@ -1186,6 +1203,12 @@ public:
     void remake_zphys          (int lev, amrex::Real time, std::unique_ptr<amrex::MultiFab>& temp_zphys_nd);
     void update_terrain_arrays (int lev);
     void make_terrain_blanking (int lev);
+
+    [[nodiscard]] bool immersed_forcing_active (int lev) const noexcept
+    {
+        return solverChoice.terrain_type == TerrainType::ImmersedForcing ||
+               solverChoice.use_building_immersed_forcing(geom[lev]);
+    }
 
     bool m_driver_has_atm2ocn_coupling = false;
     bool m_driver_uses_two_way_coupling = false;
@@ -1287,8 +1310,6 @@ private:
     void FillPatchFineLevel (int lev, double time,
                              const amrex::Vector<amrex::MultiFab*>& mfs_vel,
                              const amrex::Vector<amrex::MultiFab*>& mfs_mom,
-                             const amrex::MultiFab& old_base_state,
-                             const amrex::MultiFab& new_base_state,
                              bool fillset=true, bool cons_only=false);
 
     // Compute new multifabs by copying data from valid region and filling ghost cells.
@@ -1606,6 +1627,7 @@ private:
     // surface and SEB state; every call from ERF is behind a test of
     // solverChoice.rad_type == RadiationType::TwoStream.
     TwoStreamRadiation two_stream_rad;
+    TopographicShading topographic_radiation;
 
 #ifdef ERF_USE_EAMXX_SHOC
     amrex::Vector<std::unique_ptr<SHOCInterface>> eamxx_shoc_interface; // EAMxx SHOC model at each level
@@ -1731,6 +1753,24 @@ private:
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> terrain_blanking_xface;
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> terrain_blanking_yface;
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> terrain_blanking_zface;
+    // Wall-face masks of the fraction-stress immersed wall law (erf.if_wall_form = fraction_stress):
+    // zero on the bottom face of the wall cell of each x-face (xz edges) and y-face (yz edges) column,
+    // the spacing factor on the face above it, one elsewhere
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> ib_wall_face13;
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> ib_wall_face23;
+    // and the same for the cell columns (z faces), applied to the vertical diffusive fluxes of theta and TKE
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> ib_wall_face33;
+    // kinematic wall heat flux -u* theta* of the fraction-stress law in the wall cell (zero elsewhere),
+    // written by the immersed scalar forcing, read as the TKE buoyancy flux on the wall face
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> ib_wall_hfx;
+    // wall value of the k-eqn TKE in the wall cell (erf.if_wall_tke; -1 elsewhere), written by the
+    // immersed scalar forcing; with erf.if_wall_tke_time_factor = 1 the cell is held at it after
+    // every stage and in the implicit TKE solve
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> ib_wall_ktarget;
+    // Height the immersed wall distance is measured from in each column (fraction-stress law with
+    // RANS), on the level's BoxArray flattened to its bottom cell; a fine box that does not see the
+    // surface of a column takes it from the coarser level
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> ib_wall_height;
 
     // Wall distance function
     amrex::Vector<std::unique_ptr<amrex::MultiFab>>  walldist;
@@ -1962,6 +2002,10 @@ private:
     amrex::Vector<std::string> plot3d_var_names_2;
     amrex::Vector<std::string> plot2d_var_names_1;
     amrex::Vector<std::string> plot2d_var_names_2;
+    // erf.plot2d.cloud_optics.*, read and checked at startup; the resolved values
+    // are printed once, when a Plot2D stream or a station first needs them
+    plotfile2d::CloudOpticsParameters cloud_optics_parameters;
+    bool cloud_optics_parameters_printed = false;
     // Raw conserved-state names in component order; the list and its
     // name-to-component map live together in IO/ERF_PlotfileSelection.H
     const amrex::Vector<std::string> cons_names = erf_plotfile::plot3d_conserved_state_names();
@@ -2091,8 +2135,6 @@ private:
 
     int file_name_digits = 5;
     bool use_real_time_in_pltname = false;
-
-    static StateInterpType interpolation_type;
 
     // NetCDF initialization (wrfinput) file
     static amrex::Vector<amrex::Vector<std::string>> nc_init_file;
@@ -2573,6 +2615,15 @@ private:
 
     // array of EB objects
     amrex::Vector<std::unique_ptr<eb_>> eb;
+
+    // Keep EB geometry construction, factories, and face-mask allocation in agreement.
+    // Immersed buildings on a static fitted mesh default to cell-centered blanking.
+    [[nodiscard]] bool use_native_fc_factories () const noexcept {
+        return USE_FC_FACTORY &&
+            !(solverChoice.buildings_type == BuildingsType::ImmersedForcing &&
+              solverChoice.terrain_type == TerrainType::StaticFittedMesh &&
+              !solverChoice.buildings_fc_factories);
+    }
 
     [[nodiscard]] eb_ const& get_eb (int lev) const noexcept {
         AMREX_ASSERT(lev >= 0 && lev < eb.size() && eb[lev] != nullptr);

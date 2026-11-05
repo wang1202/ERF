@@ -515,6 +515,7 @@ function(build_erf_lib erf_lib_name)
        ${SRC_DIR}/IO/ERF_Plotfile2D.cpp
        ${SRC_DIR}/IO/ERF_Plotfile2DFill.cpp
        ${SRC_DIR}/IO/ERF_Plotfile2DMetadata.cpp
+       ${SRC_DIR}/IO/ERF_Plotfile2DCloudOptics.cpp
        ${SRC_DIR}/IO/ERF_Plotfile2DWaterPath.cpp
        ${SRC_DIR}/IO/ERF_Plotfile2DPrecip.cpp
        ${SRC_DIR}/IO/ERF_Plotfile2DSampledField.cpp
@@ -538,6 +539,8 @@ function(build_erf_lib erf_lib_name)
        ${SRC_DIR}/LinearSolvers/ERF_ComputeDivergence.cpp
        ${SRC_DIR}/LinearSolvers/ERF_FillZeroAreaFaceFluxes.cpp
        ${SRC_DIR}/LinearSolvers/ERF_ImposeBCsOnPhi.cpp
+       ${SRC_DIR}/LinearSolvers/ERF_ImmersedPoisson.cpp
+       ${SRC_DIR}/LinearSolvers/ERF_ImmersedProjection.cpp
        ${SRC_DIR}/LinearSolvers/ERF_SolveWithEBMLMG.cpp
        ${SRC_DIR}/LinearSolvers/ERF_SolveWithGMRES.cpp
        ${SRC_DIR}/LinearSolvers/ERF_SolveWithTerrainMLMG.cpp
@@ -591,6 +594,7 @@ function(build_erf_lib erf_lib_name)
        ${SRC_DIR}/PBL/ERF_ComputeDiffusivityYSU.cpp
        ${SRC_DIR}/PBL/ERF_ComputeDiffusivityMRF.cpp
        ${SRC_DIR}/PBL/ERF_ComputeDiffusivityYSUNew.cpp
+       ${SRC_DIR}/Radiation/ERF_TopographicShading.cpp
        ${SRC_DIR}/Radiation/TwoStream/ERF_RadiationDiagnostics.cpp
        ${SRC_DIR}/Radiation/TwoStream/ERF_TwoStreamRadiation.cpp
        ${SRC_DIR}/Radiation/TwoStream/ERF_SEBTurbulentFlux.cpp

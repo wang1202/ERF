@@ -118,6 +118,12 @@ target_sources(${erf_exe_name}
     # Motivation: the roughness inverted from surface fluxes must stay inside its bounds.
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestInvertedRoughness.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestMOSTAverage.cpp
+    # Motivation: the MOST flux kernels must stay bounded and correctly signed at the
+    # stable fold of a prescribed flux and when the log-law bracket would change sign.
+    ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestMOSTIteration.cpp
+    # Motivation: the QNSE stable-side functions must match their closed forms, keep the
+    # default and the unstable side untouched, and move the stable fold the way the analysis says.
+    ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestMOSTStableFunctions.cpp
     # Motivation: the MOST reference height must use the true stretched cell
     # centers, and a query on a mesh face must be found rather than abort.
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestMOSTAverageZref.cpp
@@ -128,6 +134,9 @@ target_sources(${erf_exe_name}
     ${CMAKE_CURRENT_SOURCE_DIR}/Utils/ERF_GTestReduceToMaxPerHeight.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestWrfBoundaryDensity.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestWrfBoundaryMoisture.cpp
+    # Motivation: the wrfbdy time-interpolation weight must follow the elapsed time to roundoff,
+    # not to the ~2.4e-7 s spacing of doubles at epoch times.
+    ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestBdyTimeWeights.cpp
     # Motivation: face-local wall metadata must not inherit a later wall's
     # density representation or treat explicit zero as absent.
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestWallBCMetadata.cpp
@@ -213,6 +222,24 @@ target_sources(${erf_exe_name}
     # Motivation: a calm cell above an immersed wall gave the wall law u* = 0, an Obukhov length
     # of zero and z / 0 (erf-model/ERF#4016); the stability estimate is now bounded as on flat ground.
     ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/ERF_GTestImmersedWallStability.cpp
+    # Motivation: the immersed-forcing temperature kernels applied the MOST similarity functions whatever
+    # erf.if_stability_correction said, while the momentum kernels gate on it (erf-model/ERF#4931); off,
+    # every kernel is the log law.
+    ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/ERF_GTestImmersedScalarStability.cpp
+    # Motivation: the fraction-stress immersed wall law (erf.if_wall_form = fraction_stress) must
+    # force the wall cell (the fluid cell on a face-aligned surface too, which the legacy law leaves
+    # unforced), close its bottom face to diffusion and measure the RANS wall distance from the surface.
+    ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/ERF_GTestImmersedFractionStress.cpp
+    # Motivation: the implicit solves must carry no flux through the wall face of the fraction-stress
+    # wall law, and a partial wall cell must dissipate like flat ground's first cell.
+    ${CMAKE_CURRENT_SOURCE_DIR}/Diffusion/ERF_GTestImmersedWallFace.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/ERF_GTestImmersedBuildingCutoff.cpp
+    # Motivation (erf-model/ERF#4887): the building kernels and the implicit projection read each
+    # face and its masks through one header; with erf.if_implicit_projection the kernels keep the
+    # wall law only, and the drag they drop must equal, face by face, the weight the projection
+    # applies (checked with and without the snap and the face-centred blanking).
+    ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/ERF_GTestImmersedBuildingMasks.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/ERF_GTestImmersedBuildingImplicit.cpp
     # Motivation: a refined level's buildings must keep level 0's numbers for the
     # materials by building, even when its tallest column is a spire level 0
     # leaves fluid, or the level holds only some of the buildings.
@@ -279,7 +306,9 @@ target_sources(${erf_exe_name}
     # respect land/water precedence, and preserve valid land LSM temperatures.
     ${CMAKE_CURRENT_SOURCE_DIR}/Radiation/ERF_GTestRRTMGP_SurfaceTemperature.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Radiation/ERF_GTestOrbitalGeometry.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Radiation/ERF_GTestTopographicShading.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IO/ERF_GTestPlotfile2D.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/IO/ERF_GTestCloudOptics.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IO/ERF_GTestPlotfileSelection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IO/ERF_GTestStationSampler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IO/ERF_GTestProvenance.cpp
@@ -313,6 +342,21 @@ target_sources(${erf_exe_name}
     ${CMAKE_CURRENT_SOURCE_DIR}/Utils/ERF_GTestTerrainFileChecks.cpp
     # Motivation: a BTF fine level's mesh must not depend on how its grids are split in z.
     ${CMAKE_CURRENT_SOURCE_DIR}/Utils/ERF_GTestTerrainFineColumns.cpp
+    # Motivation: the average down over immersed-forcing levels must weight the fine cells by
+    # their fluid mass and leave coarse cells that are solid on their own level alone.
+    ${CMAKE_CURRENT_SOURCE_DIR}/Utils/ERF_GTestImmersedAverageDown.cpp
+    # Motivation: over immersed-forcing terrain with the fraction-stress wall law the RANS wall
+    # distance must be measured from the surface the wall law uses, column by column.
+    ${CMAKE_CURRENT_SOURCE_DIR}/Utils/ERF_GTestImmersedWallDist.cpp
+    # Motivation: the coarse/fine surface-mismatch warning must count only the coarse cells along
+    # the coarse/fine faces whose fine solid fractions spread by at least the threshold.
+    ${CMAKE_CURRENT_SOURCE_DIR}/Utils/ERF_GTestImmersedCFFaces.cpp
+    # Motivation: the log-law coarse/fine fill must keep the flux of every coarse face and share
+    # the wall face's flux by ln(1 + z/z0), closing the solid sub-faces of immersed terrain.
+    ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestCFLogLawFill.cpp
+    # Motivation: the relax band of the coarse/fine fill patcher must follow the top face of a
+    # level that stops below the domain top, and not appear along the physical top or bottom.
+    ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestFillPatcherRelaxBand.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Utils/HashRng/ERF_GTestHashRngScalar.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Utils/HashRng/ERF_GTestHashRngKernel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Utils/EOS/ERF_GTestEOSScalar.cpp
@@ -342,6 +386,9 @@ target_sources(${erf_exe_name}
     ${CMAKE_CURRENT_SOURCE_DIR}/Microphysics/SBM/ERF_GTestSBMFoundation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Microphysics/SBM/ERF_GTestSBMRemapping.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/LandSurfaceModel/SLM/ERF_GTestSLMInterface.cpp
+    # Motivation: a finer level's land state must be interpolated land from land and water
+    # from water (erf-model/ERF#4390), keeping each coarse mean and cell_cons_interp elsewhere.
+    ${CMAKE_CURRENT_SOURCE_DIR}/LandSurfaceModel/ERF_GTestTypedInterp.cpp
 )
 # The fire coupling's headers are only on the include path, and its sources
 # only in the library, when the fire coupling is built.
@@ -381,10 +428,12 @@ endif()
 target_sources(${erf_exe_name} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/IO/ERF_GTestIntervalMeansRestart.cpp
 )
-# These exercise the super-droplet phase-change kernels, whose headers are
+# These exercise super-droplet projection and process kernels, whose headers are
 # only available when particles are enabled.
 if(ERF_ENABLE_PARTICLES)
   target_sources(${erf_exe_name} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/Microphysics/SDM/ERF_GTestAnelasticThermodynamics.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Microphysics/SDM/ERF_GTestSpeciesProjection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Microphysics/SDM/TerminalVelocity/ERF_GTestTerminalVelocityScalar.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Microphysics/SDM/TerminalVelocity/ERF_GTestTerminalVelocityKernel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Microphysics/SDM/IceDeposition/ERF_GTestIceDepositionScalar.cpp
@@ -437,6 +486,53 @@ add_test(NAME erf_unit_tests_shuffle_repeat
     --gtest_repeat=3
     --gtest_output=xml:${ERF_GTEST_REPORT_ROOT}/${erf_exe_name}/shuffle-repeat.xml
 )
+
+if(TARGET erf_exec AND ERF_DIM STREQUAL "3")
+  foreach(_factory_choice IN ITEMS default native)
+    if(_factory_choice STREQUAL "native")
+      set(_expected_factory "native face-centered")
+      set(_factory_override erf.buildings_fc_factories=true)
+    else()
+      set(_expected_factory "cell-centered")
+      set(_factory_override)
+    endif()
+    add_test(NAME ImmersedBuildingFactories_${_factory_choice}
+      COMMAND ${CMAKE_COMMAND}
+        -DERF_EXECUTABLE=$<TARGET_FILE:erf_exec>
+        -DINPUT_FILE=${PROJECT_SOURCE_DIR}/Tests/test_files/ImmersedForcing/inputs_building_fc_factories
+        "-DEXPECTED_FACTORY=${_expected_factory}"
+        -DFACTORY_OVERRIDES=${_factory_override}
+        -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/RunImmersedBuildingFactories.cmake)
+    set_tests_properties(ImmersedBuildingFactories_${_factory_choice} PROPERTIES
+      LABELS "integration;immersed-forcing"
+      RUN_SERIAL TRUE
+      TIMEOUT 120)
+  endforeach()
+
+  if(NOT AMReX_HDF5)
+    # At 50 m the masks are active; at 60 m the masks are zero and winds stay unchanged.
+    add_executable(erf_immersed_cutoff_check
+      ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/ERF_CheckImmersedBuildingCutoff.cpp)
+    # AMReX's headers need nvcc in a CUDA build
+    if(ERF_ENABLE_CUDA)
+      setup_target_for_cuda_compilation(erf_immersed_cutoff_check)
+    endif()
+    target_link_libraries(erf_immersed_cutoff_check PRIVATE AMReX::amrex)
+    target_compile_features(erf_immersed_cutoff_check PRIVATE cxx_std_17)
+    add_test(NAME ImmersedBuildingResolutionCutoff
+      COMMAND ${CMAKE_COMMAND}
+        -DERF_EXECUTABLE=$<TARGET_FILE:erf_exec>
+        -DCHECK_EXECUTABLE=$<TARGET_FILE:erf_immersed_cutoff_check>
+        -DINPUT_FILE=${PROJECT_SOURCE_DIR}/Tests/test_files/ImmersedForcing/inputs_building_fc_factories
+        -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/RunImmersedBuildingCutoff.cmake)
+    set_tests_properties(ImmersedBuildingResolutionCutoff PROPERTIES
+      LABELS "integration;immersed-forcing"
+      RUN_SERIAL TRUE
+      TIMEOUT 120)
+  endif()
+endif()
 
 # Exercise M3 through ERF's native level,
 # advance, checkpoint, and exact-schema restart paths.  Header min/max values
@@ -816,6 +912,12 @@ if(ERF_ENABLE_MPI)
       ${CMAKE_CURRENT_SOURCE_DIR}/Utils/ERF_GTestTerrainFineColumns.cpp
       # The boxes are spread over the ranks, so a k may be held by another rank only
       ${CMAKE_CURRENT_SOURCE_DIR}/Utils/ERF_GTestReduceToMaxPerHeight.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/Radiation/ERF_GTestTopographicShading.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/IO/ERF_GTestCloudOptics.cpp
+      # The immersed average down copies the fine sums to the coarse layout: check it across ranks
+      ${CMAKE_CURRENT_SOURCE_DIR}/Utils/ERF_GTestImmersedAverageDown.cpp
+      # The mismatch count reduces over the ranks: check it across ranks
+      ${CMAKE_CURRENT_SOURCE_DIR}/Utils/ERF_GTestImmersedCFFaces.cpp
   )
   if(ERF_ENABLE_NETCDF)
     # The terrain reader opens the fixture only on the I/O rank and then
@@ -945,4 +1047,22 @@ endif()
       PROCESSORS 2
       TIMEOUT 120
   )
+endif()
+
+if(TARGET erf_exec AND ERF_DIM STREQUAL "3" AND NOT AMReX_HDF5)
+  add_executable(erf_cloud_optics_plotfile_check
+    ${CMAKE_CURRENT_SOURCE_DIR}/IO/ERF_CloudOpticsPlotfileCheck.cpp)
+  target_link_libraries(erf_cloud_optics_plotfile_check PRIVATE AMReX::amrex)
+  if(ERF_ENABLE_CUDA)
+    setup_target_for_cuda_compilation(erf_cloud_optics_plotfile_check)
+  endif()
+  add_test(NAME CloudOptics_RadiationOff_Plot2D
+    COMMAND ${CMAKE_COMMAND}
+      -DERF_EXECUTABLE=$<TARGET_FILE:erf_exec>
+      -DCHECK_EXECUTABLE=$<TARGET_FILE:erf_cloud_optics_plotfile_check>
+      -DINPUT_FILE=${PROJECT_SOURCE_DIR}/Exec/RegTests/Bubble/inputs_BF02_moist_bubble
+      -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/cloud_optics_writer
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/IO/RunCloudOptics.cmake)
+  set_tests_properties(CloudOptics_RadiationOff_Plot2D PROPERTIES
+    LABELS "integration;cloud_optics" TIMEOUT 60 RUN_SERIAL TRUE)
 endif()

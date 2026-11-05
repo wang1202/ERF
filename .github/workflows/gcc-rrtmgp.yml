@@ -158,6 +158,7 @@ jobs:
           ${ERF_DIR};
 
     - name: Compile and Link
+      shell: bash
       run: |
         export CCACHE_COMPRESS=1
         export CCACHE_COMPRESSLEVEL=10
@@ -185,12 +186,17 @@ jobs:
 
     - name: Report
       run: |
-        grep -Ei "warning:|error:" ${ERF_DIR}/build-output.txt \
+        build_log="${ERF_DIR}/build-output.txt"
+        if [ ! -f "$build_log" ] || [ ! -r "$build_log" ]; then
+          echo "::error::Missing or unreadable build log: $build_log"
+          exit 1
+        fi
+        grep -Ei "warning:|error:" "$build_log" \
           | grep -Ev "Submodules/(amrex|AMReX|googletest)" | grep -Ev "lto-wrapper: warning:" | sort | uniq \
           | awk 'BEGIN{i=0}{print $0}{i++}END{print "Warnings: "i}' > ${ERF_DIR}/build-output-warnings.txt
         cat ${ERF_DIR}/build-output-warnings.txt
         return=$(tail -n 1 ${ERF_DIR}/build-output-warnings.txt | awk '{print $2}')
-        exit ${return}
+        test "${return}" -eq 0
 
     - name: Check Unit Test Registration
       run: |
@@ -210,7 +216,7 @@ jobs:
 
     - name: CMake Regression Tests # see file ERF/Tests/CTestList.cmake
       run: |
-        ctest -L regression -VV
+        ctest -L regression --parallel "$(nproc)" -VV
       working-directory: ${{ github.workspace }}/erf_clone/build
 
     - name: Upload backtraces from failed tests
