@@ -2,9 +2,11 @@
 #define ERF_H_
 
 #include <string>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <set>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -83,6 +85,9 @@
 #ifdef ERF_USE_WINDFARM
 #include "ERF_WindFarm.H"
 #endif
+#ifdef ERF_USE_MOVING_BODIES
+#include "ERF_StructureModel.H"
+#endif
 #include <ERF_SurfaceModel.H>
 
 #include <ERF_RadiationModels.H>
@@ -113,7 +118,11 @@ class PBLDiagnosticRecorder;
 // Describes one component of a 2D plotfile; defined in
 // IO/ERF_Plotfile2DSampledLevel.H, which ERF.H does not need to include.
 namespace plotfile2d { struct Plotfile2DOutputDescriptor; }
-namespace erf_sbm { class SBMStateManager; class SBMTransport; }
+namespace erf_sbm {
+class SBMAMRFluxRegister;
+class SBMStateManager;
+class SBMTransport;
+}
 
 /**
  * Main class in ERF code, instantiated from main.cpp
@@ -593,6 +602,17 @@ public:
     // Called after every level 0 timestep
     void post_timestep (int nstep, double time, double dt_lev);
 
+    // Defined only in ERF_SBM_AMR_QUALIFICATION builds
+    // (Microphysics/SBM/ERF_SBMAMRQualification.cpp); public because they
+    // launch device lambdas.
+    void sbm_qualification_apply_initial_profile (int lev);
+    void sbm_qualification_record_initial_inventory ();
+    void sbm_qualification_check_step (int nstep, amrex::Real correction_linf,
+                                       std::uint64_t reflux_calls,
+                                       std::uint64_t reflux_syncs);
+    [[nodiscard]] std::vector<amrex::Real>
+    sbm_qualification_composite_inventory () const;
+
     // Do whatever writing needs to be done at intermediate times
     void WriteAtIntermediateTime (int nstep, double time);
 
@@ -616,7 +636,8 @@ public:
     void FillBdyCCVels (amrex::MultiFab& mf_cc_vel, amrex::Geometry& lev_geom);
 
     void sample_points (int ifile, int lev, double time, amrex::IntVect cell, amrex::MultiFab& mf);
-    void sample_lines (int ifile, int lev, double time, amrex::IntVect cell, amrex::MultiFab& mf);
+    // Sample and write the lines of sampler, with the stresses and heat flux of each level
+    void run_line_sampler (LineSampler& sampler);
 
     void derive_diag_profiles (double time,
                                amrex::Gpu::HostVector<amrex::Real>& h_avg_u   , amrex::Gpu::HostVector<amrex::Real>& h_avg_v,
@@ -945,6 +966,10 @@ public:
     void ibseb_check_refined_levels () const;
     void ibseb_check_sun_matches_two_stream () const;
     void ibseb_check_two_stream_provider () const;
+    void ibseb_check_two_stream_buildings () const;
+    [[nodiscard]] bool ibseb_two_stream_buildings () const {
+        return ibseb_params.enable && ibseb_params.two_stream_buildings && solverChoice.rad_type == RadiationType::TwoStream;
+    }
     [[nodiscard]] bool ibseb_after_radiation () const {
         return ibseb_params.enable && ibseb_params.radiation == "two_stream";
     }
@@ -1210,6 +1235,14 @@ private:
 
     void make_flux_register (int lev);
 
+    // SBM coarse/fine coupling (Microphysics/SBM/ERF_SBMAMRCoupling.cpp)
+    void make_sbm_flux_register (int lev);
+    void bind_sbm_amr_flux_registers (int lev);
+    void init_sbm_level_from_coarse (int lev, amrex::Real time,
+                                     const amrex::BoxArray& ba,
+                                     const amrex::DistributionMapping& dm);
+    void sbm_synchronize_levels (int nstep);
+
     void Construct_ERFFillPatchers (int lev);
 
     void Define_ERFFillPatchers (int lev);
@@ -1382,7 +1415,11 @@ private:
     // Re-read the surface pressure of a level > 0 from its own init file (it is not checkpointed)
     void read_psfc_from_own_init_file (int lev);
 
-    // The cells at a level > 0 that its own init file covers, as ERF::ErrorEst places them
+    // The full WRF file box in ERF's global index space, including all ancestor nest offsets;
+    // optionally return the requested refined file's parent-grid ratio
+    amrex::Box wrfinput_file_box (int lev, int file_index, int* ratio_out = nullptr) const;
+
+    // The cells at a level > 0 that its own init file covers
     amrex::Box nest_box_from_own_init_file (int lev);
 
     // Maximum value of terrain read in from wrfinput at level 0
@@ -1527,6 +1564,10 @@ private:
 
     std::unique_ptr<Microphysics> micro;
     std::unique_ptr<erf_sbm::SBMStateManager> sbm_state_manager;
+    // Declared before SBMTransport so the non-owning interface references in
+    // transport are destroyed before these register owners.
+    amrex::Vector<std::unique_ptr<erf_sbm::SBMAMRFluxRegister>> sbm_amr_flux_regs;
+    std::vector<amrex::Real> sbm_qualification_initial_inventory;
     // Declared after the state manager so its non-owning layout reference is
     // destroyed before the authoritative SBM owner.
     std::unique_ptr<erf_sbm::SBMTransport> sbm_transport;
@@ -1721,6 +1762,10 @@ private:
     // kinematic wall heat flux -u* theta* of the fraction-stress law in the wall cell (zero elsewhere),
     // written by the immersed scalar forcing, read as the TKE buoyancy flux on the wall face
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> ib_wall_hfx;
+    // kinematic wall moisture flux -u* q* of the fraction-stress law in the wall cell (zero elsewhere;
+    // allocated with a moisture model that carries water vapour), written by the immersed scalar
+    // forcing, read as the water vapour flux on the wall face (qfx1_z: the moist TKE buoyancy, the output)
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> ib_wall_qfx;
     // wall value of the k-eqn TKE in the wall cell (erf.if_wall_tke; -1 elsewhere), written by the
     // immersed scalar forcing; with erf.if_wall_tke_time_factor = 1 the cell is held at it after
     // every stage and in the implicit TKE solve
@@ -2260,6 +2305,32 @@ private:
     amrex::Real m_fire_plot_per  = -1.0;
 #endif
 
+#ifdef ERF_USE_MOVING_BODIES
+    /// The structure model erf.structures.model selects (ERF_StructureModel.H); nullptr when the key is not set
+    std::unique_ptr<StructureModel> m_structure_model = nullptr;
+
+    /// Hand the structure model the mesh and the initial (or restart) state, once, in InitData_post
+    void initialize_structure_model ();
+
+    /// Advance the structure model over this step of level lev, then check its support() against level lev+1
+    void advance_structure_model (int lev, double time, amrex::Real dt_lev,
+                                  const amrex::MultiFab& U_old, const amrex::MultiFab& V_old,
+                                  const amrex::MultiFab& W_old, const amrex::MultiFab& S_old);
+
+    /// Whether every map factor of level lev is 1 (the actuator core assumes so); a collective
+    bool structure_unit_map_factors (int lev) const;
+
+    /// Restrict the structure model's latest source onto level lev < level(), for lev's next step
+    void make_structure_coarse_sources (int lev);
+
+    /// The structure model's source restricted onto a coarser level (x, y, z faces); undefined when unset
+    amrex::Vector<std::array<amrex::MultiFab,AMREX_SPACEDIM>> m_structure_crse_src;
+
+    /// The grids of the model's level at its last advance(): the source add_momentum_sources() returns lives there
+    amrex::BoxArray            m_structure_src_ba;
+    amrex::DistributionMapping m_structure_src_dm;
+#endif
+
     //
     // Holds info for dynamically generated tagging criteria
     //
@@ -2350,6 +2421,16 @@ private:
     AMREX_FORCE_INLINE
     amrex::YAFluxRegister* getAdvFluxReg (int lev)
     {
+        // The register on the lev-1 / lev interface holds the grids of both levels, so a level
+        // made or remade after it was built must have rebuilt it; one built from an earlier
+        // BoxArray would be indexed with the wrong boxes (erf-model/ERF#4988).  The BoxArray
+        // comparison is a pointer comparison when the register is current.
+        if (advflux_reg[lev]) {
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                advflux_reg[lev]->getCrseData().boxArray()        == grids[lev-1] &&
+                advflux_reg[lev]->getCrseData().DistributionMap() == dmap[lev-1],
+                "The advective flux register was built from an earlier BoxArray of its coarse level");
+        }
         return advflux_reg[lev].get();
     }
 
@@ -2396,20 +2477,6 @@ private:
         return static_cast<int>(sampleptlog.size());
     }
 
-    AMREX_FORCE_INLINE
-    std::ostream&
-    SampleLineLog (int i)
-    {
-        return *samplelinelog[i];
-    }
-
-    AMREX_FORCE_INLINE
-    int
-    NumSampleLineLogs () noexcept
-    {
-        return static_cast<int>(samplelinelog.size());
-    }
-
     amrex::IntVect&
     SamplePoint (int i)
     {
@@ -2421,19 +2488,6 @@ private:
     NumSamplePoints () noexcept
     {
         return static_cast<int>(samplepoint.size());
-    }
-
-    amrex::IntVect&
-    SampleLine (int i)
-    {
-        return sampleline[i];
-    }
-
-    AMREX_FORCE_INLINE
-    int
-    NumSampleLines () noexcept
-    {
-        return static_cast<int>(sampleline.size());
     }
 
     static double startCPUTime;
@@ -2510,27 +2564,15 @@ private:
         amrex::ParallelDescriptor::Barrier("ERF::setRecordSamplePointInfo");
     }
 
-    // The line can span boxes on several ranks; sample_lines gathers it onto
-    // the IO processor, so only that rank opens the log
-    void setRecordSampleLineInfo (int i, const std::string& filename) // NOLINT
-    {
-        if (amrex::ParallelDescriptor::IOProcessor())
-        {
-            samplelinelog[i] = std::make_unique<std::fstream>();
-            samplelinelog[i]->open(filename.c_str(),std::ios::out|std::ios::app);
-            if (!samplelinelog[i]->good()) {
-                amrex::FileOpenFailed(filename);
-            }
-        }
-        amrex::ParallelDescriptor::Barrier("ERF::setRecordSampleLineInfo");
-    }
-
     // Data sampler for line and plane output
     int line_sampling_interval = -1;
     int plane_sampling_interval = -1;
     amrex::Real line_sampling_per = -one;
     amrex::Real plane_sampling_per = -one;
     std::unique_ptr<LineSampler> line_sampler = nullptr;
+    // erf.sample_line / erf.sample_line_real: full-depth columns on level 0, written to logs
+    // at the cadence of the other logs (erf.sum_interval / erf.sum_per)
+    std::unique_ptr<LineSampler> sample_line_sampler = nullptr;
     std::unique_ptr<PlaneSampler> plane_sampler = nullptr;
 
     std::unique_ptr<CeilometerSimulator>   m_ceilometer_sim;
@@ -2563,19 +2605,12 @@ private:
     amrex::Vector<std::string> sampleptlogname;
     amrex::Vector<amrex::IntVect> samplepoint;
 
-    amrex::Vector<std::unique_ptr<std::fstream> > samplelinelog;
-    amrex::Vector<std::string> samplelinelogname;
-    amrex::Vector<amrex::IntVect> sampleline;
-
     //! The filename of the ith datalog file.
     [[nodiscard]] std::string DataLogName (int i) const noexcept { return datalogname[i]; }
     [[nodiscard]] std::string DerDataLogName (int i) const noexcept { return der_datalogname[i]; }
 
     //! The filename of the ith sampleptlog file.
     [[nodiscard]] std::string SamplePointLogName (int i) const noexcept { return sampleptlogname[i]; }
-
-    //! The filename of the ith samplelinelog file.
-    [[nodiscard]] std::string SampleLineLogName (int i) const noexcept { return samplelinelogname[i]; }
 
     // array of EB objects
     amrex::Vector<std::unique_ptr<eb_>> eb;
@@ -2629,6 +2664,8 @@ public:
                        int artifact_step,
                        double artifact_time_seconds) const;
     static void writeBuildInfo (std::ostream& os);
+    static void writeBuildInfoJSON (std::ostream& os);
+    static void writeBuildInfoYAML (std::ostream& os);
 
     static void print_banner (MPI_Comm /*comm*/, std::ostream& /*out*/);
     static void print_usage (MPI_Comm /*comm*/, std::ostream& /*out*/);

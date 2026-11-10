@@ -16,6 +16,13 @@
 #include "ERF_SBMRemapping.H"
 #include "ERF_SBMStateManager.H"
 #include "ERF_SBMTransport.H"
+#include "ERF_SBMAMRFluxRegister.H"
+#ifdef ERF_SBM_AMR_QUALIFICATION
+#include "ERF_SBMAMRQualification.H"
+#endif
+#ifdef ERF_USE_MOVING_BODIES
+#include "ERF_StructureModelRegistry.H"
+#endif
 
 #include <algorithm>
 #include <string>
@@ -41,6 +48,9 @@ erf_sbm::SBMLayout make_sbm_layout (const SolverChoice& choice)
 
     erf_sbm::SBMLayoutSpec spec;
     spec.populations.push_back(std::move(population));
+#ifdef ERF_SBM_AMR_QUALIFICATION
+    erf_sbm::qualification::add_layout_properties(spec, choice);
+#endif
     spec.liquid_projection = {0, choice.sbm_cloud_rain_split};
     const auto validation = erf_sbm::SBMLayout::validate(spec);
     if (!validation.valid) {
@@ -55,9 +65,13 @@ void validate_sbm_m3_advection (const SolverChoice& choice,
     if (choice.moisture_type != MoistureType::SBM) return;
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(AMREX_SPACEDIM == 3,
         "SBM M3 mapped advection requires three dimensions");
+#ifdef ERF_SBM_AMR_QUALIFICATION
+    erf_sbm::qualification::validate_configuration(choice, max_level);
+#else
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(max_level == 0,
         "SBM M3 mapped advection supports one AMR level only");
-    const bool anelastic = !choice.anelastic.empty() && choice.anelastic[0] != 0;
+#endif
+    const bool anelastic = !choice.compressibility_type.empty() && choice.compressibility_type[0] != CompressibilityType::FullyCompressible;
     // Grid stretching may set StaticFittedMesh as a label while retaining
     // StretchedDz; only VariableDz selects the fitted-terrain projection.
     const bool fitted_terrain_mesh =
@@ -80,12 +94,17 @@ void validate_sbm_m3_advection (const SolverChoice& choice,
         "SBM M3 supports ConstantDz, StretchedDz, or static fitted-mesh geometry");
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(choice.buildings_type == BuildingsType::None,
         "SBM M3 requires buildings_type=None");
-    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(choice.substepping_type.size() == 1 &&
-                                     choice.substepping_type[0] == SubsteppingType::None,
-        "SBM M3 requires acoustic substepping_type=None");
-    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(choice.anelastic_type.empty() ||
-                                     choice.anelastic[0] == 0 ||
-                                     choice.anelastic_type[0] == AnelasticType::RK2,
+    // Production SBM has already required max_level == 0 above.
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+        choice.timestepping_type.size() == max_level + 1 &&
+        std::none_of(choice.timestepping_type.begin(), choice.timestepping_type.end(),
+                     [] (TimesteppingType type) {
+                         return type == TimesteppingType::RK3_ImplicitSubstep;
+                     }),
+        "SBM M3 does not support acoustic substepping (erf.timestepping_type = RK3_ImplicitSubstep)");
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(choice.timestepping_type.empty() ||
+                                     choice.compressibility_type[0] == CompressibilityType::FullyCompressible ||
+                                     choice.timestepping_type[0] == TimesteppingType::RK2,
         "SBM M3 supports the Anelastic RK2 Heun integrator only");
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(choice.diffChoice.molec_diff_type == MolecDiffType::None,
         "SBM M3 does not support scalar or particle diffusion");
@@ -138,8 +157,8 @@ void validate_auxiliary_inert_tracer_fixture (const SolverChoice& choice,
         "M2 auxiliary inert tracer fixture requires a fully periodic domain (geometry.is_periodic = 1 1 1)");
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!choice.use_gravity,
         "M2 auxiliary inert tracer fixture requires gravity disabled");
-    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(choice.substepping_type.size() == 1 &&
-                                     choice.substepping_type[0] == SubsteppingType::None,
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(choice.timestepping_type.size() == 1 &&
+                                     choice.timestepping_type[0] != TimesteppingType::RK3_ImplicitSubstep,
         "M2 auxiliary inert tracer fixture does not support acoustic substepping");
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(choice.diffChoice.molec_diff_type == MolecDiffType::None,
         "M2 auxiliary inert tracer fixture does not support scalar diffusion");
@@ -157,7 +176,7 @@ void validate_auxiliary_inert_tracer_fixture (const SolverChoice& choice,
         choice.advChoice.dryscal_vert_adv_type == AdvType::Centered_2nd,
         "M2 auxiliary inert tracer fixture requires Centered_2nd dry scalar advection");
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
-        !choice.anelastic[0] || choice.anelastic_type[0] == AnelasticType::RK2,
+        (choice.compressibility_type[0] == CompressibilityType::FullyCompressible) || choice.timestepping_type[0] == TimesteppingType::RK2,
         "M2 auxiliary inert tracer fixture does not support Anelastic MidPoint");
 
     std::string problem_name = "Undefined";
@@ -342,7 +361,10 @@ ERF::ERF_shared ()
         sbm_state_manager = std::make_unique<erf_sbm::SBMStateManager>(
             std::move(layout), max_level + 1);
         sbm_transport = std::make_unique<erf_sbm::SBMTransport>(
-            sbm_state_manager->layout(), max_level + 1);
+            sbm_state_manager->layout(), max_level + 1,
+            erf_sbm::SBMTransport::default_max_groups_per_chunk, false);
+        sbm_transport->enable_zero_flow_diagnostics(
+            solverChoice.sbm_amr_qualification_expect_zero_flow);
     }
     // Create one invocation identity after inputs are available and before
     // InitData can read restart metadata or write an output on restart.
@@ -352,6 +374,23 @@ ERF::ERF_shared ()
 
 #ifdef ERF_USE_WINDFARM
     initializeWindFarm(nlevs_max);
+#endif
+
+#ifdef ERF_USE_MOVING_BODIES
+    // The structure model erf.structures.model selects; it reads its own inputs here
+    m_structure_model = make_structure_model_from_inputs(max_level);
+    if (m_structure_model) {
+        amrex::Print() << "Structure model: " << m_structure_model->name() << "\n";
+    }
+#else
+    // A build without the structure coupling refuses the key instead of ignoring it
+    {
+        amrex::ParmParse pp_structures("erf.structures");
+        if (pp_structures.contains("model")) {
+            amrex::Abort("erf.structures.model needs ERF built with the structure coupling"
+                         " (ERF_ENABLE_MOVING_BODIES=ON in CMake, USE_MOVING_BODIES=TRUE in GNU make)");
+        }
+    }
 #endif
 
 #ifdef ERF_USE_EAMXX_SHOC
@@ -563,6 +602,7 @@ ERF::ERF_shared ()
     th_bc_data.resize(nlevs_max);
 
     advflux_reg.resize(nlevs_max);
+    sbm_amr_flux_regs.resize(nlevs_max);
 
     // Stresses
     Tau.resize(nlevs_max);
@@ -614,6 +654,7 @@ ERF::ERF_shared ()
     ib_wall_face23.resize(nlevs_max);
     ib_wall_face33.resize(nlevs_max);
     ib_wall_hfx.resize(nlevs_max);
+    ib_wall_qfx.resize(nlevs_max);
     ib_wall_ktarget.resize(nlevs_max);
     ib_wall_height.resize(nlevs_max);
 

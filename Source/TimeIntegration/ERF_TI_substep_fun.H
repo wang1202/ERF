@@ -29,7 +29,7 @@ auto acoustic_substepping_fun = [&,one_d=one,zero_d=zero](int fast_step, int n_s
         //    slope (see make_fast_coeffs); the substeps take it from fast_coeffs either way
         Real beta_s;
         bool l_variable_beta_s;
-        if (solverChoice.substepping_type[level] == SubsteppingType::Implicit) {
+        if (solverChoice.timestepping_type[level] == TimesteppingType::RK3_ImplicitSubstep) {
             beta_s = solverChoice.beta_s;
             l_variable_beta_s = solverChoice.use_variable_beta_s;
         } else { // Fully explicit
@@ -115,7 +115,7 @@ auto acoustic_substepping_fun = [&,one_d=one,zero_d=zero](int fast_step, int n_s
             base_to_use = MultiFab(base_state[level], make_alias, 0, BaseState::num_comps);
         }
 
-        make_mom_sources(old_substep_time, dtau, Svec_to_use,
+        make_mom_sources(level, old_substep_time, dtau, Svec_to_use,
                          z_phys_nd[level].get(), z_phys_cc[level].get(), stretched_dz_h[level],
                          xvel_new, yvel_new, zvel_new,
                          xmom_src, ymom_src, zmom_src,
@@ -150,7 +150,7 @@ auto acoustic_substepping_fun = [&,one_d=one,zero_d=zero](int fast_step, int n_s
                              phys_bc_type);
         }
 
-        bool l_rayleigh_implicit = (solverChoice.dampingChoice.rayleigh_damping_type == RayleighDampingType::FastImplicit);
+        bool l_rayleigh_implicit = solverChoice.rayleigh_implicit_w(level);
         Real l_damp_coef         = solverChoice.dampingChoice.rayleigh_dampcoef;
 
         // The coarse/fine face fluxes of the last RK stage (ERF_CFFluxHistory.cpp): a coarse

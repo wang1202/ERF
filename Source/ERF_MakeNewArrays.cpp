@@ -229,13 +229,13 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
     gradp[lev][GpVars::gpy].define(convert(ba, IntVect(0,1,0)), dm, 1, 1); gradp[lev][GpVars::gpy].setVal(zero);
     gradp[lev][GpVars::gpz].define(convert(ba, IntVect(0,0,1)), dm, 1, 1); gradp[lev][GpVars::gpz].setVal(zero);
 
-    if ( (solverChoice.anelastic[lev] == 1) || (solverChoice.project_initial_velocity[lev] == 1) ) {
+    if ( (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible) || (solverChoice.project_initial_velocity[lev] == 1) ) {
         pp_inc[lev].define(ba, dm, 1, 1);
         pp_inc[lev].setVal(zero);
     }
 
     // We use this in the fast substepping only
-    if (solverChoice.anelastic[lev] == 0) {
+    if (solverChoice.compressibility_type[lev] == CompressibilityType::FullyCompressible) {
         lagged_delta_rt[lev].define(ba, dm, 1, 1);
         lagged_delta_rt[lev].setVal(zero);
     }
@@ -632,7 +632,7 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
     }
 
 #ifdef ERF_USE_FFT
-    if ( ( (solverChoice.anelastic[lev] == 1)               || (solverChoice.project_initial_velocity[lev] == 1) ) &&
+    if ( ( (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible)               || (solverChoice.project_initial_velocity[lev] == 1) ) &&
          ( (solverChoice.mesh_type == MeshType::ConstantDz) || (solverChoice.mesh_type == MeshType::StretchedDz) ) ) {
         build_fft_solvers(lev);
     }
@@ -729,6 +729,7 @@ ERF::make_flux_register (int lev)
 {
     if (solverChoice.coupling_type != CouplingType::TwoWay || lev == 0) {
         advflux_reg[lev].reset();
+        make_sbm_flux_register(lev);
         return;
     }
     int ncomp_reflux = vars_new[0][Vars::cons].nComp();
@@ -736,6 +737,7 @@ ERF::make_flux_register (int lev)
                                                         dmap[lev] ,  dmap[lev-1],
                                                         geom[lev] ,  geom[lev-1],
                                                         ref_ratio[lev-1], lev, ncomp_reflux);
+    make_sbm_flux_register(lev);
 }
 
 void
@@ -1330,9 +1332,9 @@ ERF::initialize_integrator (int lev, MultiFab& cons_mf, MultiFab& vel_mf)
     int_state.push_back(MultiFab(convert(ba,IntVect(0,0,1)), dm, 1, vel_mf.nGrow())); // zmom
 
     mri_integrator_mem[lev] = std::make_unique<MRISplitIntegrator<Vector<MultiFab> > >(int_state);
-    mri_integrator_mem[lev]->setNoSubstepping((solverChoice.substepping_type[lev] == SubsteppingType::None));
-    mri_integrator_mem[lev]->setAnelastic(solverChoice.anelastic[lev]);
-    mri_integrator_mem[lev]->setAnelasticType(solverChoice.anelastic_type[lev]);
+    mri_integrator_mem[lev]->setNoSubstepping((solverChoice.timestepping_type[lev] != TimesteppingType::RK3_ImplicitSubstep));
+    mri_integrator_mem[lev]->setAnelastic(solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible);
+    mri_integrator_mem[lev]->setTimesteppingType(solverChoice.timestepping_type[lev]);
     mri_integrator_mem[lev]->setNcompCons(ncomp_cons);
     mri_integrator_mem[lev]->setForceFirstStageSingleSubstep(solverChoice.force_stage1_single_substep);
 }

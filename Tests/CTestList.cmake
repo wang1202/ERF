@@ -1682,7 +1682,7 @@ if(ERF_ENABLE_MPI)
 add_test_anelastic_wall_diffusion(AnelasticWallDiffusion_X 0)
 add_test_anelastic_wall_diffusion(AnelasticWallDiffusion_Y 1)
 add_test_anelastic_wall_diffusion(AnelasticWallDiffusion_Z 2)
-# Same stationary state as the _X case, but with erf.anelastic_type = MidPoint so the
+# Same stationary state as the _X case, but with erf.timestepping_type = MidPoint so the
 # vertical implicit diffusion stays on (the _X/_Y/_Z cases opt out with vert_implicit).
 add_test_anelastic_wall_diffusion(AnelasticWallDiffusion_X_MidPoint 0)
 add_test_cloud_chamber(CloudChamber_Dry dry)
@@ -2105,13 +2105,13 @@ if(ERF_ENABLE_PARTICLES AND Python3_Interpreter_FOUND)
     # Motivation: Restart reconstruction must preserve the active phase-change
     # trajectory with base pressure and a nondefault heat capacity.
     add_test_restart_parity(SDM_Anelastic_Restart SDM_SpeciesDiffusion 2 4
-        COMMON_OPTIONS "${_anelastic_options} erf.anelastic=1"
+        COMMON_OPTIONS "${_anelastic_options} erf.compressibility_type=Anelastic"
         FCOMPARE_RTOL ${_species_tol} FCOMPARE_ATOL ${_species_atol})
     set(_anelastic_amr "amr.max_level=1 amr.ref_ratio=2 erf.refinement_indicators=box1 erf.box1.max_level=1 erf.box1.in_box_lo=0 0 0 erf.box1.in_box_hi=8 4 8 erf.regrid_int=1")
     # Motivation: An AMR restart on more MPI ranks must restore thermodynamics
     # and particle ownership on the resumed grid decomposition.
     add_test_restart_parity(SDM_Anelastic_AMRRestart SDM_SpeciesDiffusion 2 4
-        COMMON_OPTIONS "${_anelastic_options} ${_anelastic_amr} erf.anelastic=1"
+        COMMON_OPTIONS "${_anelastic_options} ${_anelastic_amr} erf.compressibility_type=Anelastic"
         CHK_NRANKS 1 RESTART_NRANKS ${_species_ranks}
         FCOMPARE_RTOL ${_species_tol} FCOMPARE_ATOL ${_species_atol})
     # Motivation: Both mixed mode orders must preserve per-level pressure
@@ -2119,14 +2119,16 @@ if(ERF_ENABLE_PARTICLES AND Python3_Interpreter_FOUND)
     # Pure-mode cases cannot expose every coarse/fine coupling error.
     foreach(_modes "0 1" "1 0")
         string(REPLACE " " "" _mode_name "${_modes}")
+        string(REPLACE "0" "FullyCompressible" _ctypes "${_modes}")
+        string(REPLACE "1" "Anelastic" _ctypes "${_ctypes}")
         add_test_restart_parity(SDM_Anelastic_Mixed${_mode_name}Restart SDM_SpeciesDiffusion 2 4
-            COMMON_OPTIONS "${_anelastic_options} ${_anelastic_amr} erf.anelastic=${_modes}"
+            COMMON_OPTIONS "${_anelastic_options} ${_anelastic_amr} erf.compressibility_type=${_ctypes}"
             FCOMPARE_RTOL ${_species_tol} FCOMPARE_ATOL ${_species_atol})
     endforeach()
     # Motivation: Box boundaries and their ghost fills must not change the
     # base-pressure-driven particle and atmospheric evolution.
     add_test_box_parity(SDM_Anelastic_BoxParity SDM_SpeciesDiffusion plt00004
-        COMMON_OPTIONS "${_anelastic_options} erf.anelastic=1"
+        COMMON_OPTIONS "${_anelastic_options} erf.compressibility_type=Anelastic"
         REFERENCE_OPTIONS "amr.max_grid_size=32"
         SPLIT_OPTIONS "amr.max_grid_size_x=4"
         FCOMPARE_RTOL ${_species_tol} FCOMPARE_ATOL ${_species_atol})
@@ -2357,16 +2359,14 @@ add_test_r(ABL_MOST_IMP_DIFF_TKE
     FCOMPARE_ATOL "4.0e-10")
 # ABL_MOST_IMP_DIFF_TKE with a stable prescribed flux (-0.02 K m/s) and the QNSE stable-side
 # similarity functions (erf.most.stable_functions = qnse): the prescribed-flux kernel, the MYNN25
-# surface gradients and the surface TKE production all take the QNSE functions. The gold was
-# generated on Linux (GCC) from the code the option merged with, so the test guards the
-# wiring against regressions; the correctness of the functions, the fold and the kernel's
-# solution is pinned to closed forms and an independent bisection in Tests/Unit/BoundaryConditions/
-# ERF_GTestMOSTStableFunctions.cpp
-add_test_r(ABL_MOST_QNSE_StableFlux
-    ""
-    "erf_exec"
-    "plt00010"
-    FCOMPARE_ATOL "4.0e-10")
+# surface gradients and the surface TKE production all take the QNSE functions. The sounding is
+# stable aloft (theta rises 3 K/km) rather than neutral: with theta uniform, the dthetav/dz that
+# MYNN25's buoyancy length scale tests (dthetavdz > 0, then N = sqrt(g/theta0 dthetav/dz)) is
+# roundoff, and KE then differed between Linux and macOS by about 1e-9. The gold was generated on
+# Linux (GCC); the test guards the wiring against regressions, and the correctness of the
+# functions, the fold and the kernel's solution is pinned to closed forms and an independent
+# bisection in Tests/Unit/BoundaryConditions/ERF_GTestMOSTStableFunctions.cpp
+add_test_r(ABL_MOST_QNSE_StableFlux     ""  "erf_exec" "plt00010")
 # ABL_MOST_IMP_DIFF_TKE with erf.implicit_before_substep = false: the vertical implicit solves of
 # theta and momentum (ERF_ImplicitPre.H) run after the last acoustic substep of each stage
 add_test_r(ABL_MOST_IMP_DIFF_PostSubstep     ""  "erf_exec" "plt00010")
@@ -2426,6 +2426,29 @@ if(ERF_ENABLE_MPI AND NOT WIN32)
                                        "erf.implicit_moisture_diffusion=false")
     add_test_immersed_flat_equivalence(ImmersedForm7MoistEquivalence_Implicit ImmersedForm7MoistEquivalence 2 0.01 25 OFF ""
                                        "erf.implicit_moisture_diffusion=true")
+    # The same pair over a heated, evaporating surface (a kinematic heat flux of 0.02 K m/s and a
+    # moisture flux of 1e-4 kg/kg m/s, about 24 and 300 W/m2, on both; the plane's through erf.if_surf_temp_flux and
+    # erf.if_surf_moist_flux) with the moist TKE buoyancy of the k-eqn closure
+    # (erf.rans_moist_buoyancy): the wall moisture flux -u* q*, the Obukhov length from theta_v* and
+    # the moist buoyancy on the wall face must reproduce flat ground, one leg per diffusion path.
+    # The _NoMoistFlux leg drops the plane's moisture flux and must fail the check (the checker sees
+    # the surface moisture); the _DryBuoyancy leg drops the plane's moist buoyancy and must fail it.
+    add_test_immersed_flat_equivalence(ImmersedForm7MoistFluxEquivalence ImmersedForm7MoistFluxEquivalence 2 0.01 25 OFF ""
+                                       "erf.implicit_moisture_diffusion=false")
+    add_test_immersed_flat_equivalence(ImmersedForm7MoistFluxEquivalence_Implicit ImmersedForm7MoistFluxEquivalence 2 0.01 25 OFF ""
+                                       "erf.implicit_moisture_diffusion=true")
+    add_test_immersed_flat_equivalence(ImmersedForm7MoistFluxEquivalence_NoMoistFlux ImmersedForm7MoistFluxEquivalence 2 0.01 25 ON
+                                       "erf.if_surf_moist_flux=0" "")
+    add_test_immersed_flat_equivalence(ImmersedForm7MoistFluxEquivalence_DryBuoyancy ImmersedForm7MoistFluxEquivalence 2 0.01 25 ON
+                                       "erf.rans_moist_buoyancy=false" "")
+    # A given surface temperature and surface mixing ratio (erf.most.pot_surf_temp and
+    # erf.most.surf_moist on flat ground, erf.if_init_surf_temp and erf.if_surf_moist on the plane):
+    # q* from the surface value with the stability functions of the virtual Obukhov length, the
+    # wall moisture source a decay toward the surface value (the air holds half the surface's 8 g/kg,
+    # so the plane without its surface mixing ratio, _NoSurfMoist, must fail the check)
+    add_test_immersed_flat_equivalence(ImmersedForm7MoistSurfEquivalence ImmersedForm7MoistSurfEquivalence 2 0.01 25 OFF "" "")
+    add_test_immersed_flat_equivalence(ImmersedForm7MoistSurfEquivalence_NoSurfMoist ImmersedForm7MoistSurfEquivalence 2 0.01 25 ON
+                                       "erf.if_surf_moist=-1" "")
   endif()
   # Box, rank and tiling parity of the other closures: one box on one rank without tiling
   # against four boxes on two ranks with 8 x 8 tiles (Tests/test_files/Closure_BoxParity).
@@ -2471,12 +2494,12 @@ if(ERF_ENABLE_MPI AND NOT WIN32)
     # so the FFT solver is used and the tests need the FFT build.  The slow scalars (k, qv)
     # are advected with the projected momentum, which used to be copied tile by tile.
     add_test_box_parity(Closure_BoxParity_Anelastic_Kessler Closure_BoxParity "plt00010"
-        COMMON_OPTIONS "erf.plot_vars_1=density x_velocity y_velocity z_velocity theta qv qc qp Kmv erf.anelastic=1 erf.anelastic_type=MidPoint erf.use_fft=true erf.les_type=Smagorinsky erf.Cs=0.1 erf.moisture_model=Kessler erf.input_sounding_file=${_cbp_dir}/Closure_BoxParity_Anelastic_Kessler/sounding_moist"
+        COMMON_OPTIONS "erf.plot_vars_1=density x_velocity y_velocity z_velocity theta qv qc qp Kmv erf.compressibility_type=Anelastic erf.timestepping_type=MidPoint erf.use_fft=true erf.les_type=Smagorinsky erf.Cs=0.1 erf.moisture_model=Kessler erf.input_sounding_file=${_cbp_dir}/Closure_BoxParity_Anelastic_Kessler/sounding_moist"
         REFERENCE_OPTIONS "${_cbp_ref}"
         SPLIT_OPTIONS "${_cbp_split}"
         FCOMPARE_RTOL "1.0e-9")
     add_test_box_parity(Closure_BoxParity_Anelastic_Deardorff Closure_BoxParity "plt00010"
-        COMMON_OPTIONS "${_cbp_ke} erf.anelastic=1 erf.anelastic_type=MidPoint erf.use_fft=true erf.les_type=Deardorff erf.input_sounding_file=${_cbp_dir}/Closure_BoxParity_Anelastic_Deardorff/sounding_dry"
+        COMMON_OPTIONS "${_cbp_ke} erf.compressibility_type=Anelastic erf.timestepping_type=MidPoint erf.use_fft=true erf.les_type=Deardorff erf.input_sounding_file=${_cbp_dir}/Closure_BoxParity_Anelastic_Deardorff/sounding_dry"
         REFERENCE_OPTIONS "${_cbp_ref}"
         SPLIT_OPTIONS "${_cbp_split}"
         FCOMPARE_RTOL "1.0e-9")
@@ -2687,6 +2710,41 @@ function(add_test_bndry_planes_ingest TEST_NAME READ_VARS FIELD MIN MAX)
 endfunction()
 add_test_bndry_planes_ingest(BndryPlanes_Ingest_VelocityOnly "velocity" x_velocity 4.5 15.0)
 add_test_bndry_planes_ingest(BndryPlanes_Ingest_Qv "temperature density velocity qv" qv 1.0e-4 6.0e-3)
+# Planes ingested on the x faces of a y-periodic domain, from a writer whose planes vary
+# along y (Tests/RunBndryPlanesGold.cmake): the ghost cells beside the x faces at the y seam
+# take the plane at the periodic image, as the interior cells across the seam do. The reader's
+# plotfile is compared with its gold; the near-side fill of development changed y_velocity by
+# 2.7 % of its norm there after 10 steps. The gold also records the velocity components that are
+# nodal along a face read between the two plane cells either side of the node (1.7 % in
+# y_velocity). The gold records the new fill, not a physical answer (the reader's window is not a
+# period of the writer's field); the BndryPlaneIndex gtests carry the check of the index
+# arithmetic.
+function(add_test_bndry_planes_gold TEST_NAME WRITER_INPUT PLTFILE)
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=${NP}"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DFCOMPARE=${FCOMPARE_EXE}"
+        "-DWRITER=${CURRENT_TEST_BINARY_DIR}/${WRITER_INPUT}"
+        "-DREADER=${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.i"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DPLTFILE=${PLTFILE}"
+        "-DGOLD=${PLOT_GOLD}"
+        "-DRTOL=${ERF_TEST_FCOMPARE_RTOL}"
+        "-DATOL=${ERF_TEST_FCOMPARE_ATOL}"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunBndryPlanesGold.cmake)
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        TIMEOUT 600
+        PROCESSORS ${NP}
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "regression"
+        ATTACHED_FILES_ON_FAIL "${CURRENT_TEST_BINARY_DIR}/writer.log;${CURRENT_TEST_BINARY_DIR}/reader.log;${CURRENT_TEST_BINARY_DIR}/fcompare.log")
+endfunction()
+add_test_bndry_planes_gold(BndryPlanes_PeriodicSeam "BndryPlanes_PeriodicSeam_Writer.i" "plt00010")
 endif()
 add_test_r(SquallLine_2D                     ""  "erf_exec" "plt00010")
 add_test_r(SuperCell_3D                      ""  "erf_exec" "plt00010")
@@ -2834,6 +2892,22 @@ if(ERF_ENABLE_MPI AND NOT WIN32)
                  "reads temperature but not qv"
                  "erf.bndry_file=${CMAKE_CURRENT_BINARY_DIR}/test_files/BndryPlanes_MoistTemperature/BndryFiles 'erf.bndry_input_var_names=temperature density velocity'")
   set_tests_properties(BndryPlanes_MoistTemperature_ReadWithoutQv PROPERTIES FIXTURES_REQUIRED BndryPlanesMoist)
+
+  # A reader that ends at the last plane time to within round-off: the writer's 60 steps of 0.02 s
+  # sum to 1.2000000000000006, and the reader's 75 steps of 0.016 s to 1.2000000000000008, 2 ULP
+  # past the last plane.  The reader stopped there on the bounds check of read_input_files.
+  set(_bp_end_bin ${CMAKE_CURRENT_BINARY_DIR}/test_files/BndryPlanes_MoistTemperature_ReadToLastPlane)
+  file(MAKE_DIRECTORY ${_bp_end_bin})
+  file(COPY ${_bp_moist_dir}/BndryPlanes_MoistTemperature.i ${_bp_moist_dir}/input_sounding
+       DESTINATION ${_bp_end_bin})
+  resolve_test_exe("" "erf_exec" _bp_end_exe)
+  add_test(NAME BndryPlanes_MoistTemperature_ReadToLastPlane
+           COMMAND sh -c "${ERF_SH_MPI_LAUNCHER}${MPIEXEC_NUMPROC_FLAG} 1 ${MPIEXEC_PREFLAGS} ${_bp_end_exe} BndryPlanes_MoistTemperature.i erf.bndry_file=${CMAKE_CURRENT_BINARY_DIR}/test_files/BndryPlanes_MoistTemperature/BndryFiles max_step=75 erf.fixed_dt=0.016 erf.plot_int_1=-1 erf.check_int=-1 amrex.call_addr2line=0 > ReadToLastPlane.log 2>&1 || ( tail -n 20 ReadToLastPlane.log && false )"
+           WORKING_DIRECTORY ${_bp_end_bin})
+  set_tests_properties(BndryPlanes_MoistTemperature_ReadToLastPlane PROPERTIES
+                       TIMEOUT 600 PROCESSORS 1 LABELS "regression"
+                       FIXTURES_REQUIRED BndryPlanesMoist
+                       ATTACHED_FILES_ON_FAIL "${_bp_end_bin}/ReadToLastPlane.log")
 endif()
 add_test_abort(BndryPlanes_MoistTemperature_WriteWithoutQv ${_bp_moist_dir}
                BndryPlanes_MoistTemperature_Write.i
@@ -2998,7 +3072,7 @@ if(NOT WIN32 AND ERF_TEST_PYTHON)
   setup_test()
   resolve_test_exe("" "erf_exec" TEST_EXE)
   add_test(${TEST_NAME} sh -c
-    "${MPI_COMMANDS} ${TEST_EXE} ${CURRENT_TEST_BINARY_DIR}/MassFlux_TrapInvalid.i max_step=3 erf.const_massflux_u=1.0 erf.const_massflux_layer_lo=0.2 erf.const_massflux_layer_hi=0.6 > ${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.log 2>&1 && ${ERF_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/check_massflux_relaxation.py ${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.log --dt 0.025 --steps 3 --tol ${_massflux_tol}")
+    "${MPI_COMMANDS} ${TEST_EXE} ${CURRENT_TEST_BINARY_DIR}/MassFlux_TrapInvalid.i max_step=3 erf.timestepping_type=RK2 erf.const_massflux_u=1.0 erf.const_massflux_layer_lo=0.2 erf.const_massflux_layer_hi=0.6 > ${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.log 2>&1 && ${ERF_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/check_massflux_relaxation.py ${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.log --dt 0.025 --steps 3 --tol ${_massflux_tol}")
   set_tests_properties(${TEST_NAME} PROPERTIES
       TIMEOUT 300 PROCESSORS ${NP} WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
       LABELS "regression" ATTACHED_FILES_ON_FAIL "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.log")
@@ -3272,6 +3346,36 @@ unset(_moist_cf_rtol)
 add_test_r(CouetteFlow_ImplicitCF_PostSubstep "" "erf_exec" "plt00050"
            FCOMPARE_RTOL "1.0e-8" FCOMPARE_ATOL "1.0e-7")
 
+# Four levels (2 2 1 refinement), each refined level stopping below the domain top, two-way
+# coupling, uniform flow.  AmrMesh::MakeNewGrids builds the levels one at a time and then
+# regenerates them all from level 0 once the finest level exists; levels 1 and 2 grow by the
+# proper-nesting buffer in that pass and are made from scratch a second time, level 3 is not.
+# Level 2 must then rebuild the flux register on its interface with level 3, which was built from
+# its first grids, and fill its own ghost cells, which the second tagging pass otherwise fills from
+# a level 1 whose ghost cells are still empty (erf-model/ERF#4988).  The test requires the log to
+# show that second pass (level 2 made from scratch twice, level 3 once), so that a change in grid
+# generation cannot make it vacuous, and the uniform flow to stay uniform on every level over three
+# steps (plt00000 against plt00003).  Without the register the first step faults or stops on the
+# assertion in getAdvFluxReg; without the ghost fill the initial state is up to 3.7 m/s off and the
+# multigrid pressure solve fails in the second step.  The log is printed when a check fails.
+function(add_test_twoway_scratch_regrid TEST_NAME)
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    set(test_log "${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.log")
+    set(FCOMPARE_FLAGS "--abort_if_not_all_found -r 1.0e-12 --abs_tol 1.0e-10")
+    set(test_command sh -c "( ${MPI_COMMANDS} ${TEST_EXE} ${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.i amrex.call_addr2line=0 > ${test_log} 2>&1 && grep -q 'Coarse STEP 3 ends' ${test_log} && test $(grep -c 'BA FROM SCRATCH AT LEVEL 2' ${test_log}) -eq 2 && test $(grep -c 'BA FROM SCRATCH AT LEVEL 3' ${test_log}) -eq 1 && ${MPI_FCOMP_COMMANDS} ${FCOMPARE_EXE} ${FCOMPARE_FLAGS} ${CURRENT_TEST_BINARY_DIR}/plt00000 ${CURRENT_TEST_BINARY_DIR}/plt00003 ) || ( cat ${test_log} && false )")
+    add_test(${TEST_NAME} ${test_command})
+    set_tests_properties(${TEST_NAME}
+        PROPERTIES
+        TIMEOUT 600
+        PROCESSORS ${NP}
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "regression"
+        ATTACHED_FILES_ON_FAIL "${test_log}"
+    )
+endfunction(add_test_twoway_scratch_regrid)
+add_test_twoway_scratch_regrid(TwoWay_FourLevels_PartialDepth)
+
 # Two-way coupling refluxes the diffusive as well as the advective fluxes, so in a closed domain the
 # composite integral of a scalar is conserved across coarse/fine faces whatever transports it.
 # Moisture diffuses through a face normal to z, with the vertical diffusion implicit (the deck as
@@ -3302,11 +3406,11 @@ add_test_conservation(Conservation_ScalarDiffusion_MapFactor ScalarDiffusion_Ref
 add_test_conservation(Conservation_ScalarDiffusion_Ratio221  ScalarDiffusion_Reflux "RHO SCALAR"
     OPTIONS "'amr.ref_ratio_vect=2 2 1'")
 add_test_conservation(Conservation_ScalarDiffusion_Anelastic ScalarDiffusion_Reflux "RHO SCALAR"
-    OPTIONS "erf.anelastic=1 erf.anelastic_type=MidPoint")
+    OPTIONS "erf.compressibility_type=Anelastic erf.timestepping_type=MidPoint")
 add_test_conservation(Conservation_ScalarDiffusion_AnelasticRK2 ScalarDiffusion_Reflux "RHO SCALAR"
-    OPTIONS "erf.anelastic=1 erf.anelastic_type=RK2")
+    OPTIONS "erf.compressibility_type=Anelastic erf.timestepping_type=RK2")
 add_test_conservation(Conservation_ScalarAdvection_AnelasticRK2 ScalarDiffusion_Reflux "RHO SCALAR"
-    OPTIONS "erf.anelastic=1 erf.anelastic_type=RK2 erf.molec_diff_type=None prob.U_0=10 prob.V_0=5")
+    OPTIONS "erf.compressibility_type=Anelastic erf.timestepping_type=RK2 erf.molec_diff_type=None prob.U_0=10 prob.V_0=5")
 add_test_conservation(Conservation_ScalarDiffusion_Smagorinsky ScalarDiffusion_Reflux "RHO SCALAR"
     OPTIONS "erf.molec_diff_type=None erf.les_type=Smagorinsky erf.Cs=0.2 prob.prob_type=12 prob.rad_0=0.25 prob.uRef=10 prob.zRef=1 prob.z0=0.01")
 
@@ -3315,17 +3419,17 @@ add_test_conservation(Conservation_ScalarDiffusion_Smagorinsky ScalarDiffusion_R
 # it).  theta is perturbed with the scalar's profile and diffused (alpha_T) through the faces of the
 # fine patch: on a flat, a stretched and a terrain-fitted (hill, 2 x 2 x 1 refinement as anelastic
 # terrain requires) mesh, with the MidPoint and RK2 integrators, and advected and not diffused
-set(_theta_cons_options "erf.anelastic=1 prob.theta_pert_amp=10 erf.alpha_T=1.0")
+set(_theta_cons_options "erf.compressibility_type=Anelastic prob.theta_pert_amp=10 erf.alpha_T=1.0")
 add_test_conservation(Conservation_ThetaDiffusion_Anelastic ScalarDiffusion_Reflux "RHO THETA"
-    OPTIONS "${_theta_cons_options} erf.anelastic_type=MidPoint")
+    OPTIONS "${_theta_cons_options} erf.timestepping_type=MidPoint")
 add_test_conservation(Conservation_ThetaDiffusion_AnelasticRK2 ScalarDiffusion_Reflux "RHO THETA"
-    OPTIONS "${_theta_cons_options} erf.anelastic_type=RK2")
+    OPTIONS "${_theta_cons_options} erf.timestepping_type=RK2")
 add_test_conservation(Conservation_ThetaDiffusion_AnelasticStretched ScalarDiffusion_Reflux "RHO THETA"
-    OPTIONS "${_theta_cons_options} erf.anelastic_type=RK2 erf.initial_dz=0.025")
+    OPTIONS "${_theta_cons_options} erf.timestepping_type=RK2 erf.initial_dz=0.025")
 add_test_conservation(Conservation_ThetaDiffusion_AnelasticHill ScalarDiffusion_Reflux "RHO THETA"
-    OPTIONS "${_theta_cons_options} erf.anelastic_type=RK2 erf.terrain_type=StaticFittedMesh prob.custom_terrain_type=WoA prob.dir=2 prob.hmax=0.25 prob.L=0.15 'amr.ref_ratio_vect=2 2 1'")
+    OPTIONS "${_theta_cons_options} erf.timestepping_type=RK2 erf.terrain_type=StaticFittedMesh prob.custom_terrain_type=WoA prob.dir=2 prob.hmax=0.25 prob.L=0.15 'amr.ref_ratio_vect=2 2 1'")
 add_test_conservation(Conservation_ThetaAdvection_AnelasticRK2 ScalarDiffusion_Reflux "RHO THETA"
-    OPTIONS "${_theta_cons_options} erf.anelastic_type=RK2 erf.molec_diff_type=None prob.U_0=10 prob.V_0=5")
+    OPTIONS "${_theta_cons_options} erf.timestepping_type=RK2 erf.molec_diff_type=None prob.U_0=10 prob.V_0=5")
 
 # Under two-way coupling with acoustic substepping the fine level takes the fluxes through its
 # coarse/fine faces from the coarse level's substeps (erf.cf_flux_history), so in a closed domain
@@ -3551,7 +3655,7 @@ add_test_rans(RANS_WallDist_RaisedBase   Neutral_ABL_Flat     inputs_neutral    
 # this mesh whatever erf.use_fft says, so the option is not given.
 if(ERF_ENABLE_FFT)
     add_test_rans(RANS_WallDist_RaisedBase_StretchedZSplit Neutral_ABL_Flat inputs_neutral 1 check_walldist.py
-        RUNTIME_OPTIONS "'geometry.prob_lo=0 0 300' erf.input_sounding_file=input_sounding_raised 'erf.plot_vars_1=density walldist z_phys KE' erf.initial_dz=4 amr.no_box_split_dir=-1 'amr.max_grid_size=8 8 16'")
+        RUNTIME_OPTIONS "'geometry.prob_lo=0 0 300' erf.input_sounding_file=input_sounding_raised 'erf.plot_vars_1=density walldist z_phys KE' erf.initial_dz=4 amr.no_box_split_dir=-1 'amr.max_grid_size=8 8 16' erf.timestepping_type=RK2")
 endif()
 
 # Runs a case twice, with OPTIONS_A and with OPTIONS_B on top of RUNTIME_OPTIONS,
@@ -3619,11 +3723,11 @@ endfunction(add_test_rans_pair)
 # time-discretisation difference. The command runs through sh, so not on Windows.
 if(NOT WIN32)
     add_test_rans_pair(RANS_Convective_ABL_Flat_Buoyancy_kEqn Convective_ABL_Flat inputs_convective 40 check_implicit_explicit_ke.py
-        RUNTIME_OPTIONS "erf.anelastic=0 erf.use_fft=false"
+        RUNTIME_OPTIONS "erf.compressibility_type=FullyCompressible erf.use_fft=false"
         OPTIONS_A "erf.vert_implicit=true" OPTIONS_B "erf.vert_implicit=false"
         CHECK_OPTIONS "--tol 1.0e-4")
     add_test_rans_pair(RANS_Convective_ABL_Flat_Buoyancy_Deardorff Convective_ABL_Flat inputs_convective 40 check_implicit_explicit_ke.py
-        RUNTIME_OPTIONS "erf.anelastic=0 erf.use_fft=false erf.rans_type=None erf.les_type=Deardorff erf.plot_vars_1=density theta KE Kmv Khv"
+        RUNTIME_OPTIONS "erf.compressibility_type=FullyCompressible erf.use_fft=false erf.rans_type=None erf.les_type=Deardorff erf.plot_vars_1=density theta KE Kmv Khv"
         OPTIONS_A "erf.vert_implicit=true" OPTIONS_B "erf.vert_implicit=false"
         CHECK_OPTIONS "--tol 3.0e-4")
 endif()
@@ -3854,12 +3958,73 @@ function(add_test_ibseb_two_stream_provider TEST_NAME)
         ATTACHED_FILES_ON_FAIL "${CURRENT_TEST_BINARY_DIR}/two_stream/simulation.log;${CURRENT_TEST_BINARY_DIR}/prescribed/simulation.log;${CURRENT_TEST_BINARY_DIR}/absorbing/simulation.log;${CURRENT_TEST_BINARY_DIR}/scattering/simulation.log;${CURRENT_TEST_BINARY_DIR}/night/simulation.log;${CURRENT_TEST_BINARY_DIR}/two_level_clear/simulation.log;${CURRENT_TEST_BINARY_DIR}/two_level_absorbing/simulation.log;${CURRENT_TEST_BINARY_DIR}/checker.log")
 endfunction(add_test_ibseb_two_stream_provider)
 
+# The two-stream columns and their ground balance seeing the buildings
+# (erf.ibseb.two_stream_buildings; Tests/RunIBSEBTwoStreamBuildings.cmake): the ground
+# shadow against the buildings' geometry (one level and two, the tower outside the refined
+# level shading it), the ground balance's shortwave sunlit, shaded and under the buildings
+# under clear, absorbing and scattering skies, the footprints held, no heating in solid
+# cells (on a refined patch whose rates are interpolated too), the input off, the ground
+# balance on its fixed shortwave (no shadow cast), a restart and the night. Then the
+# start-up checks: the input without the two-stream radiation, and with a land model.
+function(add_test_ibseb_two_stream_buildings TEST_NAME)
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=${NP}"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DCONFIG=$<CONFIG>"
+        "-DINPUT=${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.i"
+        "-DPROVIDER_FILES=${CMAKE_CURRENT_SOURCE_DIR}/test_files/IBSEB_TwoStreamProvider"
+        "-DTWO_LEVEL_FILES=${CMAKE_CURRENT_SOURCE_DIR}/test_files/IBSEB_RefinedLevels"
+        "-DPRECISION=${ERF_PRECISION}"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DPYTHON_EXE=${ERF_TEST_PYTHON}"
+        "-DCHECKER=${CMAKE_CURRENT_SOURCE_DIR}/check_ibseb_two_stream_buildings.py"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunIBSEBTwoStreamBuildings.cmake)
+    set_tests_properties(${TEST_NAME}
+        PROPERTIES
+        TIMEOUT 1200
+        PROCESSORS ${NP}
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "regression"
+        ATTACHED_FILES_ON_FAIL "${CURRENT_TEST_BINARY_DIR}/clear/simulation.log;${CURRENT_TEST_BINARY_DIR}/restart/simulation.log;${CURRENT_TEST_BINARY_DIR}/absorbing/simulation.log;${CURRENT_TEST_BINARY_DIR}/scattering/simulation.log;${CURRENT_TEST_BINARY_DIR}/off/simulation.log;${CURRENT_TEST_BINARY_DIR}/night/simulation.log;${CURRENT_TEST_BINARY_DIR}/two_level/simulation.log;${CURRENT_TEST_BINARY_DIR}/nested/simulation.log;${CURRENT_TEST_BINARY_DIR}/fixed_sw/simulation.log;${CURRENT_TEST_BINARY_DIR}/checker.log")
+endfunction(add_test_ibseb_two_stream_buildings)
+
 if(ERF_ENABLE_MPI AND NOT WIN32)
   if(NOT "${ERF_TEST_PYTHON}" STREQUAL "")
     add_test_ibseb_refined_levels(IBSEB_RefinedLevels)
     add_test_ibseb_two_stream_sun(IBSEB_TwoStreamSunRun IBSEB_TwoStreamSun)
     add_test_ibseb_two_stream_provider(IBSEB_TwoStreamProvider)
+    add_test_ibseb_two_stream_buildings(IBSEB_TwoStreamBuildings)
   endif()
+  # erf.ibseb.two_stream_buildings acts only on the two-stream radiation: given without a
+  # radiation model the run stops; with another model named it warns and carries on to the
+  # end of the run. With a land-surface model (SLM here) it warns that the model's own
+  # ground is neither covered nor shaded, and the run carries on; given with the balance
+  # off (erf.ibseb.enable = false) it warns that it is ignored.
+  add_test_abort(IBSEB_TwoStreamBuildingsWithoutTwoStream
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_files/IBSEB_Cube
+                 IBSEB_Cube.i
+                 "erf.ibseb.two_stream_buildings acts only on the two-stream radiation.*sets no erf.radiation_model"
+                 "erf.ibseb.two_stream_buildings=false")
+  add_test_abort(IBSEB_TwoStreamBuildingsOtherRadiation
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_files/IBSEB_Cube
+                 IBSEB_Cube.i
+                 "WARNING: erf.ibseb.two_stream_buildings acts only on the two-stream radiation.*so it is ignored.*AMReX .* finalized"
+                 "erf.radiation_model=None erf.ibseb.two_stream_buildings=true")
+  add_test_abort(IBSEB_TwoStreamBuildingsDisabled
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_files/IBSEB_Cube
+                 IBSEB_Cube.i
+                 "WARNING: erf.ibseb.two_stream_buildings is given but erf.ibseb.enable is off.*AMReX .* finalized"
+                 "erf.ibseb.enable=false erf.ibseb.two_stream_buildings=true")
+  add_test_abort(IBSEB_TwoStreamBuildingsLandModel
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_files/IBSEB_TwoStreamProvider
+                 IBSEB_TwoStreamProvider.i
+                 "WARNING: erf.ibseb.two_stream_buildings: the land-surface model keeps its own ground.*AMReX .* finalized"
+                 "erf.land_surface_model=SLM erf.moisture_model=Kessler slm.nsoil=4 slm.soil_dz=0.05 0.10 0.30 0.55 slm.landtype0=10 slm.LAI0=2.0 slm.clay0=13.0 slm.sand0=17.0 slm.sw0=0.60 0.65 0.70 0.80 slm.st0=300.0 299.8 299.5 299.0")
   add_test_abort(IBSEB_TwoStreamProviderWithoutTwoStream
                  ${CMAKE_CURRENT_SOURCE_DIR}/test_files/IBSEB_TwoStreamProvider
                  IBSEB_TwoStreamProvider.i
@@ -4137,6 +4302,35 @@ elseif(ERF_ENABLE_NETCDF)
   message(STATUS "Skipping EarthWinds_Lambert: ${_ew_wrf} not found")
 endif()
 
+# A small, generated three-level WRF case. The middle ERF patch starts six
+# level-1 cells inside d02, so placing d03 relative to that patch shifts its
+# global position. Check both the level-2 box and a coordinate-coded field,
+# then restart with per-level wrflow files to re-read the nest box and PSFC.
+if(ERF_ENABLE_NETCDF AND ERF_TEST_PYTHON)
+  execute_process(COMMAND "${ERF_TEST_PYTHON}" -c "import netCDF4, numpy"
+                  RESULT_VARIABLE _wrf_nested_python_status
+                  OUTPUT_QUIET ERROR_QUIET)
+  if(_wrf_nested_python_status EQUAL 0)
+    set(TEST_NAME WRFInput_CroppedParent)
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    add_test(NAME ${TEST_NAME} COMMAND "${CMAKE_COMMAND}"
+      "-DPYTHON=${ERF_TEST_PYTHON}"
+      "-DTEST_DIR=${CURRENT_TEST_BINARY_DIR}"
+      "-DRUN_DIR=${CURRENT_TEST_BINARY_DIR}"
+      "-DERF_EXECUTABLE=${TEST_EXE}"
+      "-DPLOTFILE_READER_DIR=${PROJECT_SOURCE_DIR}/Exec/Tools"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/RunWRFInputCroppedParent.cmake")
+    set_tests_properties(${TEST_NAME} PROPERTIES TIMEOUT 300 PROCESSORS 1
+      WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}"
+      LABELS "regression;wrfinput"
+      ATTACHED_FILES_ON_FAIL "${CURRENT_TEST_BINARY_DIR}/run.log;${CURRENT_TEST_BINARY_DIR}/run.err;${CURRENT_TEST_BINARY_DIR}/restart.log;${CURRENT_TEST_BINARY_DIR}/restart.err")
+    unset(TEST_NAME)
+  else()
+    message(STATUS "Skipping WRFInput_CroppedParent: Python netCDF4 and numpy are required")
+  endif()
+endif()
+
 #=============================================================================
 # Input sounding on refined levels (#4143): each level samples the sounding, and
 # the large-scale forcing profiles, at its own cell centres
@@ -4277,7 +4471,7 @@ add_test_station_series(StationSampling_ImmersedTerrain TerrainHill single
 # 20, on one level and on the deck's two. A restart rebuilt the blanking without
 # clearing the almost-fluid cells of the hill's tails (eb2.small_volfrac), so the
 # wall law acted there after the restart only: 0.2 m/s in u at step 20 on one level.
-# Both legs compare at zero tolerance. 
+# Both legs compare at zero tolerance.
 # The runner is a cmake -P script (MPI, not Windows).
 if(ERF_ENABLE_MPI AND NOT WIN32)
 add_test_restart_parity(ImmersedTerrain_Hill_Restart TerrainHill 7 20
@@ -4637,7 +4831,7 @@ endif()
 # test; the gtests cover the kernels there.
 if(ERF_ENABLE_FFT)
 add_test_terrain_stress_ridge(TerrainStress_Ridge_AnelasticMidPoint survive "plt01440"
-    OPTIONS "erf.anelastic=1 erf.use_fft=true erf.anelastic_type=MidPoint erf.fixed_dt=15 max_step=1440 erf.plot_int_1=1440"
+    OPTIONS "erf.compressibility_type=Anelastic erf.use_fft=true erf.timestepping_type=MidPoint erf.fixed_dt=15 max_step=1440 erf.plot_int_1=1440"
     WMAX 5
     RUN_TIMEOUT 1800)
 endif()
@@ -4690,7 +4884,7 @@ add_test_abort(TerrainStress_Abort_MetricExplicitStage ${_tsr_dir} Terrain_Stres
 if(ERF_ENABLE_FFT)
 add_test_abort(TerrainStress_Abort_MetricAnelasticMidPoint ${_tsr_dir} Terrain_Stress_Ridge.i
                "erf.vert_implicit_fac is not positive in stage 2 at level 0"
-               "erf.anelastic=1 erf.use_fft=true erf.anelastic_type=MidPoint erf.implicit_terrain_metric=true erf.vert_implicit_fac=1 1 1")
+               "erf.compressibility_type=Anelastic erf.use_fft=true erf.timestepping_type=MidPoint erf.implicit_terrain_metric=true erf.vert_implicit_fac=1 1 1")
 endif()
 endif()
 
@@ -4787,6 +4981,137 @@ add_test_abort(Fire_Abort_BuiltWithoutFire ${_fire_abort_dir} Terrain_Stress_Rid
                "erf.fire.enable = true but this executable was built without the fire coupling"
                "erf.fire.enable=true")
 endif()
+endif()
+
+# The structure coupling (erf.structures.model, Source/MovingBodies/Coupling) with the
+# example model directory (Tests/StructureModelExample) compiled in: one point pushes
+# on still air in a periodic box with 50 N along x. With no friction or gravity, the
+# volume integral of x_velocity at t = 4 s is F t / rho_0 = 200 m^4/s (rho_0 = 1, and
+# the density stays 1 to 6e-9 at these speeds), checked to 1e-5 relative because
+# fvolumesum prints 6 significant digits; the model's fields reach the
+# ERF plotfile; and a restart from the mid-run checkpoint reproduces the final
+# plotfile exactly, and the model's checkpointed impulse (50 N for 4 s = 200 N s) is the
+# same in both logs. Without a fire the model gets no fire view (StructureStep::fire is
+# nullptr), so it prints no fire line.
+set(_smx_src ${CMAKE_CURRENT_SOURCE_DIR}/StructureModelExample)
+get_filename_component(_smx_src_abs "${_smx_src}" ABSOLUTE)
+set(_smx_in_build FALSE)
+foreach(_d IN LISTS ERF_STRUCTURE_MODEL_DIRS)
+  get_filename_component(_d_abs "${_d}" ABSOLUTE)
+  if(_d_abs STREQUAL _smx_src_abs)
+    set(_smx_in_build TRUE)
+  endif()
+endforeach()
+# A refined level 1 with the model on level 0 (the box indices are level-1 cells of 12.5 m).
+# Where level 1 covers the point (100 m to 300 m) the averaging down would remove the force:
+# with the check disabled the momentum integral at t = 4 s is 41.8 m^4/s instead of 200, so
+# the run must stop. Where level 1 covers only the lowest 50 m, below the kernel's reach
+# (50 m to 350 m), it must run.
+set(_smx_finer "amr.max_level=1 structure.example.level=0 erf.refinement_indicators=box1 erf.box1.max_level=1")
+if(ERF_ENABLE_MPI AND NOT WIN32)   # the launchers below run through sh -c, as the fire tests do
+  if(ERF_ENABLE_MOVING_BODIES)
+    if(_smx_in_build)
+      set(_smx_mpi "${ERF_SH_MPI_LAUNCHER}${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}")
+      resolve_test_exe("" "erf_exec" _smx_exe)
+      if(ERF_ENABLE_FCOMPARE AND ERF_PRECISION STREQUAL "DOUBLE")
+        set(_smx_dir ${CMAKE_CURRENT_BINARY_DIR}/test_files/Structures_ExampleModel)
+        file(MAKE_DIRECTORY ${_smx_dir})
+        file(COPY ${_smx_src}/inputs_structure_example DESTINATION ${_smx_dir})
+        get_filename_component(_smx_tools "${FCOMPARE_EXE}" DIRECTORY)
+        get_filename_component(_smx_fcmp_name "${FCOMPARE_EXE}" NAME)
+        string(REPLACE "fcompare" "fvolumesum" _smx_fvs_name "${_smx_fcmp_name}")
+        set(_smx_fvs "${_smx_tools}/${_smx_fvs_name}")
+        add_test(NAME Structures_ExampleModel
+                 COMMAND sh -c "rm -rf plt0* chk0* rst && ${_smx_mpi} ${_smx_exe} inputs_structure_example amrex.call_addr2line=0 > straight.log 2>&1 && grep -q structure_example_fx plt00016/Header && ${_smx_fvs} -v x_velocity plt00016 > momentum.txt && awk 'BEGIN { ok = 0 } /integral of x_velocity/ { v = $NF; d = v - 200.0; if (d < 0) d = -d; print \"integral of x_velocity = \" v \", expected 200\"; ok = (d < 1.0e-5 * 200.0) } END { exit !ok }' momentum.txt && grep -q 't = 4 impulse_x = 200 ' straight.log && ! grep -q 'structure example fire' straight.log && mkdir rst && cd rst && ${_smx_mpi} ${_smx_exe} ../inputs_structure_example erf.restart=../chk00008 erf.check_int=-1 amrex.call_addr2line=0 > ../restart.log 2>&1 && cd .. && grep -q 't = 4 impulse_x = 200 ' restart.log && ${FCOMPARE_EXE} -r 0 --abs_tol 0 plt00016 rst/plt00016"
+                 WORKING_DIRECTORY ${_smx_dir})
+        set_tests_properties(Structures_ExampleModel PROPERTIES
+            LABELS "regression;structures" TIMEOUT 600 PROCESSORS 2
+            ATTACHED_FILES_ON_FAIL "${_smx_dir}/straight.log;${_smx_dir}/momentum.txt;${_smx_dir}/restart.log")
+      endif()
+      set(_smx_fe_dir ${CMAKE_CURRENT_BINARY_DIR}/test_files/Structures_ExampleModel_FinerLevelElsewhere)
+      file(MAKE_DIRECTORY ${_smx_fe_dir})
+      file(COPY ${_smx_src}/inputs_structure_example DESTINATION ${_smx_fe_dir})
+      add_test(NAME Structures_ExampleModel_FinerLevelElsewhere
+               COMMAND sh -c "${_smx_mpi} ${_smx_exe} inputs_structure_example max_step=2 erf.plot_int_1=-1 erf.check_int=-1 amrex.call_addr2line=0 ${_smx_finer} erf.box1.in_box_lo_indices=0 0 0 erf.box1.in_box_hi_indices=31 31 3 > run.log 2>&1 && grep -q 'structure example: t = 0.5 ' run.log"
+               WORKING_DIRECTORY ${_smx_fe_dir})
+      set_tests_properties(Structures_ExampleModel_FinerLevelElsewhere PROPERTIES
+          LABELS "regression;structures" TIMEOUT 600 PROCESSORS 2
+          ATTACHED_FILES_ON_FAIL "${_smx_fe_dir}/run.log")
+      add_test_abort(Structures_Abort_FinerLevelCovers ${_smx_src} inputs_structure_example
+                     "structure model .example. couples to level 0, but level 1 covers part of its support"
+                     "${_smx_finer} erf.box1.in_box_lo_indices=8 8 8 erf.box1.in_box_hi_indices=23 23 23")
+      add_test_abort(Structures_Abort_UnknownModel ${_smx_src} inputs_structure_example
+                     "erf.structures.model = .no_such_model. is not one of the structure models compiled in .*\"example\""
+                     "erf.structures.model=no_such_model")
+      add_test_abort(Structures_Abort_ExampleLevel ${_smx_src} inputs_structure_example
+                     "structure.example.level must be -1 .the finest level. or 0 to amr.max_level = 0, got 1"
+                     "structure.example.level=1")
+      # The fire view (StructureStep::fire), with the example fire engine compiled in too.
+      # Each run is the fire deck of Tests/FireEngineExample with the example model added.
+      # The engine burns a disk of radius 150 + 50 t m that releases 5e4 W/m2; a quarter of
+      # it is latent heat, which heat_release still counts. Each step the model prints the
+      # level and time of the fire's fields, the heat released and the area burned.
+      # check_fire_view.awk compares them with the disk to 3 %: fire cells of 10 m (5 m on
+      # level 1) resolve it to 1.4 % or better, and fields one fire step late or early miss
+      # by 11 % or more. Three layouts:
+      # - both on level 0: the fields belong to the fire step that ended at the model's step
+      #   time; a restart from the mid-run checkpoint must give the restart's time and the
+      #   heat of the step before it, which the example engine restores;
+      # - the fire on a level-1 patch, the model on level 0: as above;
+      # - the fire on level 0, the model on a level-1 patch: the fire is already at the end
+      #   of the coarse step;
+      # - the fire on a level-1 patch with three substeps of 0.1/3 s, the model on level 0:
+      #   the fire's time must equal the model's step time exactly, although three
+      #   substeps add up to 0.3 s where the coarse level has 0.30000000000000004 s.
+      if(ERF_ENABLE_FIRE AND _fex_in_build)
+        set(_smf_common "erf.structures.model=example structure.example.force=50 0 0 structure.example.epsilon=50 fire.example.r0=150 fire.example.ros=50 fire.example.heat_flux=5.0e4 fire.example.nsub=1 fire.example.latent_fraction=0.25 erf.fire.grid_ratio=10 amr.max_grid_size=10 10 60 max_step=4 erf.check_int=-1 erf.plot_int_1=-1 amrex.call_addr2line=0")
+        set(_smf_two "amr.max_level=1 erf.dt_ref_ratio=2 erf.refinement_indicators=box1 erf.box1.max_level=1")
+        set(_smf_awk "awk -v r0=150 -v ros=50 -v q0=5.0e4 -v tol=0.03")
+        set(_smf_names Structures_ExampleModel_FireView Structures_ExampleModel_FireViewFinerFire Structures_ExampleModel_FireViewFinerModel Structures_ExampleModel_FireViewExactTime)
+        set(_smf_args_0 "structure.example.position=300 300 300")
+        set(_smf_args_1 "${_smf_two} erf.box1.in_box_lo_indices_crse=5 5 0 erf.box1.in_box_hi_indices_crse=14 14 29 erf.fire.anchor_level=1 structure.example.level=0 structure.example.position=200 200 300")
+        set(_smf_args_2 "${_smf_two} erf.box1.in_box_lo_indices_crse=0 0 0 erf.box1.in_box_hi_indices_crse=9 9 29 erf.fire.anchor_level=0 structure.example.level=1 structure.example.position=300 300 300")
+        set(_smf_args_3 "amr.max_level=1 erf.dt_ref_ratio=3 erf.fixed_dt=0.1 erf.refinement_indicators=box1 erf.box1.max_level=1 erf.box1.in_box_lo_indices_crse=5 5 0 erf.box1.in_box_hi_indices_crse=14 14 29 erf.fire.anchor_level=1 structure.example.level=0 structure.example.position=200 200 300")
+        set(_smf_check_0 "-v lev=0 -v dtf=0.5 -v lead=0")
+        set(_smf_check_1 "-v lev=1 -v dtf=0.25 -v lead=0")
+        set(_smf_check_2 "-v lev=0 -v dtf=0.5 -v lead=0.5")
+        set(_smf_check_3 "-v lev=1 -v dtf=0.0333333333333333 -v lead=0")
+        set(_smf_nlines_0 4)
+        set(_smf_nlines_1 4)
+        set(_smf_nlines_2 8)
+        set(_smf_nlines_3 4)
+        # The restart leg of the first run: checkpoint at step 2 (t = 1 s), restart, two steps
+        set(_smf_more_0 "erf.check_int=2")
+        set(_smf_rst_0 " && rm -rf rst && mkdir rst && cd rst && cp ../input_sounding . && ${_smx_mpi} ${_smx_exe} ../inputs_fire_example ${_smf_common} ${_smf_args_0} erf.restart=../chk00002 > ../restart.log 2>&1 && cd .. && ${_smf_awk} ${_smf_check_0} -v nlines=2 -f ${_smx_src_abs}/check_fire_view.awk restart.log && grep -q 'structure example fire: t = 1 fire_lev = 0 fire_t = 1 ' restart.log")
+        set(_smf_more_1 "")
+        set(_smf_more_2 "")
+        set(_smf_rst_1 "")
+        set(_smf_rst_2 "")
+        set(_smf_more_3 "")
+        set(_smf_rst_3 "")
+        foreach(_i RANGE 3)
+          list(GET _smf_names ${_i} _smf_name)
+          set(_smf_dir ${CMAKE_CURRENT_BINARY_DIR}/test_files/${_smf_name})
+          file(MAKE_DIRECTORY ${_smf_dir})
+          file(COPY ${_fex_src}/inputs_fire_example ${_fex_src}/input_sounding DESTINATION ${_smf_dir})
+          add_test(NAME ${_smf_name}
+                   COMMAND sh -c "rm -rf chk0* && ${_smx_mpi} ${_smx_exe} inputs_fire_example ${_smf_common} ${_smf_args_${_i}} ${_smf_more_${_i}} > run.log 2>&1 && ${_smf_awk} ${_smf_check_${_i}} -v nlines=${_smf_nlines_${_i}} -f ${_smx_src_abs}/check_fire_view.awk run.log${_smf_rst_${_i}}"
+                   WORKING_DIRECTORY ${_smf_dir})
+          set_tests_properties(${_smf_name} PROPERTIES
+              LABELS "regression;structures;fire" TIMEOUT 600 PROCESSORS 2
+              ATTACHED_FILES_ON_FAIL "${_smf_dir}/run.log;${_smf_dir}/restart.log")
+        endforeach()
+      endif()
+    elseif(NOT ERF_STRUCTURE_MODEL_DIRS)
+      add_test_abort(Structures_Abort_NoModelBuiltIn ${_smx_src} inputs_structure_example
+                     "erf.structures.model = .example. is not one of the structure models compiled in .none"
+                     "")
+    endif()
+  else()
+    add_test_abort(Structures_Abort_NoCoupling ${_smx_src} inputs_structure_example
+                   "erf.structures.model needs ERF built with the structure coupling"
+                   "")
+  endif()
 endif()
 
 #=============================================================================
@@ -4893,9 +5218,9 @@ if(ERF_ENABLE_MPI AND NOT WIN32)
     # equation solved is A phi = rhs / (m_x m_y).  Without that division every solve left
     # 1 - m_x m_y = 75 % of the divergence (1.17e-2 of 1.56e-2 on level 0)
     add_test_terrain_poisson_divergence(TerrainPoisson_MapFactors TerrainPoisson_Hill 1
-        COMMON_OPTIONS "erf.test_mapfactor=true")
+        COMMON_OPTIONS "erf.test_mapfactor=true erf.timestepping_type=RK2")
     add_test_terrain_poisson_divergence(TerrainPoisson_MapFactors_Walls TerrainPoisson_Hill 0
-        COMMON_OPTIONS "${_tp_walls} erf.test_mapfactor=true")
+        COMMON_OPTIONS "${_tp_walls} erf.test_mapfactor=true erf.timestepping_type=RK2")
     # The answer on two levels must not depend on the decomposition (one box on one rank
     # against level-1 boxes split in x and y on NP ranks; they agree to 1e-14) or on a
     # restart, which re-makes the solve from the checkpoint
@@ -4984,7 +5309,7 @@ if(ERF_ENABLE_MPI AND NOT WIN32)
     # Map factors other than one (erf.test_mapfactor) with MLMG: in every MPI build, so the
     # map-factor scaling of the projection runs in CI
     add_test_terrain_poisson_divergence(TerrainPoisson_MapFactors_mlmg TerrainPoisson_Hill 1
-        COMMON_OPTIONS "erf.test_mapfactor=true ${_tp_mg_tol} erf.terrain_poisson_solver=mlmg")
+        COMMON_OPTIONS "erf.test_mapfactor=true ${_tp_mg_tol} erf.terrain_poisson_solver=mlmg erf.timestepping_type=RK2")
     # An Outflow face (a Dirichlet face of the solve) on the walled hill: the problem is not
     # singular, and the solve converges as at the walls (at most 5e-9 left at the default
     # tolerance)
@@ -5247,7 +5572,7 @@ if(NOT WIN32 AND ERF_TEST_PYTHON AND ERF_PRECISION STREQUAL "DOUBLE")
       CHECK check_uniform_scalar.py PLOTFILES ${_hill_tol})
   # Boxes split in z: the lowest and highest w-face of a box read the horizontal momenta from ghost faces
   add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Hill_SplitZ inputs_hill 30
-      RUNTIME_OPTIONS "amr.no_box_split_dir=-1 amr.max_grid_size_x=16 amr.max_grid_size_y=16 amr.max_grid_size_z=6"
+      RUNTIME_OPTIONS "amr.no_box_split_dir=-1 amr.max_grid_size_x=16 amr.max_grid_size_y=16 amr.max_grid_size_z=6 erf.timestepping_type=RK2"
       CHECK check_uniform_scalar.py PLOTFILES ${_hill_tol} --require-z-split)
   # Map factors over terrain: the vertical flux carries 1 / (mf_mx mf_my) only where Omega is nonzero
   add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Hill_MapFactor inputs_hill 30
@@ -5297,24 +5622,24 @@ if(NOT WIN32 AND ERF_TEST_PYTHON AND ERF_PRECISION STREQUAL "DOUBLE")
       CHECK check_uniform_scalar.py PLOTFILES ${_hill_amr_tol} --require-level)
   # The other anelastic integrator (the default is RK2)
   add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Hill_MidPoint inputs_hill 30
-      RUNTIME_OPTIONS "erf.anelastic_type=MidPoint"
+      RUNTIME_OPTIONS "erf.timestepping_type=MidPoint"
       CHECK check_uniform_scalar.py PLOTFILES ${_hill_tol})
   # A wind that varies in time, for both integrators: the error is second order in dt
   # (measured 0.072 m at dt = 0.4 s; with the momenta of the end of each stage it was 3.4 m)
   add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Inertial_RK2 inputs_inertial 40
-      RUNTIME_OPTIONS "erf.anelastic_type=RK2"
+      RUNTIME_OPTIONS "erf.timestepping_type=RK2"
       CHECK check_inertial_drift.py PLOTFILES)
   add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Inertial_MidPoint inputs_inertial 40
-      RUNTIME_OPTIONS "erf.anelastic_type=MidPoint"
+      RUNTIME_OPTIONS "erf.timestepping_type=MidPoint"
       CHECK check_inertial_drift.py PLOTFILES)
   # The same with an EB plane that cuts layer k = 1, checked in the cut layer and a full one
   # (measured 0.074 m at dt = 0.4 s for both; RK2 was 3.4 m when the EB redistribution step
   # replaced the Heun average of the second stage with old + dt R2)
   add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Inertial_EB_RK2 inputs_inertial_eb 40
-      RUNTIME_OPTIONS "erf.anelastic_type=RK2"
+      RUNTIME_OPTIONS "erf.timestepping_type=RK2"
       CHECK check_inertial_drift.py PLOTFILES --layers 1 2)
   add_test_anelastic_scalar_advection(AnelasticScalarAdvection_Inertial_EB_MidPoint inputs_inertial_eb 40
-      RUNTIME_OPTIONS "erf.anelastic_type=MidPoint"
+      RUNTIME_OPTIONS "erf.timestepping_type=MidPoint"
       CHECK check_inertial_drift.py PLOTFILES --layers 1 2)
   # The time step from erf.cfl with map factors
   add_test_anelastic_scalar_advection(AnelasticScalarAdvection_CFL_MapFactor inputs_mapfac_anelastic 5
@@ -5330,6 +5655,54 @@ if(NOT WIN32 AND ERF_TEST_PYTHON AND ERF_PRECISION STREQUAL "DOUBLE")
         CHECK check_uniform_scalar.py PLOTFILES ${_hill_tol})
   endif()
 endif()
+
+#=============================================================================
+# erf.sample_line is a LineSampler of full-depth columns on level 0: its logs must agree
+# with erf.do_line_sampling text output of the same columns (test_files/SampleLine)
+#=============================================================================
+if(NOT WIN32 AND ERF_TEST_PYTHON)
+  function(add_test_sample_line TEST_NAME)
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    set(_log ${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.log)
+    # Remove the logs and text files of an earlier pass: both are appended to
+    add_test(${TEST_NAME} sh -c
+        "rm -f col_a col_b dls_a.* dls_b.* && ( ${MPI_COMMANDS} ${TEST_EXE} ${TEST_NAME}.i > ${_log} 2>&1 || ( tail -n 40 ${_log} && false ) ) && ${ERF_TEST_PYTHON} check_sample_line.py col_a:dls_a col_b:dls_b")
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        TIMEOUT 600 PROCESSORS ${NP} WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "regression" ATTACHED_FILES_ON_FAIL "${_log}")
+  endfunction(add_test_sample_line)
+  add_test_sample_line(SampleLine)
+
+  # Vertical lines given by real coordinates over a hill, by height above sea level and above
+  # the ground: each must sample the cells that hold its heights, and write their heights
+  function(add_test_line_sampling_terrain TEST_NAME)
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    set(_log ${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.log)
+    set(_lines "top:16:16:0:300 far:0:0:0:300 top_high:16:16:150:420 across:x:16:150")
+    set(_agl "erf.sample_line_z_agl=1 erf.plot_file_1=agl_plt 'erf.sample_line_name=agl_top agl_far agl_top_high agl_across'")
+    set(_check "ERF_TOOLS=${PROJECT_SOURCE_DIR}/Exec/Tools ${ERF_TEST_PYTHON} check_line_heights.py")
+    add_test(${TEST_NAME} sh -c
+        "rm -rf plt0* agl_plt0* top.* far.* top_high.* across.* agl_top.* agl_far.* agl_top_high.* agl_across.* && ( ${MPI_COMMANDS} ${TEST_EXE} ${TEST_NAME}.i > ${_log} 2>&1 || ( tail -n 40 ${_log} && false ) ) && ${_check} plt00001 0 '' ${_lines} && ( ${MPI_COMMANDS} ${TEST_EXE} ${TEST_NAME}.i ${_agl} > ${_log}.agl 2>&1 || ( tail -n 40 ${_log}.agl && false ) ) && ${_check} agl_plt00001 1 agl_ ${_lines}")
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        TIMEOUT 600 PROCESSORS ${NP} WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "regression" ATTACHED_FILES_ON_FAIL "${_log}")
+  endfunction(add_test_line_sampling_terrain)
+  add_test_line_sampling_terrain(LineSamplingTerrain)
+endif()
+
+# Line sampling: a line must run along sample_line_dir, and a line placed by height is not
+# supported with moving terrain (lines given by indices are)
+add_test_abort(LineSampling_Abort_NotAxisAligned ${CMAKE_CURRENT_SOURCE_DIR}/test_files/SampleLine SampleLine.i
+               "Line 0 of erf.sample_line_lo/hi is not along erf.sample_line_dir"
+               "erf.sample_line_hi=4 4 15 12 10 15")
+add_test_abort(LineSampling_Abort_NotAxisAlignedReal ${CMAKE_CURRENT_SOURCE_DIR}/test_files/LineSamplingTerrain LineSamplingTerrain.i
+               "Line 1 of erf.sample_line_lo/hi_real is not along erf.sample_line_dir"
+               "erf.sample_line_hi_real=40. 40. 300. -1240. -1200. 300. 40. 40. 420. 1240. 40. 150.")
+add_test_abort(LineSampling_Abort_MovingTerrain ${CMAKE_CURRENT_SOURCE_DIR}/test_files/MovingTerrain_nosub MovingTerrain_nosub.i
+               "is not supported with erf.terrain_type = MovingFittedMesh"
+               "erf.do_line_sampling=1 erf.line_sampling_interval=1 erf.sample_line_lo_real=50. 20. 0. erf.sample_line_hi_real=50. 20. 100. erf.sample_line_dir=2")
 
 #=============================================================================
 # Performance tests

@@ -663,10 +663,16 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
     // reports by the number of completed steps, the plotfiles' numbering.
     ibseb_report(nstep + 1, time);
 
-    if (cloud_chamber_budget) {
+    // The cloud-chamber budget observes the coarse state before the AMR sync,
+    // except under SBM, where it follows the accepted spectral synchronization.
+    const bool sbm_moisture = solverChoice.moisture_type == MoistureType::SBM;
+    auto report_cloud_chamber_budget = [&] () {
         cloud_chamber_budget->report(
             nstep + 1, time, vars_new[0][Vars::cons], geom[0],
             solverChoice.moisture_type == MoistureType::SatAdj);
+    };
+    if (cloud_chamber_budget && !sbm_moisture) {
+        report_cloud_chamber_budget();
     }
 
 #ifdef ERF_USE_PARTICLES
@@ -708,7 +714,7 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
             // This call refluxes the cell-centered variables from the lev/lev+1 interface onto lev:
             // all "slow" variables, plus (rho theta) on anelastic levels. Density is never refluxed
             // (it is fixed on anelastic levels), nor is (rho theta) on compressible levels.
-            int reflux_comp = (solverChoice.anelastic[lev]) ? RhoTheta_comp : RhoTheta_comp + 1;
+            int reflux_comp = (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible) ? RhoTheta_comp : RhoTheta_comp + 1;
             getAdvFluxReg(lev+1)->Reflux(vars_new[lev][Vars::cons], reflux_comp, reflux_comp, ncomp-reflux_comp);
 
             // Here we multiply (rho S) by m^2 after refluxing
@@ -735,7 +741,7 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
             // values of coarse cells underneath fine grids with the assumption they'll
             // be over-written by averaging down
             int src_comp;
-            if (solverChoice.anelastic[lev]) {
+            if (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible) {
                 src_comp = 1;
             } else {
                 src_comp = 0;
@@ -785,6 +791,14 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
                 if (q_crse && q_fine) { average_down(*q_fine, *q_crse, 0, 1, rr2d); }
             }
         }
+
+        if (sbm_state_manager && sbm_moisture) {
+            sbm_synchronize_levels(nstep);
+        }
+    }
+
+    if (cloud_chamber_budget && sbm_moisture) {
+        report_cloud_chamber_budget();
     }
 
     if (is_it_time_for_action(nstep, time, dt_lev0, sum_interval, sum_per)) {
@@ -830,28 +844,7 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
 
     // Write plane/line sampler data
     if (line_sampler && is_it_time_for_action(nstep+1, time, dt_lev0, line_sampling_interval, line_sampling_per)) {
-        const int nlev = static_cast<int>(vars_new.size());
-        Vector<MultiFab*> tau13_lev(nlev, nullptr);
-        Vector<MultiFab*> tau23_lev(nlev, nullptr);
-        Vector<MultiFab*> hfx3_lev(nlev, nullptr);
-        Vector<int> prognostic_tke_available(nlev, 0);
-        for (int lev = 0; lev < nlev; ++lev) {
-            prognostic_tke_available[lev] = solverChoice.turbChoice[lev].use_tke ? 1 : 0;
-            if (lev < static_cast<int>(Tau.size())) {
-                if (Tau[lev].size() > TauType::tau13) {
-                    tau13_lev[lev] = Tau[lev][TauType::tau13].get();
-                }
-                if (Tau[lev].size() > TauType::tau23) {
-                    tau23_lev[lev] = Tau[lev][TauType::tau23].get();
-                }
-            }
-            if (lev < static_cast<int>(SFS_hfx3_lev.size())) {
-                hfx3_lev[lev] = SFS_hfx3_lev[lev].get();
-            }
-        }
-        line_sampler->get_sample_data(geom, vars_new, tau13_lev, tau23_lev, hfx3_lev,
-                                      prognostic_tke_available);
-        line_sampler->write_sample_data(t_new, istep, ref_ratio, geom);
+        run_line_sampler(*line_sampler);
     }
     if (plane_sampler && is_it_time_for_action(nstep+1, time, dt_lev0, plane_sampling_interval, plane_sampling_per)) {
         plane_sampler->get_sample_data(geom, vars_new);
@@ -1336,7 +1329,7 @@ ERF::InitData_post ()
             // Need itime=0 for vertical interpolation
             if (n_time_old > 0) {
                 int itime = 0;
-                bool is_anelastic = (solverChoice.anelastic[0] == 1);
+                bool is_anelastic = (solverChoice.compressibility_type[0] != CompressibilityType::FullyCompressible);
                 read_and_convert_from_wrfbdy(itime,nc_bdy_file,
                                              bdy_data_xlo,bdy_data_xhi,bdy_data_ylo,bdy_data_yhi,
                                              wrf_MUB, wrf_C1H, wrf_C2H, wrf_RDNW, wrf_PHB, z_phys_cc[0], z_phys_nd[0],
@@ -1355,7 +1348,7 @@ ERF::InitData_post ()
 
             for (int itime = n_time_old; itime < ntimes; itime++)
             {
-                bool is_anelastic = (solverChoice.anelastic[0] == 1);
+                bool is_anelastic = (solverChoice.compressibility_type[0] != CompressibilityType::FullyCompressible);
                 read_and_convert_from_wrfbdy(itime,nc_bdy_file,
                                              bdy_data_xlo,bdy_data_xhi,bdy_data_ylo,bdy_data_yhi,
                                              wrf_MUB, wrf_C1H, wrf_C2H, wrf_RDNW, wrf_PHB, z_phys_cc[0], z_phys_nd[0],
@@ -1426,7 +1419,7 @@ ERF::InitData_post ()
 #ifdef ERF_USE_FFT
         for (int lev = 0; lev <= finest_level; lev++) {
             // rebuild fft solvers here in case mesh type was changed when reading the checkpoint file
-            if ( ( (solverChoice.anelastic[lev] == 1)               || (solverChoice.project_initial_velocity[lev] == 1) ) &&
+            if ( ( (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible)               || (solverChoice.project_initial_velocity[lev] == 1) ) &&
                  ( (solverChoice.mesh_type == MeshType::ConstantDz) || (solverChoice.mesh_type == MeshType::StretchedDz) ) ) {
                 build_fft_solvers(lev);
             }
@@ -2239,6 +2232,8 @@ ERF::InitData_post ()
     if (m_fire_coupler) {
         const int fire_lev = fire_anchor_level(m_fire_coupler->params().anchor_level, finest_level);
         m_fire_coupler->initialize(*this, fire_lev, m_SurfaceLayer[Orientation::zlo()].get(), z_phys_nd[fire_lev].get());
+        // The fields' time: the start, or the time of the checkpoint on a restart
+        m_fire_coupler->set_fields_time(t_new[fire_lev]);
         // An engine that takes the rain per column needs the microphysics
         // accumulators of the fire grid's level, which exist now that every
         // level is built.
@@ -2268,13 +2263,13 @@ ERF::InitData_post ()
         // before ownership is established and any level starts phase relaxation.
         if (lagrangian) {
             for (int lev = 0; lev <= finest_level; ++lev) {
-                const amrex::MultiFab* base = solverChoice.anelastic[lev] ? &base_state[lev] : nullptr;
+                const amrex::MultiFab* base = solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible ? &base_state[lev] : nullptr;
                 micro->Update_Micro_Vars_Lev(lev, vars_new[lev][Vars::cons], base);
             }
         }
         for (int lev = 0; lev <= finest_level; ++lev) {
             if (!lagrangian) {
-                const amrex::MultiFab* base = solverChoice.anelastic[lev] ? &base_state[lev] : nullptr;
+                const amrex::MultiFab* base = solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible ? &base_state[lev] : nullptr;
                 micro->Update_Micro_Vars_Lev(lev, vars_new[lev][Vars::cons], base);
             }
             micro->FinishInit(lev, vars_new[lev][Vars::cons], z_phys_nd);
@@ -2396,6 +2391,12 @@ ERF::InitData_post ()
     const std::string& pv3d_2 = "plot_vars_2"  ; appendPlotVariables(pv3d_2,plot3d_var_names_2);
     const std::string& pv2d_1 = "plot2d_vars_1"; appendPlotVariables(pv2d_1,plot2d_var_names_1);
     const std::string& pv2d_2 = "plot2d_vars_2"; appendPlotVariables(pv2d_2,plot2d_var_names_2);
+
+#ifdef ERF_USE_MOVING_BODIES
+    // The structure model starts once the mesh and the initial (or restart) state
+    // exist, before the step-0 outputs
+    if (m_structure_model) { initialize_structure_model(); }
+#endif
 
     if ( (restart_chkfile.empty()) ||
          (!restart_chkfile.empty() && plot_file_on_restart) )
@@ -2554,6 +2555,7 @@ ERF::InitData_post ()
         int lev = 0;
 
         int num_samplelines = 0;
+        Vector<IntVect> sampleline;
         if (has_sample_line) {
             num_samplelines = pp.countval("sample_line") / AMREX_SPACEDIM;
             if (num_samplelines > 0) {
@@ -2584,36 +2586,23 @@ ERF::InitData_post ()
                 const auto* prob_hi = geom[lev].ProbHi();
                 const auto* dx = geom[lev].CellSize();
 
-                // Only on a ConstantDz mesh are prob_lo[2], prob_hi[2] and dx[2] physical heights;
-                // otherwise the levels in zlevels_stag are
-                const bool use_zlevels = (SolverChoice::mesh_type != MeshType::ConstantDz);
-                const Real zlo = use_zlevels ? zlevels_stag[lev].front() : prob_lo[2];
-                const Real zhi = use_zlevels ? zlevels_stag[lev].back()  : prob_hi[2];
-
+                // Each line is the full-depth column through (x,y), so z is not used
                 for (int i = 0; i < num_samplelines; i++) {
                     Real xloc = location[AMREX_SPACEDIM*i+0];
                     Real yloc = location[AMREX_SPACEDIM*i+1];
-                    Real zloc = location[AMREX_SPACEDIM*i+2];
 
                     if (xloc < prob_lo[0] || xloc > prob_hi[0] ||
-                        yloc < prob_lo[1] || yloc > prob_hi[1] ||
-                        zloc < zlo        || zloc > zhi) {
-                        Abort("erf.sample_line_real must lie within the level-0 domain");
+                        yloc < prob_lo[1] || yloc > prob_hi[1]) {
+                        Abort("erf.sample_line_real must lie within the level-0 domain in x and y");
                     }
 
                     int i_cell = domain.smallEnd(0) + static_cast<int>(std::floor((xloc - prob_lo[0]) / dx[0]));
                     int j_cell = domain.smallEnd(1) + static_cast<int>(std::floor((yloc - prob_lo[1]) / dx[1]));
-                    int k_cell = (use_zlevels)
-                        ? domain.smallEnd(2) + static_cast<int>(std::upper_bound(zlevels_stag[lev].begin(),
-                                                                                 zlevels_stag[lev].end(), zloc)
-                                                                - zlevels_stag[lev].begin()) - 1
-                        : domain.smallEnd(2) + static_cast<int>(std::floor((zloc - prob_lo[2]) / dx[2]));
 
                     i_cell = std::min(i_cell, domain.bigEnd(0));
                     j_cell = std::min(j_cell, domain.bigEnd(1));
-                    k_cell = std::min(k_cell, domain.bigEnd(2));
 
-                    sampleline[i] = IntVect(i_cell, j_cell, k_cell);
+                    sampleline[i] = IntVect(i_cell, j_cell, domain.smallEnd(2));
                 }
             }
         }
@@ -2621,13 +2610,12 @@ ERF::InitData_post ()
         int num_samplelinelogs = pp.countval("sample_line_log");
         AMREX_ALWAYS_ASSERT(num_samplelinelogs == num_samplelines);
         if (num_samplelinelogs > 0) {
-            samplelinelog.resize(num_samplelinelogs);
-            samplelinelogname.resize(num_samplelinelogs);
+            Vector<std::string> samplelinelogname(num_samplelinelogs);
             pp.queryarr("sample_line_log",samplelinelogname,0,num_samplelinelogs);
 
-            for (int i = 0; i < num_samplelinelogs; i++) {
-                setRecordSampleLineInfo(i,samplelinelogname[i]);
-            }
+            // Each line is the full-depth column through its cell on level 0
+            sample_line_sampler = std::make_unique<LineSampler>(sampleline, samplelinelogname,
+                                                                geom[lev].Domain());
         }
 
     }
@@ -2646,7 +2634,8 @@ ERF::InitData_post ()
             Abort("Need to specify line_sampling_interval or line_sampling_per");
         }
         line_sampler = std::make_unique<LineSampler>();
-        line_sampler->write_coords(z_phys_cc, geom);
+        line_sampler->write_coords(z_phys_cc, z_phys_nd, geom,
+                                   line_sampler->needs_ground() ? &station_ground(0) : nullptr);
     }
     if (do_plane) {
         if (plane_sampling_interval < 0 && plane_sampling_per < 0) {
@@ -2754,6 +2743,10 @@ ERF::InitData_post ()
             WriteEBSurface(grids[finest_level],dmap[finest_level],Geom(finest_level),&EBFactory(finest_level));
         }
     }
+
+#ifdef ERF_SBM_AMR_QUALIFICATION
+    sbm_qualification_record_initial_inventory();
+#endif
 }
 
 //
@@ -3408,8 +3401,12 @@ ERF::initializeFire (const int& /*a_nlevsmax*/ /*!< number of AMR levels */)
                                                                   "erf.add_custom_moisture_forcing");
         // immersed forcing meets the fire tendency only on the slow step; on the
         // acoustic substeps (erf.immersed_forcing_substep, the compressible
-        // default) the two modes are identical
-        const bool if_slow = !solverChoice.immersed_forcing_substep;
+        // default) the two modes are identical.  The fire level is not known
+        // yet, so any level that applies it on the slow step counts.
+        bool if_slow = false;
+        for (int lev = 0; lev <= max_level; ++lev) {
+            if (!solverChoice.immersed_forcing_fast(lev)) { if_slow = true; }
+        }
         add(if_slow && solverChoice.terrain_type == TerrainType::ImmersedForcing,
             "slow-step immersed-forcing terrain");
         add(if_slow && solverChoice.buildings_type == BuildingsType::ImmersedForcing,
@@ -3541,7 +3538,7 @@ ERF::init_only (int lev, double elapsed_time)
             AMREX_ALWAYS_ASSERT_WITH_MESSAGE(solverChoice.use_gravity,
                 "Gravity should be on to be consistent with sounding initialization.");
         } else { // SoundingType::ConstantDensity
-            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!solverChoice.use_gravity || (solverChoice.anelastic[lev] == 1),
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!solverChoice.use_gravity || (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible),
                 "Constant density probably doesn't make sense for compressible flow with gravity");
             initHSE();
         }
@@ -3757,11 +3754,9 @@ ERF::ReadParameters ()
         pp.queryAdd("dt_max_initial", dt_max_initial);
         pp.queryAdd("dt_max", dt_max);
 
-        // Explicit eddy-diffusion time-step check
-        const bool diffusive_cfl_given = pp.contains("diffusive_cfl");
         pp.queryAdd("diffusive_dt_check", diffusive_dt_check);
         pp.queryAdd("diffusive_dt_limit", diffusive_dt_limit);
-        pp.queryAdd("diffusive_cfl", diffusive_cfl);
+        const bool diffusive_cfl_given = pp.query("diffusive_cfl", diffusive_cfl);
         if (!(diffusive_cfl > zero && diffusive_cfl <= one)) {
             Abort("erf.diffusive_cfl must be in (0, 1]");
         }
@@ -4154,10 +4149,10 @@ ERF::ReadParameters ()
     // a face normal to z.  Refuse to run with any other value while a level substeps
     // implicitly.
     for (int lev = 0; lev <= max_level; lev++) {
-        if ( (solverChoice.substepping_type[lev] == SubsteppingType::Implicit) &&
+        if ( (solverChoice.timestepping_type[lev] == TimesteppingType::RK3_ImplicitSubstep) &&
              (no_box_split_dir != 2) )
         {
-            Abort("erf.substepping_type = Implicit at level " + std::to_string(lev) +
+            Abort("erf.timestepping_type = RK3_ImplicitSubstep at level " + std::to_string(lev) +
                   " requires amr.no_box_split_dir = 2 (the ERF default), so that no two grids "
                   "share a face normal to z: the implicit substep solve inverts one tridiagonal "
                   "system per column, and a column chopped at such a seam would instead be "
@@ -4165,7 +4160,7 @@ ERF::ReadParameters ()
                   "(Boxes stacked over the same column are fine as long as they do not touch.)  "
                   "Either remove amr.no_box_split_dir = " +
                   std::to_string(no_box_split_dir) + " from the inputs file, or set "
-                  "erf.substepping_type = None.");
+                  "erf.timestepping_type = RK3_NoSubstepping.");
         }
     }
 
@@ -4534,7 +4529,7 @@ ERF::ParameterSanityChecks ()
         if (nc_bdy_file.empty()) {
             Abort("erf.use_wrf_bdy_density requires nc_bdy_file");
         }
-        if (!solverChoice.anelastic.empty() && solverChoice.anelastic[0] != 0) {
+        if (!solverChoice.compressibility_type.empty() && solverChoice.compressibility_type[0] != CompressibilityType::FullyCompressible) {
             Abort("erf.use_wrf_bdy_density is not supported for anelastic simulations");
         }
         if (input_bndry_planes) {
@@ -4594,7 +4589,7 @@ ERF::ParameterSanityChecks ()
     for (int lev = 0; lev <= max_level; lev++)
     {
         // We ignore fixed_fast_dt if not substepping
-        if (solverChoice.substepping_type[lev] == SubsteppingType::None) {
+        if (solverChoice.timestepping_type[lev] != TimesteppingType::RK3_ImplicitSubstep) {
             fixed_fast_dt[lev] = -one;
         }
 
@@ -4642,7 +4637,7 @@ ERF::MakeHorizontalAverages ()
     auto domain = geom[0].Domain();
 
     bool use_moisture = (solverChoice.moisture_type != MoistureType::None);
-    bool is_anelastic = (solverChoice.anelastic[lev] == 1);
+    bool is_anelastic = (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible);
 
     for (MFIter mfi(mf); mfi.isValid(); ++mfi) {
         const Box& bx = mfi.validbox();

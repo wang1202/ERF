@@ -17,6 +17,7 @@
 #include "ERF_ProbCommon.H"
 #include "ERF_SBMStateManager.H"
 #include "ERF_SBMTransport.H"
+#include "ERF_SBMAMRFluxRegister.H"
 
 using namespace amrex;
 
@@ -138,7 +139,9 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
         // amrex::Print() <<" SIMPLIFIED BA FROM SCRATCH AT LEVEL " << lev << " " << ba.simplified_list() << std::endl;
     }
 
-    subdomains.resize(lev+1);
+    // Grow only: the second MakeNewGrids pass makes this level again while the finer levels exist,
+    // and resizing to lev+1 would drop their subdomains (erf-model/ERF#4988)
+    if (static_cast<int>(subdomains.size()) < lev+1) { subdomains.resize(lev+1); }
     //
     // Create subdomains at each level within the domain such that
     // 1) all boxes in a given subdomain are "connected"
@@ -175,6 +178,17 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
     // *******************************************************************************************
     init_stuff(lev, ba, dm, lev_new, lev_old, base_state[lev], z_phys_nd[lev]);
 
+    // init_stuff rebuilds the flux register on the lev-1 / lev interface, but the one on the
+    // lev / lev+1 interface also holds this level's grids.  AmrMesh::MakeNewGrids (AMReX) builds
+    // the levels one at a time and then, with iterate_on_new_grids, regenerates them all from
+    // level 0 once the finest level exists; an intermediate level whose grids changed in that pass
+    // comes through here a second time with the finer level already in place.  Rebuild that
+    // register as RemakeLevel does, or it keeps the grids of the first pass and the first
+    // YAFluxRegister::CrseAdd indexes it with this level's new boxes (erf-model/ERF#4988).
+    if (lev < finest_level && !grids[lev+1].empty()) {
+        make_flux_register(lev+1);
+    }
+
     // init_stuff leaves map factors of 1.  A refined level with no init file of its own takes them
     // from the coarser level; do that now, before the initial data, the terrain metrics and the
     // initial projection use them (Interp2DArrays, called only after every level has been made,
@@ -195,8 +209,13 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
             sbm_state_manager->new_state_for_initialization(lev).setVal(
                 solverChoice.sbm_fixture_initial_state[static_cast<std::size_t>(comp)], comp, 1, 0);
         }
+#ifdef ERF_SBM_AMR_QUALIFICATION
+        sbm_qualification_apply_initial_profile(lev);
+#endif
         AMREX_ALWAYS_ASSERT(sbm_transport != nullptr);
         sbm_transport->define(lev, ba, dm);
+        bind_sbm_amr_flux_registers(lev);
+        if (lev > 0) { bind_sbm_amr_flux_registers(lev - 1); }
     }
 
     // define_level (inside init_stuff) filled the two-stream SEB state with the scalar
@@ -443,6 +462,20 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
            Define_ERFFillPatchers(lev);
     }
 
+    // A level made again by the second MakeNewGrids pass (see the flux register above) has the
+    // finer level in place already.  That pass then tags the levels again from the finest down
+    // (ErrorEst), and tagging level lev+1 fills its ghost cells from this level before tagging this
+    // level has filled ours; a level made in the first pass was always tagged, and so filled, before
+    // its finer level was made.  Fill this level's ghost cells now, as ErrorEst does; otherwise level
+    // lev+1 takes zero density into its ghost cells, and the initial average-down and projection
+    // read it (erf-model/ERF#4988).
+    if (restart_chkfile.empty() && lev > 0 && lev < finest_level && !grids[lev+1].empty()) {
+        FillPatchFineLevel(lev, time, {&lev_new[Vars::cons], &lev_new[Vars::xvel],
+                                       &lev_new[Vars::yvel], &lev_new[Vars::zvel]},
+                           {&lev_new[Vars::cons], &rU_new[lev], &rV_new[lev], &rW_new[lev]},
+                           false, true);
+    }
+
 #ifdef ERF_USE_PARTICLES
     if (restart_chkfile.empty()) {
         if (lev == 0) {
@@ -523,8 +556,6 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
 {
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!auxiliary_inert_tracer,
         "M2 auxiliary inert tracer fixture does not support coarse-to-fine initialization");
-    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!sbm_state_manager,
-        "SBM M3 does not support coarse-to-fine spectral initialization");
     //
     // Note that "time" here is elapsed time
     //
@@ -888,7 +919,7 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
     // (compressible lev-1, anelastic lev) where there is no coarse gradp to interpolate.
     // FillPatchers must be constructed above before this call. pp_inc is scratch; zero afterward.
     // ********************************************************************************************
-    if (solverChoice.anelastic[lev]) {
+    if (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible) {
         double dummy_dt = 1.0;
         project_initial_velocity(lev, time, dummy_dt);
         pp_inc[lev].setVal(0.0);
@@ -984,6 +1015,10 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
         initRayleigh_at_level(lev);
     }
 
+    if (sbm_state_manager) {
+        init_sbm_level_from_coarse(lev, time, ba, dm);
+    }
+
 }
 
 // Remake an existing level using provided BoxArray and DistributionMapping and
@@ -996,7 +1031,7 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!auxiliary_inert_tracer,
         "M2 auxiliary inert tracer fixture does not support regrid/remake");
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!sbm_state_manager,
-        "SBM M3 does not support regridding or spectral remap");
+        "SBM M3/M4b does not support regridding until conservative hierarchy remap is qualified");
     //
     // Note that "time" here is elapsed time
     //
@@ -1501,7 +1536,7 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
     // regrid silently discards the pressure gradient.  Must follow the FillPatcher definition
     // above, which the projection's coarse-fine fill depends on.
     // ********************************************************************************************
-    if (solverChoice.anelastic[lev]) {
+    if (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible) {
         Real dummy_dt = Real(1.0);
         project_initial_velocity(lev, time, dummy_dt);
         pp_inc[lev].setVal(0.0);
@@ -1733,6 +1768,14 @@ ERF::ClearLevel (int lev)
     if (sbm_transport && sbm_transport->is_defined(lev)) {
         sbm_transport->destroy(lev);
     }
+    if (lev >= 0 && lev < static_cast<int>(sbm_amr_flux_regs.size())) {
+        sbm_amr_flux_regs[lev].reset();
+    }
+    if (lev + 1 >= 0 && lev + 1 < static_cast<int>(sbm_amr_flux_regs.size())) {
+        sbm_amr_flux_regs[lev + 1].reset();
+    }
+    bind_sbm_amr_flux_registers(lev - 1);
+    bind_sbm_amr_flux_registers(lev + 1);
     for (int var_idx = 0; var_idx < Vars::NumTypes; ++var_idx) {
         vars_new[lev][var_idx].clear();
         vars_old[lev][var_idx].clear();
@@ -1751,10 +1794,10 @@ ERF::ClearLevel (int lev)
         zmom_crse_rhs[lev].clear();
     }
 
-    if ( (solverChoice.anelastic[lev] == 1) || (solverChoice.project_initial_velocity[lev] == 1) ) {
+    if ( (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible) || (solverChoice.project_initial_velocity[lev] == 1) ) {
         pp_inc[lev].clear();
     }
-    if (solverChoice.anelastic[lev] == 0) {
+    if (solverChoice.compressibility_type[lev] == CompressibilityType::FullyCompressible) {
         lagged_delta_rt[lev].clear();
     }
     avg_xmom[lev].clear();

@@ -145,8 +145,13 @@ RK stage; if the type is FastExplicit then the damping terms are computed once p
 Either way, they are added explicitly.
 
 If the Rayleigh damping type is set to FastImplicit then the damping term for w only is included implicitly
-within the acoustic substepping algorithm; any additional Rayleigh damping (e.g. for u, v, or T) occurs
-as if the type is FastExplicit.
+within the acoustic substepping algorithm (when ``erf.rayleigh_damp_W`` is true), and is not also added
+explicitly; any additional Rayleigh damping (e.g. for u, v, or T) occurs as if the type is FastExplicit.
+The implicit form damps w towards zero rather than towards the reference profile.
+
+A level that takes no acoustic substeps (anelastic, pseudo-incompressible, or
+``RK3_NoSubstepping``) has no substeps to apply them in, so with FastExplicit or FastImplicit
+it computes all the damping terms once per RK stage, as with SlowExplicit.
 
 The algorithm for FastExplicit is as described in (3.44) of the `MPAS report`_
 which is equivalent to that written in (9) of
@@ -318,9 +323,23 @@ takes the wall heat flux, and the strain and :math:`\partial\theta/\partial z` o
 stencils of the flat surface (the strain of the face above; the wall cell itself below it), so a
 surface on a cell face reproduces flat ground. With a moisture model the microphysics species the host
 transports keep their initial value in fully immersed cells, as :math:`\rho` and :math:`\theta` do (the
-lateral faces of a slope stay open to diffusion, as for :math:`\theta`); the surface has no moisture
-flux (no evaporation or deposition), as the flat surface layer without ``erf.most.surf_moist_flux``
-or ``erf.most.surf_moist``. The option needs ``erf.if_use_most = true``, a
+lateral faces of a slope stay open to diffusion, as for :math:`\theta`), and the wall law carries a
+surface moisture condition for the water vapour, as the flat surface layer does: ``erf.if_surf_moist_flux``
+(a kinematic moisture flux :math:`F_q` [kg/kg m/s], :math:`q_* = -F_q/u_*`, as ``erf.most.surf_moist_flux``) or
+``erf.if_surf_moist`` (a surface mixing ratio :math:`q_s` [kg/kg], as ``erf.most.surf_moist``, with
+:math:`q_* = (1-\beta)\kappa(q - q_s)/\phi_h(d_1) + \beta\kappa(q_{ref} - q_s)/\phi_h(d_2)`, mixed as
+:math:`\theta_*`); without either :math:`q_* = 0` (no evaporation or deposition). The wall moisture flux
+:math:`-u_* q_*` is spread over the cell height of the wall cell (integrated exactly toward :math:`q_s` when
+a surface mixing ratio is given), written on the wall face as the water-vapour flux the TKE buoyancy and the
+output read, and the Obukhov length is formed from the virtual potential temperature, as the flat surface layer
+forms it: :math:`L = u_*^2 \theta_v / (\kappa g \theta_{v*})` with :math:`\theta_v = \theta(1 + \epsilon_v q)` and
+:math:`\theta_{v*} = \theta_*(1 + \epsilon_v q) + \epsilon_v \theta q_*` (water vapour only; the flat surface
+layer's :math:`\theta_v` subtracts rain water too), iterated with :math:`u_*` also when only
+a moisture condition is given; a given ``erf.if_Olen`` sets :math:`\theta_{v*}`, and
+:math:`\theta_* = (\theta_{v*} - \epsilon_v \theta q_*)/(1 + \epsilon_v q)`. Under ``erf.rans_moist_buoyancy`` the wall TKE below uses
+:math:`B = -g u_* \theta_{v*}/\theta_v`, as ``erf.dirichlet_k`` does on flat ground. With the k-equation closure, ``erf.rans_moist_buoyancy`` makes the
+TKE buoyancy production read the water-vapour flux too (see :ref:`RANS <RANS>`), so a heated, evaporating
+surface on a cell face reproduces flat ground. The option needs ``erf.if_use_most = true``, a
 constant-:math:`\Delta z` mesh and the anelastic model (the compressible fast substep does not carry the wall
 heat flux and the wall TKE); ``erf.if_stability_correction`` belongs to the legacy law. With a RANS closure the
 geometric length scale over the immersed surface is :math:`\kappa (d + z_0)` with ``erf.if_z0``, as it is
@@ -428,6 +447,8 @@ The following inputs are available when representing terrain using immersed forc
         erf.if_init_surf_temp          = FLOAT
         erf.if_surf_heating_rate       = FLOAT
         erf.if_Olen                    = FLOAT
+        erf.if_surf_moist_flux         = FLOAT
+        erf.if_surf_moist              = FLOAT
         erf.if_use_most                = BOOL
         erf.if_wall_form               = STRING
         erf.if_wall_face_spacing       = STRING
@@ -568,7 +589,7 @@ explicit treatment zeroes after the projection. The MOST wall law itself adds no
 horizontal wall-law face has :math:`w = 0`, and a :math:`w`-face on the roof row that carries a side
 wall law keeps the roof weight :math:`\beta_f`. The kernels then apply the wall law only, on the
 partial faces that carry it, and the solid faces are not zeroed afterwards. The requirements are
-those of the terrain case: a constant-:math:`\Delta z` mesh, map factors of one, ``erf.anelastic = 1``
+those of the terrain case: a constant-:math:`\Delta z` mesh, map factors of one, ``erf.compressibility_type`` not ``FullyCompressible``
 on every level and a build with FFT. A level coarser than the 50 m cutoff of the building forcing
 (:math:`\sqrt{\Delta x \Delta y} > 50` m) has no building blanking, and its faces keep
 :math:`\sigma = 1`. As for terrain, the faces on a non-periodic lateral domain boundary and on a

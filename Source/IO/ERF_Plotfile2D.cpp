@@ -57,16 +57,16 @@ std::string make_2d_plotfile_name (int which,
     return {};
 }
 
-bool is_unified_near_surface_diagnostic (plotfile2d::DiagnosticID id) noexcept
-{
-    return id == plotfile2d::DiagnosticID::Temperature2m ||
-           id == plotfile2d::DiagnosticID::WaterVaporMixingRatio2m ||
-           id == plotfile2d::DiagnosticID::NearSurfaceDiagnosticSource;
-}
-
 bool is_land_surface_diagnostic (const plotfile2d::DiagnosticDescriptor* descriptor) noexcept
 {
     return descriptor && descriptor->category == plotfile2d::DiagnosticCategory::LandSurface;
+}
+
+// The unified 2 m fields: Noah-MP's native 2 m fields when present, otherwise
+//    the surface layer's MOST profile, otherwise -999
+bool is_near_surface_diagnostic (const plotfile2d::DiagnosticDescriptor* descriptor) noexcept
+{
+    return descriptor && descriptor->category == plotfile2d::DiagnosticCategory::NearSurface;
 }
 
 Vector<Geometry> make_2d_plot_geometries (const Vector<Geometry>& geom,
@@ -571,6 +571,31 @@ ERF::FillPlot2DVars (int lev,
         mf_comp++;
     } // seb_lh
 
+    // The net shortwave the balance used at its last update after the dycore: with
+    // erf.ibseb.two_stream_buildings, zero under the buildings and without the direct
+    // beam where they shade the ground; -999 before the level's first update (the
+    // initial plotfile and the one a restart writes).
+    if (containerHasElement(plot_var_names, "seb_sw_net")) {
+        plotfile2d::fill_component_from_klevel_or_value(
+            mf_dst, mf_comp,
+            (solverChoice.rad_type == RadiationType::TwoStream) ? two_stream_rad.seb_sw_net(lev)
+                                                                : nullptr,
+            0, -999);
+        mf_comp++;
+    } // seb_sw_net
+
+    // The buildings' shadow on the ground, for the ground balance (erf.ibseb.two_stream_buildings
+    // with a two-stream ground balance on the sweep's shortwave, on a level that sweeps its own
+    // columns; -999 otherwise).
+    if (containerHasElement(plot_var_names, "ibseb_ground_shadow")) {
+        plotfile2d::fill_component_from_klevel_or_value(
+            mf_dst, mf_comp,
+            (solverChoice.rad_type == RadiationType::TwoStream) ? two_stream_rad.ground_shadow(lev)
+                                                                : nullptr,
+            0, -999);
+        mf_comp++;
+    } // ibseb_ground_shadow
+
     if (containerHasElement(plot_var_names, "sens_flux")) {
         plotfile2d::fill_component_from_klevel_or_value(
             mf_dst, mf_comp, sens_flux_source, klo, -999);
@@ -786,7 +811,9 @@ ERF::FillPlot2DVars (int lev,
 
     // Land-surface provider fields use the generic LandSurface name/index
     // interface. The catalog supplies metadata; this block only assembles
-    // stored values and translates provider sentinels.
+    // stored values and translates provider sentinels. The NearSurface 2 m
+    // fields are only given their components here and are filled below, from
+    // Noah-MP's native 2 m fields or from the surface layer.
     int temperature_2m_comp = -1;
     int mixing_ratio_2m_comp = -1;
     int near_surface_source_comp = -1;
@@ -795,11 +822,7 @@ ERF::FillPlot2DVars (int lev,
         if (!descriptor) {
             descriptor = plotfile2d::find_dynamic_soil_diagnostic(name);
         }
-        if (!is_land_surface_diagnostic(descriptor)) {
-            continue;
-        }
-
-        if (is_unified_near_surface_diagnostic(descriptor->id)) {
+        if (is_near_surface_diagnostic(descriptor)) {
             if (descriptor->id == plotfile2d::DiagnosticID::Temperature2m) {
                 temperature_2m_comp = mf_comp;
             } else if (descriptor->id == plotfile2d::DiagnosticID::WaterVaporMixingRatio2m) {
@@ -808,6 +831,9 @@ ERF::FillPlot2DVars (int lev,
                 near_surface_source_comp = mf_comp;
             }
             ++mf_comp;
+            continue;
+        }
+        if (!is_land_surface_diagnostic(descriptor)) {
             continue;
         }
 
@@ -869,7 +895,7 @@ ERF::FillPlot2DVars (int lev,
     //    EOS -- defines the pressure, both for the sampled "pressure" field and for
     //    the pressure vertical coordinate.  This matches the 3-D plotfile path.
     MultiFab p_hse(base_state[lev], make_alias, BaseState::p0_comp, 1);
-    const MultiFab* p_hse_ptr = (solverChoice.anelastic[lev] == 1) ? &p_hse : nullptr;
+    const MultiFab* p_hse_ptr = (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible) ? &p_hse : nullptr;
     // The grid orientation, for the earth-relative u_east, v_north and wind_dir:
     //    from this level's lat/lon when the run has them (a WRF or metgrid
     //    initialization), otherwise the grid is taken to be aligned with east
