@@ -195,6 +195,14 @@ Set build variables in the ``GNUmakefile``:
         - Fire engine directories to compile in, space separated, each with a ``Make.package`` (needs ``USE_FIRE=TRUE``; see :ref:`sec:FireCoupling`)
         - (none)
         - paths
+      * - ``USE_MOVING_BODIES``
+        - Enables the actuator core for bodies in the flow (velocity sampling at points, force spreading onto the momentum sources; see :ref:`sec:ActuatorCore`) and the structure coupling (see :ref:`sec:StructureCoupling`)
+        - FALSE
+        - TRUE/FALSE
+      * - ``STRUCTURE_HOME``
+        - Structure model directories to compile in, space separated, each with a ``Make.package`` (needs ``USE_MOVING_BODIES=TRUE``; see :ref:`sec:StructureCoupling`)
+        - (none)
+        - paths
       * - ``USE_NOAHMP``
         - Enables Noah-MP land surface model (requires ``USE_NETCDF=TRUE``)
         - FALSE
@@ -574,6 +582,14 @@ CMake can also generate makefiles for the Ninja build system for faster compilat
      - ON/OFF
    * - ``ERF_FIRE_ENGINE_DIRS``
      - Fire engine directories to compile in, a CMake list, each with an ``ERFFireEngine.cmake`` (needs ``ERF_ENABLE_FIRE=ON``; see :ref:`sec:FireCoupling`)
+     - (none)
+     - paths
+   * - ``ERF_ENABLE_MOVING_BODIES``
+     - Enables the actuator core for bodies in the flow (velocity sampling at points, force spreading onto the momentum sources; see :ref:`sec:ActuatorCore`) and the structure coupling (see :ref:`sec:StructureCoupling`)
+     - OFF
+     - ON/OFF
+   * - ``ERF_STRUCTURE_MODEL_DIRS``
+     - Structure model directories to compile in, a CMake list, each with an ``ERFStructureModel.cmake`` (needs ``ERF_ENABLE_MOVING_BODIES=ON``; see :ref:`sec:StructureCoupling`)
      - (none)
      - paths
    * - ``ERF_PRECISION``

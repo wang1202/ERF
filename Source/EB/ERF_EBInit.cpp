@@ -42,7 +42,7 @@ ERF::initializeEB ()
                                // we want to also pass the build_coarse_level_by_coarsening argument
         const bool build_eb_for_multigrid = (solverChoice.terrain_type == TerrainType::EB &&
                                             ((solverChoice.project_initial_velocity[0] == 1) ||
-                                            solverChoice.anelastic[0] == 1));
+                                            solverChoice.compressibility_type[0] != CompressibilityType::FullyCompressible));
         // Let AMReX build the coarser EB levels supported by the geometry for MLMG.
         const int max_coarsening_level = (build_eb_for_multigrid) ? 100 : 0;
         const bool build_coarse_level_by_coarsening(false);
@@ -128,7 +128,8 @@ ERF::initializeEB ()
                 FArrayBox terrain_fab(makeSlab(terrain_bx,2,0),1);
                 double dummy_time = 0.0;
                 prob->init_terrain_surface(geom[max_level], terrain_fab, dummy_time);
-                TerrainIF terrain_if(terrain_fab, geom[max_level], stretched_dz_d[max_level]);
+                TerrainIF terrain_if(terrain_fab, geom[max_level], stretched_dz_d[max_level],
+                                     /*a_periodic_wrap=*/true);
 
                 if (has_buildings_stl) {
                     // Terrain + Buildings

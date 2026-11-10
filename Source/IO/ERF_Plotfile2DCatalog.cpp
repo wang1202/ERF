@@ -51,6 +51,8 @@ const amrex::Vector<DiagnosticDescriptor>& catalog_storage ()
         {DiagnosticID::SebQsfc,        "seb_q_sfc",    "Surface moisture of the two-stream surface energy balance: the soil water content (m3/m3) with seb_prognostic_enable, a land model's 2 m mixing ratio (kg/kg) with one", "1",     DiagnosticCategory::Radiation,       MissingPolicy::FillMinus999WhenUnavailable},
         {DiagnosticID::SebHfx,         "seb_hfx",      "Sensible heat flux in the two-stream simplified surface energy balance", "W/m^2",     DiagnosticCategory::Radiation,       MissingPolicy::FillMinus999WhenUnavailable},
         {DiagnosticID::SebLh,          "seb_lh",       "Latent heat flux in the two-stream simplified surface energy balance", "W/m^2",     DiagnosticCategory::Radiation,       MissingPolicy::FillMinus999WhenUnavailable},
+        {DiagnosticID::SebSwNet,       "seb_sw_net",   "Net shortwave absorbed by the two-stream simplified surface energy balance at its last update after the dycore", "W/m^2",     DiagnosticCategory::Radiation,       MissingPolicy::FillMinus999WhenUnavailable},
+        {DiagnosticID::IbsebGroundShadow, "ibseb_ground_shadow", "Shadow of the immersed-boundary buildings on the ground for the two-stream surface energy balance on the sweep's shortwave: 1 shaded, 0 sunlit", "1", DiagnosticCategory::Radiation, MissingPolicy::FillMinus999WhenUnavailable},
         {DiagnosticID::SensFlux,       "sens_flux",    "Surface sensible heat flux",                      "kg K m^-2 s^-1", DiagnosticCategory::SurfaceFlux, MissingPolicy::FillMinus999WhenUnavailable},
         {DiagnosticID::LatenFlux,      "laten_flux",   "Surface moisture flux (legacy output name)",      "kg m^-2 s^-1", DiagnosticCategory::SurfaceFlux,    MissingPolicy::FillMinus999WhenUnavailable},
         {DiagnosticID::SurfPres,       "surf_pres",    "Surface pressure, at the ground",                 "Pa",        DiagnosticCategory::SurfaceState,   MissingPolicy::AlwaysAvailable},
@@ -111,9 +113,9 @@ const amrex::Vector<DiagnosticDescriptor>& catalog_storage ()
         {DiagnosticID::NoahmpWaterVaporMixingRatio2mVegetated, "noahmp_water_vapor_mixing_ratio_2m_vegetated", "Noah-MP 2-m water-vapor mixing ratio over the vegetated fraction", "kg kg^-1 dry air", DiagnosticCategory::LandSurface, MissingPolicy::FillMinus999WhenUnavailable},
         {DiagnosticID::NoahmpWaterVaporMixingRatio2mBare, "noahmp_water_vapor_mixing_ratio_2m_bare", "Noah-MP 2-m water-vapor mixing ratio over the bare fraction", "kg kg^-1 dry air", DiagnosticCategory::LandSurface, MissingPolicy::FillMinus999WhenUnavailable},
         {DiagnosticID::NoahmpVegetationFraction, "noahmp_vegetation_fraction", "Noah-MP vegetation fraction", "1", DiagnosticCategory::LandSurface, MissingPolicy::FillMinus999WhenUnavailable},
-        {DiagnosticID::Temperature2m, "temperature_2m", "Physical air temperature 2 m above the local surface", "K", DiagnosticCategory::LandSurface, MissingPolicy::FillMinus999WhenUnavailable},
-        {DiagnosticID::WaterVaporMixingRatio2m, "water_vapor_mixing_ratio_2m", "Water-vapor mixing ratio 2 m above the local surface per unit dry-air mass", "kg kg^-1 dry air", DiagnosticCategory::LandSurface, MissingPolicy::FillMinus999WhenUnavailable},
-        {DiagnosticID::NearSurfaceDiagnosticSource, "near_surface_diagnostic_source", "Source code for the unified near-surface diagnostic bundle", "1", DiagnosticCategory::LandSurface, MissingPolicy::AlwaysAvailable},
+        {DiagnosticID::Temperature2m, "temperature_2m", "Physical air temperature 2 m above the local surface", "K", DiagnosticCategory::NearSurface, MissingPolicy::FillMinus999WhenUnavailable},
+        {DiagnosticID::WaterVaporMixingRatio2m, "water_vapor_mixing_ratio_2m", "Water-vapor mixing ratio 2 m above the local surface per unit dry-air mass", "kg kg^-1 dry air", DiagnosticCategory::NearSurface, MissingPolicy::FillMinus999WhenUnavailable},
+        {DiagnosticID::NearSurfaceDiagnosticSource, "near_surface_diagnostic_source", "Source code for the unified near-surface diagnostic bundle", "1", DiagnosticCategory::NearSurface, MissingPolicy::AlwaysAvailable},
     };
 
     return catalog;

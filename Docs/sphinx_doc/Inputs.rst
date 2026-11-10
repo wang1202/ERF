@@ -32,10 +32,15 @@ Governing Equations
 +---------------------------------+----------------------------------------------------------+--------------------+------------------+
 | Parameter                       | Definition                                               | Acceptable Values  | Default          |
 +=================================+==========================================================+====================+==================+
-| **erf.anelastic**               | Use anelastic equations at the given AMR levels. Sets    | 0, 1               | 0                |
-|                                 | ``project_initial_velocity=1``, ``fixed_density=1``, and |                    |                  |
-|                                 | ``substepping_type=None``. The stored                    |                    |                  |
-|                                 | ``buoyancy_type=3`` does not select the buoyancy kernel. |                    |                  |
+| **erf.compressibility_type**    | Equation set at each AMR level (per-level).              | FullyCompressible, | Fully-           |
+|                                 | FullyCompressible solves the compressible equations.     | Anelastic,         | Compressible     |
+|                                 | Anelastic and PseudoIncompressible hold the density at   | Pseudo-            |                  |
+|                                 | its base-state value and project the velocity; they      | Incompressible     |                  |
+|                                 | set ``project_initial_velocity=1``,                      |                    |                  |
+|                                 | ``fixed_density=1``, and never substep acoustically.     |                    |                  |
+|                                 | The stored ``buoyancy_type=3`` does not select the       |                    |                  |
+|                                 | buoyancy kernel. PseudoIncompressible currently runs     |                    |                  |
+|                                 | exactly the anelastic equations.                         |                    |                  |
 +---------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.buoyancy_type**           | Compressible choices: 1=full density departure;          | 1, 2, 3, 4         | 1 (3 if          |
 |                                 | 2/3=identical temperature approximations;                |                    | anelastic)       |
@@ -560,8 +565,22 @@ List of Parameters
 | **erf.refinement_indicators**                    | names of the refinement indicators to apply; each name   | List of Strings    | None                 |
 |                                                  | becomes the prefix of its own group of options below     |                    |                      |
 +--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
-| **erf.<indicator>.field_name**                   | field the indicator tests.  ``hurricane_tracker`` is a   | String             | None                 |
-|                                                  | reserved indicator name that needs no field              |                    |                      |
+| **erf.<indicator>.field_name**                   | field the indicator tests, matched without regard to     | String             | None                 |
+|                                                  | case: ``density``, ``theta``, ``scalar``, ``qv``,        |                    |                      |
+|                                                  | ``qc``, ``qi``, ``qr``, ``qs``, ``qg``, ``qt``,          |                    |                      |
+|                                                  | ``vorticity``, ``helicity``, ``max_reflectivity``,       |                    |                      |
+|                                                  | ``velmag``, ``u``, ``v``, ``w``, ``omega`` (the          |                    |                      |
+|                                                  | contravariant vertical velocity; equal to ``w``          |                    |                      |
+|                                                  | without terrain-fitted coordinates; with moving          |                    |                      |
+|                                                  | terrain the mesh velocity is not subtracted) or          |                    |                      |
+|                                                  | ``terrain_blanking`` (only with                          |                    |                      |
+|                                                  | ``erf.terrain_type = ImmersedForcing``); with            |                    |                      |
+|                                                  | particles also ``<species>_count`` or                    |                    |                      |
+|                                                  | ``<species>_<mesh_var>``, matched as given.              |                    |                      |
+|                                                  | An unrecognized name, or a field the configuration       |                    |                      |
+|                                                  | does not provide, aborts at setup.                       |                    |                      |
+|                                                  | ``hurricane_tracker`` is a reserved indicator name       |                    |                      |
+|                                                  | that needs no field                                      |                    |                      |
 +--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
 | **erf.<indicator>.value_greater**                | tag cells where the field exceeds this value, one value  | List of Reals      | None                 |
 |                                                  | per level                                                |                    |                      |
@@ -762,8 +781,8 @@ any level is decomposed in the vertical.  When it is set:
 
 Setting **amr.no_box_split_dir** = -1 turns this off and restores the AMReX
 behavior in which grids may be split in any direction.  ERF only accepts that if
-every level has **erf.substepping_type** = None (which an anelastic level is
-given automatically): the implicit substep solve inverts one tridiagonal system
+no level has **erf.timestepping_type** = RK3_ImplicitSubstep (an anelastic or
+pseudo-incompressible level never substeps): the implicit substep solve inverts one tridiagonal system
 per column, so no column may be chopped at a box seam, just as for the implicit
 vertical diffusion, and the code aborts rather than run with a value other than 2
 while any level substeps implicitly.  With **amr.no_box_split_dir** = -1, the two places
@@ -896,17 +915,19 @@ List of Parameters
 +--------------------------------------+----------------------------------------------------------+--------------------+-------------------+
 | Parameter                            | Definition                                               | Acceptable Values  | Default           |
 +======================================+==========================================================+====================+===================+
-| **erf.substepping_type**             | acoustic substepping strategy for the compressible       | None, Implicit     | Implicit (None if |
-|                                      | solver (per-level).  Forced to ``None`` at any level     |                    | anelastic)        |
-|                                      | where ``anelastic`` = 1                                  |                    |                   |
-+--------------------------------------+----------------------------------------------------------+--------------------+-------------------+
-| **erf.anelastic_type**               | two-stage scheme used by the anelastic integrator        | RK2, MidPoint      | RK2               |
-|                                      | (per-level); ignored where ``anelastic`` = 0.  ``RK2``   |                    |                   |
-|                                      | is SSP (Heun): both stages advance a full timestep and   |                    |                   |
-|                                      | the second averages the two slow sources.  ``MidPoint``  |                    |                   |
-|                                      | advances a half timestep in the first stage, which is    |                    |                   |
-|                                      | what makes the implicit vertical diffusion second order  |                    |                   |
-|                                      | -- see ``vert_implicit_fac`` below                       |                    |                   |
+| **erf.timestepping_type**            | time integrator at each AMR level (per-level).  At a     | RK3_Implicit-      | RK3_Implicit-     |
+|                                      | FullyCompressible level: ``RK3_ImplicitSubstep`` is the  | Substep,           | Substep at a      |
+|                                      | three-stage RK3 with implicit acoustic substepping and   | RK3_NoSubstepping, | FullyCompressible |
+|                                      | ``RK3_NoSubstepping`` the three-stage SSP-RK3 with no    | RK2, MidPoint      | level, MidPoint   |
+|                                      | acoustic substepping.  At an Anelastic or                |                    | otherwise         |
+|                                      | PseudoIncompressible level (never any acoustic           |                    |                   |
+|                                      | substepping): ``RK2`` is SSP (Heun): both stages advance |                    |                   |
+|                                      | a full timestep and the second averages the two slow     |                    |                   |
+|                                      | sources; ``MidPoint`` advances a half timestep in the    |                    |                   |
+|                                      | first stage, which is what makes the implicit vertical   |                    |                   |
+|                                      | diffusion second order -- see ``vert_implicit_fac``      |                    |                   |
+|                                      | below.  ERF stops if a value does not fit the level's    |                    |                   |
+|                                      | ``erf.compressibility_type``                             |                    |                   |
 +--------------------------------------+----------------------------------------------------------+--------------------+-------------------+
 | **erf.vert_implicit**                | Do vertical implicit solve for diffusion of u, v, theta, | Boolean            | true              |
 |                                      | KE, and moisture with default time-centering in each     |                    |                   |
@@ -915,8 +936,8 @@ List of Parameters
 | **erf.vert_implicit_fac**            | time-centering factor for the vertical diffusive terms,  | 1 or 3 Reals in    | 1.0 1.0 0.0       |
 |                                      | where 0 is fully explicit and 1 is fully implicit.       | [0,1]              |                   |
 |                                      | Specify either one value used in all Runge-Kutta stages, |                    |                   |
-|                                      | or three values, one per stage.  Zeroed at any anelastic |                    |                   |
-|                                      | level with ``anelastic_type`` = ``RK2``; the second and  |                    |                   |
+|                                      | or three values, one per stage.  Zeroed at any level     |                    |                   |
+|                                      | with ``timestepping_type`` = ``RK2``; the second and     |                    |                   |
 |                                      | third entries are zeroed with ``MidPoint``               |                    |                   |
 +--------------------------------------+----------------------------------------------------------+--------------------+-------------------+
 | **erf.implicit_thermal_diffusion**   | include the implicit contribution to vertical thermal    | Boolean            | true              |
@@ -953,8 +974,9 @@ List of Parameters
 | **erf.fixed_fast_dt**                | set fast dt as this value                                | Real > 0           | unused if not set |
 +--------------------------------------+----------------------------------------------------------+--------------------+-------------------+
 | **erf.fixed_mri_dt_ratio**           | set fast dt as slow dt / this ratio                      | even int > 0       | only relevant if  |
-|                                      |                                                          |                    | substepping_type  |
-|                                      |                                                          |                    | is not None       |
+|                                      |                                                          |                    | timestepping_type |
+|                                      |                                                          |                    | is RK3_Implicit-  |
+|                                      |                                                          |                    | Substep           |
 +--------------------------------------+----------------------------------------------------------+--------------------+-------------------+
 | **erf.init_shrink**                  | factor by which to shrink the initial dt                 | Real > 0 and <= 1  | 1.0               |
 +--------------------------------------+----------------------------------------------------------+--------------------+-------------------+
@@ -1013,12 +1035,13 @@ List of Parameters
 Notes
 -----------------
 
--  | If **erf.anelastic** is true then **substepping_type** is internally set to "None".
+-  | **erf.timestepping_type** must be RK3_ImplicitSubstep or RK3_NoSubstepping at a FullyCompressible level and
+     RK2 or MidPoint at any other level; if it is not given, each level gets RK3_ImplicitSubstep or MidPoint accordingly.
 
 -  | The implicit vertical diffusion is only second-order in time in an anelastic run when the two
      stages are the **midpoint method** and the tridiagonal solve is done in the first stage alone.
      Solving again in the second stage would collapse to first-order, so **erf.vert_implicit_fac**
-     is zeroed for that midpoint stage; with **erf.anelastic_type = RK2** the implicit solve is
+     is zeroed for that midpoint stage; with **erf.timestepping_type = RK2** the implicit solve is
      turned off entirely.
 
 -  | The implicit vertical diffusion solves invert one tridiagonal system per column, so a
@@ -1067,13 +1090,13 @@ Notes
 -  | The implicit acoustic substepping is subject to the same requirement, and for the
      same reason: its vertical solve is one tridiagonal system per column.  Rather than
      test the grids after they have been made, ERF refuses at input-parsing time to
-     combine **erf.substepping_type** = Implicit with any **amr.no_box_split_dir** other
+     combine **erf.timestepping_type** = RK3_ImplicitSubstep with any **amr.no_box_split_dir** other
      than 2, since that parameter is what keeps two grids from sharing a face normal to
      z in the first place.  This is not a requirement of one grid per column: several
      grids may sit over the same column, as they do where the refined region is a
      staircase in z, as long as they do not touch, so that each contiguous run of cells
      in the column is solved by itself.  A run that must be decomposed in the vertical
-     has to set **erf.substepping_type** = None (or be anelastic, which sets it to None).
+     has to set **erf.timestepping_type** = RK3_NoSubstepping (or not be FullyCompressible).
 
 -  | A column may, however, end below the top of the domain, as it does on a refined level that
      does not reach the domain top, or where the refined region is a staircase in z.  In that
@@ -1170,9 +1193,9 @@ Notes
      more than 1 %.  Without those options nothing is computed or printed.
 
 -  | The time step controls work somewhat differently depending on whether one is using
-     acoustic substepping in time; this is determined by the value of **substepping_type**.
+     acoustic substepping in time; this is determined by the value of **timestepping_type**.
 
--  | If **erf.substepping_type = None** there is only one time step to be calculated,
+-  | Without acoustic substepping (any **erf.timestepping_type** other than RK3_ImplicitSubstep) there is only one time step to be calculated,
      and **erf.fixed_fast_dt** and **erf.fixed_mri_dt_ratio** are not used.
 
    * | If **erf.fixed_dt** is also specified, the timestep will be set to **fixed_dt**.
@@ -1180,7 +1203,7 @@ Notes
    * | If **erf.fixed_dt** is not specified, the timestep will be computed using the CFL condition for compressible flow.
        If **erf.cfl** is specified, that CFL value will be used.  If not, the default value will be used.
 
--  | If **erf.substepping_type** is not **None** we must determine both the slow and fast timesteps.
+-  | If **erf.timestepping_type** = **RK3_ImplicitSubstep** we must determine both the slow and fast timesteps.
 
    * | If **erf.fixed_dt** is specified, the slow timestep will be set to **fixed_dt**.
 
@@ -1686,14 +1709,34 @@ users must prescribe either ``sample_line_lo`` and ``sample_line_hi`` inputs, wh
 3 integer values corresponding to the (i,j,k) indices at the beginning and end of the line,
 or ``sample_line_lo_real`` and ``sample_line_hi_real``, which are 3 real values corresponding
 to the physical locations of the beginning and end of the line. These two ways of specifying
-the line are mutually exclusive. Additionally, users must specify ``sample_line_dir`` to
+the line are mutually exclusive. The indices of ``sample_line_lo`` and ``sample_line_hi`` are
+those of level 0, and these lines are sampled on level 0 even when there are finer levels; a line
+given by ``sample_line_lo_real`` and ``sample_line_hi_real`` is sampled on the finest level that
+holds the entire line. Additionally, users must specify ``sample_line_dir`` to
 prescribed the direction of the line. The same inputs are used for the plane sampling except
 that ``sample_plane_lo/hi``
-must be the physical locations of the plane corners. This output functionality has
-not been implemented for terrain. By default, sampled line and plane data will have the
+must be the physical locations of the plane corners. By default, sampled line and plane data will have the
 prefixes "plt_line" and "plt_plane", respectively. Names for sampled data may optionally
 be provided with ``sample_line_name`` and/or ``sample_plane_name`` -- if provided, each
 line and/or plane must be named.
+
+A line runs along one direction, ``sample_line_dir``: its two ends must agree in the other two
+directions, and its lo end may not be above its hi end; ERF aborts otherwise. Lines given by
+``sample_line_lo_real`` and ``sample_line_hi_real`` are not supported with moving terrain
+(``erf.terrain_type = MovingFittedMesh``); lines given by indices are.
+
+On a stretched or terrain-fitted mesh, the cells of a line given by ``sample_line_lo_real`` and
+``sample_line_hi_real`` come from the heights of the column through its first point. A vertical
+line (``sample_line_dir = 2``) runs from the cell that holds the lower z to the cell that holds the
+upper z, each clamped to the column. A horizontal line is the row of cells at the level of cells
+that holds z in that column, so it follows the terrain-fitted mesh rather than a constant height.
+The line is sampled on the finest level that holds these cells. The z values are heights above sea
+level, or above the ground under the first point of the line if ``erf.sample_line_z_agl = true``.
+With immersed terrain (``erf.terrain_type = ImmersedForcing`` or ``EB``) the ground is the
+terrain surface, as for stations, rather than the bottom of the flat mesh. On these meshes the
+variable ``z``, the height of each sample, is always written with the line, since the z
+coordinates of a line plotfile assume equally spaced levels; it may be requested on any mesh.
+Plane sampling has not been implemented for terrain.
 
 Plane samples are written as true multi-level AMReX plotfiles: every refinement level
 whose grids intersect the plane is written (``Level_0``, ``Level_1``, ...), so a plane
@@ -1714,8 +1757,12 @@ The sampled variables can be selected with the ``erf.line_sampling_vars`` and
 ``erf.plane_sampling_vars`` options and include a subset of the plotfile outputs:
 ``density``, ``x_velocity``, ``y_velocity``, ``z_velocity``, ``magvel``,
 ``theta``, ``qv``, ``qc``, and ``pressure``. Line sampling additionally supports
-``sgs_tke``, ``sgs_tau13``, ``sgs_tau23``, and ``sgs_hfx3``. The SGS stress and
-heat-flux values are averaged from their native edge/face locations to cell
+``conserved``, ``z``, ``sgs_tke``, ``sgs_tau11``, ``sgs_tau12``, ``sgs_tau13``, ``sgs_tau22``,
+``sgs_tau23``, ``sgs_tau33``, and ``sgs_hfx3``. ``conserved`` writes every component of the
+conserved state as stored, named ``cons_0``, ``cons_1``, ... in component order (density,
+rho theta, ...). The variables are written in a fixed order, not the order they are listed in.
+The SGS stresses ``sgs_tau11``, ``sgs_tau22`` and ``sgs_tau33`` are stored at cell centers; the
+other stresses and the heat flux are averaged from their native edge/face locations to cell
 centers; if their diffusion storage is unavailable, ERF writes zero. Velocities
 are output at cell centers only. The water vapor mixing ratio ``qv`` will only
 output valid values if a moisture model is used. Pressure is calculated from
@@ -1754,6 +1801,9 @@ List of Parameters
 | **erf.sample_line_lo_real**,       | Bounding point on the line(s)                            | 3 Reals per line   | None             |
 | **erf.sample_line_hi_real**        |                                                          |                    |                  |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.sample_line_z_agl**          | z of the real bounding points of the lines is the height | Boolean            | false            |
+|                                    | above the ground instead of above sea level              |                    |                  |
++------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.sample_plane_lo/hi**         | Bounding point on the plane(s)                           | 3 Reals per plane  | None             |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.sample_line_name**           | Output prefix of each line                               | One string per     | None             |
@@ -1789,6 +1839,16 @@ List of Parameters
 | **erf.sample_line_log**            | log-file name for each sampled line; exactly one name    | List of Strings    | None             |
 |                                    | per line is required                                     |                    |                  |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
+
+``erf.sample_line`` and ``erf.sample_line_real`` are a shorthand for line sampling. Each line is
+the full-depth vertical column through the given cell or point on level 0 (its k or z is not
+used, and only x and y must lie in the domain), sampled with the line-sampling machinery above with the variables
+``conserved``, ``x_velocity``, ``y_velocity``, ``z_velocity`` and ``sgs_tau11`` ...
+``sgs_tau33``. Each line is written to its own log at the cadence of the other logs
+(``erf.sum_interval`` or ``erf.sum_per``), one row per sample: the time, then each variable over
+the column from bottom to top, in that order. The stresses are at cell centers, as for line
+sampling; before this used the line sampler, ``tau12``, ``tau13`` and ``tau23`` were written at the
+lower corner edge of each cell instead.
 
 .. _examples-of-usage-10b:
 
@@ -2119,15 +2179,15 @@ List of Parameters
 | **erf.moistscal_vert_upw_frac**   | as above, for the vertical advection of moist scalars    | Real in [0,1]      | 1.0              |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.zero_xflux_faces**          | list of (i,j,k) x-faces across which the advective flux  | List of 3-integer  | none             |
-|                                   | is forced to zero; with erf.anelastic = 1 these faces    | triples            |                  |
+|                                   | is forced to zero; when not FullyCompressible these      | triples            |                  |
 |                                   | select the thin-body projection                          |                    |                  |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.zero_yflux_faces**          | list of (i,j,k) y-faces across which the advective flux  | List of 3-integer  | none             |
-|                                   | is forced to zero; with erf.anelastic = 1 these faces    | triples            |                  |
+|                                   | is forced to zero; when not FullyCompressible these      | triples            |                  |
 |                                   | select the thin-body projection                          |                    |                  |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.zero_zflux_faces**          | list of (i,j,k) z-faces across which the advective flux  | List of 3-integer  | none             |
-|                                   | is forced to zero; with erf.anelastic = 1 these faces    | triples            |                  |
+|                                   | is forced to zero; when not FullyCompressible these      | triples            |                  |
 |                                   | select the thin-body projection                          |                    |                  |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 
@@ -2246,8 +2306,8 @@ List of Parameters
 +----------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.implicit_before_substep**        | if true, the vertical implicit diffusive solve is done   | Boolean            | true             |
 |                                        | before the acoustic substepping rather than after.       |                    |                  |
-|                                        | Forced to true if any level has ``substepping_type`` =   |                    |                  |
-|                                        | ``None``                                                 |                    |                  |
+|                                        | Forced to true if any level has no acoustic substepping  |                    |                  |
+|                                        | (``timestepping_type`` other than RK3_ImplicitSubstep)   |                    |                  |
 +----------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.thermal_stratification**         | which potential temperature the subgrid model uses to    | theta, thetav,     | theta (LES),     |
 |                                        | quantify thermal stratification (per-level). Applies to  | thetal             | thetav (PBL)     |
@@ -2321,6 +2381,17 @@ List of Parameters
 |                                        | without the k-eqn closure; a list with different entries |                    |                  |
 |                                        | that switches it on at such a level stops the run        |                    |                  |
 |                                        | (per-level)                                              |                    |                  |
++----------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.rans_moist_buoyancy**            | k-equation RANS with a moisture model that carries water | Boolean            | false            |
+|                                        | vapour: TKE buoyancy production from the virtual         |                    |                  |
+|                                        | potential temperature flux, g/theta_v0 [(1 + epsv qv)    |                    |                  |
+|                                        | <w'theta'> + epsv theta <w'qv'>] (water vapour only, no  |                    |                  |
+|                                        | cloud-water or saturated form; theta_v0 is               |                    |                  |
+|                                        | ``erf.theta_ref`` or the local theta_v); false keeps the |                    |                  |
+|                                        | dry g/theta_0 <w'theta'>; one value for the hierarchy is |                    |                  |
+|                                        | reset to false on levels without the k-eqn closure, a    |                    |                  |
+|                                        | per-level list that switches it on at such a level stops |                    |                  |
+|                                        | the run (per-level)                                      |                    |                  |
 +----------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.wall_dist_type**                 | wall distance for RANS on a terrain-fitted mesh:         | "poisson",         | "poisson"        |
 |                                        | Tucker (2003) Poisson distance, or the height above the  | "terrain_height"   |                  |
@@ -2512,7 +2583,7 @@ List of Parameters
 |                                          | HGAMQ, HGAMU, HGAMV); false gives strict HND06 mixing    |                    |                  |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.enable_ysu_entrainment**           | YSUNew only: add the entrainment diffusivity at the      | Boolean            | true             |
-|                                          | first cell above the PBL top (HND06 Eq. 6)               |                    |                  |
+|                                          | first cell above the PBL top (HND06 A9-A13)              |                    |                  |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.ysu_moistvars**                    | YSUNew only: give moisture its own diffusivity, from the | Boolean            | false            |
 |                                          | moisture Prandtl number, and add the entrainment term to |                    |                  |
@@ -2655,7 +2726,8 @@ required; ERF does not assume a unit-spacing grid when metadata is absent.
      - Real
      - 0.8
    * - **erf.forest_substep**
-     - Apply the forest canopy source terms during the acoustic substeps only
+     - Apply the forest canopy source terms during the acoustic substeps only; ignored on a
+       level that takes no acoustic substeps, which applies them in the slow update
      - Boolean
      - false
    * - **erf.forest_biophysics**
@@ -2862,8 +2934,9 @@ Rayleigh Damping
 |                                | ``SlowExplicit`` applies them explicitly in the slow     | FastExplicit,      |                  |
 |                                | (Runge-Kutta) update, while ``FastExplicit`` and         | FastImplicit       |                  |
 |                                | ``FastImplicit`` apply them explicitly or implicitly     |                    |                  |
-|                                | within the acoustic substeps.  Case sensitive; an        |                    |                  |
-|                                | unrecognized value aborts                                |                    |                  |
+|                                | within the acoustic substeps.  A level that takes no     |                    |                  |
+|                                | acoustic substeps applies them in the slow update.  Case |                    |                  |
+|                                | sensitive; an unrecognized value aborts                  |                    |                  |
 +--------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.rayleigh_damp_U**        | Include explicit Rayleigh damping in the x-momentum      | Boolean            | false            |
 |                                | equation                                                 |                    |                  |
@@ -3387,6 +3460,16 @@ Notes
   that writes ``temperature`` must therefore also write ``qv``, and a run that reads
   ``temperature`` from planes that include ``qv`` must also read ``qv``; otherwise ERF stops.
   ``theta`` planes need no qv.
+- A plane holds the domain's cells along its face only.  The ghost cells beside the face in the
+  other horizontal direction (the corner ghosts) take the plane's value at the periodic image
+  when that direction is periodic, as the interior cells across the seam do, and the nearest
+  cell of the plane otherwise; the ghost rows below and above the domain always take the
+  nearest row of the plane.  On a refined level the plane is interpolated linearly along the
+  face with the same rule for the two cells it blends.
+- The planes hold velocity at cell centres (the writer averages the face values).  A velocity
+  component that is nodal along the face (y-velocity on an x face, x-velocity on a y face,
+  z-velocity on either) therefore takes, at each node, the average of the two plane cells on
+  either side of it, at every level.
 
 .. _sec:NumericalStability:
 
@@ -3927,8 +4010,8 @@ building combinations.
 | Parameter                         | Definition                                               | Acceptable Values  | Default          |
 +===================================+==========================================================+====================+==================+
 | **erf.immersed_forcing_substep**  | apply the immersed forcing source terms during the       | Boolean            | true if          |
-|                                   | acoustic substeps only                                   |                    | compressible,    |
-|                                   |                                                          |                    | false if         |
+|                                   | acoustic substeps only; ignored on a level that takes no |                    | compressible,    |
+|                                   | acoustic substeps, which applies them in the slow update |                    | false if         |
 |                                   |                                                          |                    | anelastic        |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.if_Cd_momentum**            | immersed forcing drag coefficient for momentum           | Real > 0           | 500.0 if         |
@@ -3945,7 +4028,7 @@ building combinations.
 |                                   | forward-Euler source                                     |                    |                  |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.if_implicit_projection**    | terrain or buildings immersed forcing (not both),        | Boolean            | false            |
-|                                   | erf.anelastic = 1 on every level, constant-dz mesh, map  |                    |                  |
+|                                   | no FullyCompressible level, constant-dz mesh, map        |                    |                  |
 |                                   | factors of one, FFT build: apply the drag of the solid   |                    |                  |
 |                                   | inside the projection, m = (m* - grad phi) / (1 + dt     |                    |                  |
 |                                   | rate) on each face (FFT-preconditioned GMRES), and do    |                    |                  |
@@ -3972,6 +4055,20 @@ building combinations.
 |                                   | holds :math:`|z/L| \le 100` (both heights clamp for      |                    |                  |
 |                                   | :math:`|L| < 0.005\,\Delta`); immersed buildings get no  |                    |                  |
 |                                   | temperature forcing from it                              |                    |                  |
++-----------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.if_surf_moist_flux**        | fraction_stress with a moisture model that carries water | Real in            | 0 (none)         |
+|                                   | vapour: kinematic surface moisture flux [kg/kg m/s] of   | [-0.01, 0.01]      |                  |
+|                                   | the immersed terrain (q* = -F_q/u*, as                   |                    |                  |
+|                                   | ``erf.most.surf_moist_flux`` on flat ground), applied in |                    |                  |
+|                                   | the wall cell; not with ``erf.if_surf_moist``            |                    |                  |
++-----------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.if_surf_moist**             | fraction_stress with a moisture model that carries water | Real in [0, 0.1]   | -1 (none)        |
+|                                   | vapour: surface water vapour mixing ratio [kg/kg] of the |                    |                  |
+|                                   | immersed terrain (q* from the wall cell and the cell     |                    |                  |
+|                                   | above, mixed by the solid fraction as theta* is, as      |                    |                  |
+|                                   | ``erf.most.surf_moist`` on flat ground), applied in the  |                    |                  |
+|                                   | wall cell as a decay toward it; not with                 |                    |                  |
+|                                   | ``erf.if_surf_moist_flux``                               |                    |                  |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.if_use_most**               | use the Monin-Obukhov similarity theory wall model at    | Boolean            | false            |
 |                                   | immersed surfaces                                        |                    |                  |
@@ -4124,6 +4221,21 @@ column would be taken for a building), a uniform vertical grid (no
 |                                   | in z. Then sw_direct_normal, sw_diffuse,                 |                    |                        |
 |                                   | sw_transmission, sw_diffuse_coeff, solar_constant and    |                    |                        |
 |                                   | albedo_ground must not be given                          |                    |                        |
++-----------------------------------+----------------------------------------------------------+--------------------+------------------------+
+| **erf.ibseb.two_stream_buildings**| with erf.radiation_model = TwoStream, the columns see    | Boolean            | true                   |
+|                                   | the buildings: no two-stream heating in a building's     |                    |                        |
+|                                   | solid cells; the two-stream ground balance holds its     |                    |                        |
+|                                   | state under a building (a column whose bottom cell is    |                    |                        |
+|                                   | solid), gives it no shortwave and leaves it out of its   |                    |                        |
+|                                   | means; with erf.radiation.seb_use_radiation_fluxes, the  |                    |                        |
+|                                   | shortwave on and a level that sweeps its own columns,    |                    |                        |
+|                                   | the open ground the buildings shade (the faces' ray cast |                    |                        |
+|                                   | from each column's ground toward the sun, within the ray |                    |                        |
+|                                   | map's halo) loses the direct beam. false: the columns    |                    |                        |
+|                                   | are blind to the buildings, as before. Without the two-  |                    |                        |
+|                                   | stream radiation: stops when no erf.radiation_model is   |                    |                        |
+|                                   | set, warns when another one (or None) is named; ignored, |                    |                        |
+|                                   | with a warning, when erf.ibseb.enable is off             |                    |                        |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------------+
 | **erf.ibseb.sun_mode**            | the sun's position, and with the prescribed provider its | "fixed", "solar",  | "fixed"                |
 |                                   | irradiances: ``fixed``: the given zenith and azimuth     | "two_stream"       |                        |
@@ -5020,7 +5132,11 @@ land-surface model supplies them; ``seb_turbulent_flux_source = defaults`` uses 
 ``seb_hfx_default`` and ``seb_lh_default`` instead. The fluxes it used are written as ``seb_hfx``
 and ``seb_lh``. With ``erf.radiation.seb_surface_layer_uses_skin = true`` the coupling runs both
 ways: the surface layer also takes its land surface temperature from the balance's skin, so the
-heat flux it computes responds to the skin.
+heat flux it computes responds to the skin. The net shortwave the balance absorbed at its last
+update after the dycore is written as ``seb_sw_net``. With immersed-boundary buildings and
+``erf.ibseb.two_stream_buildings`` (the default) the balance holds the ground under the buildings
+and, with ``seb_use_radiation_fluxes``, takes the direct beam off the ground they shade
+(``ibseb_ground_shadow``); see :ref:`the IBSEB theory page <sec:IBSEB>`.
 
 
 
@@ -5821,6 +5937,24 @@ geometry is resolved at the finest level's cell size; points outside the sampled
 region are treated as fluid.  Very large or highly detailed meshes will
 therefore be limited by the mesh resolution rather than by the STL itself.
 
+.. _sec:InputsStructures:
+
+Structure Coupling
+==================
+
+This input selects the structure model described in :ref:`sec:StructureCoupling`;
+it needs a build with ``ERF_ENABLE_MOVING_BODIES=ON`` (``USE_MOVING_BODIES = TRUE``
+with GNU make), and a build without it stops the run when the key is set. The
+model reads its own inputs under its own prefix besides.
+
++------------------------------------------------+------------------------------------------------------------+--------------------------------+------------------------+
+| Parameter                                      | Definition                                                 | Acceptable Values              | Default                |
++================================================+============================================================+================================+========================+
+| **erf.structures.model**                       | The structure model to run, one of the models compiled in  | String: a registered model     | (none: no model)       |
+|                                                | (ERF_REGISTER_STRUCTURE_MODEL); any other name stops the   | name                           |                        |
+|                                                | run, listing the names that are                            |                                |                        |
++------------------------------------------------+------------------------------------------------------------+--------------------------------+------------------------+
+
 .. _sec:InputsFire:
 
 Fire Coupling
@@ -6005,7 +6139,7 @@ inputs that no longer exist and so have no topic section of their own.
 
    Several of these parameters may be specified either as a single value, which
    is then used at every AMR level, or as a space-separated list with one value
-   per level, e.g. ``erf.anelastic = 1 0 0``.  Their definitions are marked
+   per level, e.g. ``erf.compressibility_type = Anelastic FullyCompressible FullyCompressible``.  Their definitions are marked
    "per-level".  For a list, the number of values given must be at least
    ``amr.max_level + 1``.
 
@@ -6015,20 +6149,19 @@ Equation Set
 * :ref:`Coupling Type (Data Exchange) <inputs-coupling-type-data-exchange>` --
   ``erf.coupling_type``
 * :ref:`Forcing Terms <inputs-forcing-terms>` -- ``erf.use_gravity``
-* :ref:`Governing Equations <inputs-governing-equations>` -- ``erf.anelastic``,
+* :ref:`Governing Equations <inputs-governing-equations>` -- ``erf.compressibility_type``,
   ``erf.buoyancy_type``, ``erf.c_p``, ``erf.fixed_density``, ``erf.gradp_type``,
   ``erf.transport_scalar``, ``erf.use_lagged_delta_rt``, ``erf.use_pert_pres_gradient``
-* :ref:`Time Step <inputs-time-step>` -- ``erf.anelastic_type``
+* :ref:`Time Step <inputs-time-step>` -- ``erf.timestepping_type``
 * :ref:`Initialization <inputs-initialization>` -- ``erf.project_initial_velocity``
 
 Acoustic Substepping and the Poisson Solve
 ------------------------------------------
 
 * :ref:`Numerical Stability <inputs-numerical-stability>` -- ``erf.beta_s``
-* :ref:`Time Step <inputs-time-step>` -- ``erf.anelastic_type``,
+* :ref:`Time Step <inputs-time-step>` -- ``erf.timestepping_type``,
   ``erf.force_stage1_single_substep``, ``erf.ncorr``,
-  ``erf.poisson_abstol``, ``erf.poisson_reltol``, ``erf.substepping_diag``,
-  ``erf.substepping_type``
+  ``erf.poisson_abstol``, ``erf.poisson_reltol``, ``erf.substepping_diag``
 
 Initialization, Terrain and Vertical Mesh
 -----------------------------------------
@@ -6093,7 +6226,8 @@ Immersed Forcing and Canopy Source Terms
   ``erf.if_wall_form``, ``erf.if_wall_face_spacing``, ``erf.if_wall_tke``, ``erf.if_wall_tke_time_factor``,
   ``erf.if_flat_wall_dissipation``,
   ``erf.if_average_down``, ``erf.if_cf_mismatch_warning``,
-  ``erf.if_snap_partial_cells``, ``erf.if_surf_temp_flux``, ``erf.if_use_most``,
+  ``erf.if_snap_partial_cells``, ``erf.if_surf_temp_flux``, ``erf.if_surf_moist_flux``, ``erf.if_surf_moist``,
+  ``erf.if_use_most``,
   ``erf.if_ws_floor``, ``erf.if_z0``,
   ``erf.immersed_forcing_substep``, ``erf.use_rotate_surface_flux``
 
@@ -6162,7 +6296,20 @@ ignoring them.
 +------------------------------------------------+--------------------------------------------------------+--------------------------------+------------------------+
 | **erf.moisture_type**                          | renamed; set ``erf.moisture_model`` instead            | none -- input renamed          | aborts if present      |
 +------------------------------------------------+--------------------------------------------------------+--------------------------------+------------------------+
-| **erf.no_substepping**                         | removed; set ``erf.substepping_type`` instead          | none -- input removed          | aborts if present      |
+| **erf.no_substepping**                         | removed; set ``erf.timestepping_type`` instead         | none -- input removed          | aborts if present      |
++------------------------------------------------+--------------------------------------------------------+--------------------------------+------------------------+
+| **erf.anelastic**                              | deprecated; set ``erf.compressibility_type`` instead.  | 0, 1 (per-level)               | warns if present;      |
+|                                                | 1 maps to ``Anelastic`` and 0 to                       |                                | aborts if given along  |
+|                                                | ``FullyCompressible``                                  |                                | with the new key       |
++------------------------------------------------+--------------------------------------------------------+--------------------------------+------------------------+
+| **erf.substepping_type**                       | deprecated; set ``erf.timestepping_type`` instead.     | None, Implicit (per-level)     | warns if present;      |
+|                                                | At FullyCompressible levels ``Implicit`` maps to       |                                | aborts if given along  |
+|                                                | ``RK3_ImplicitSubstep`` and ``None`` to                |                                | with the new key       |
+|                                                | ``RK3_NoSubstepping``; ignored at the other levels     |                                |                        |
++------------------------------------------------+--------------------------------------------------------+--------------------------------+------------------------+
+| **erf.anelastic_type**                         | deprecated; set ``erf.timestepping_type`` instead.     | RK2, MidPoint (per-level)      | warns if present;      |
+|                                                | Same values; ignored at FullyCompressible levels       |                                | aborts if given along  |
+|                                                |                                                        |                                | with the new key       |
 +------------------------------------------------+--------------------------------------------------------+--------------------------------+------------------------+
 | **erf.init_type**                              | the values ``Real`` and ``Ideal`` were replaced by     | ``WRFInput`` in place of       | aborts if ``Real`` or  |
 |                                                | ``WRFInput``                                           | either retired value           | ``Ideal`` is used      |

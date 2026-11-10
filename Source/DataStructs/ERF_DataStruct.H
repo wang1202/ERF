@@ -80,22 +80,47 @@ AMREX_ENUM(CouplingType,
 );
 
 /**
- * @brief Acoustic substepping strategy.
+ * @brief Values of the deprecated erf.substepping_type; read only to map them onto
+ *        TimesteppingType.
  */
 AMREX_ENUM(SubsteppingType,
     None, Implicit
 );
 
 /**
- * @brief Two-stage scheme used by the anelastic time integrator.
+ * @brief Compressibility of the equations solved at a level.
  *
- * RK2 is the SSP (Heun) scheme: both stages advance a full timestep from the old
- * state and the second averages the two slow sources.  MidPoint advances only a
- * half timestep in the first stage, which makes the vertical diffusion second
- * order in time with an implicit solve in the first stage alone.
+ * FullyCompressible solves the compressible equations with acoustic substepping.
+ * Anelastic holds the density at its base-state value and projects the velocity.
+ * PseudoIncompressible currently takes exactly the anelastic path.
+ */
+AMREX_ENUM(CompressibilityType,
+    FullyCompressible, Anelastic, PseudoIncompressible
+);
+
+/**
+ * @brief Values of the deprecated erf.anelastic_type; read only to map them onto
+ *        TimesteppingType.
  */
 AMREX_ENUM(AnelasticType,
     RK2, MidPoint
+);
+
+/**
+ * @brief Time integrator used at a level.
+ *
+ * At a FullyCompressible level:
+ *   RK3_ImplicitSubstep is the three-stage RK3 with implicit acoustic substepping;
+ *   RK3_NoSubstepping is the three-stage SSP-RK3 with no acoustic substepping.
+ * At an Anelastic or PseudoIncompressible level (never any acoustic substepping):
+ *   RK2 is the SSP (Heun) scheme: both stages advance a full timestep from the old
+ *   state and the second averages the two slow sources;
+ *   MidPoint advances only a half timestep in the first stage, which makes the
+ *   vertical diffusion second order in time with an implicit solve in the first
+ *   stage alone.
+ */
+AMREX_ENUM(TimesteppingType,
+    RK3_ImplicitSubstep, RK3_NoSubstepping, RK2, MidPoint
 );
 
 /**
@@ -749,6 +774,32 @@ struct SolverChoice {
 
         pp.query_enum_case_insensitive("moisture_model",moisture_type);
 
+#ifdef ERF_SBM_AMR_QUALIFICATION
+        pp.queryAdd("sbm_amr_qualification_test", sbm_amr_qualification_test);
+        pp.queryAdd("sbm_amr_qualification_expect_zero_flow",
+                    sbm_amr_qualification_expect_zero_flow);
+        pp.queryAdd("sbm_amr_qualification_expect_split",
+                    sbm_amr_qualification_expect_split);
+        pp.queryAdd("sbm_amr_qualification_expect_empty_fine_rank",
+                    sbm_amr_qualification_expect_empty_fine_rank);
+        pp.queryAdd("sbm_amr_qualification_unique_profile",
+                    sbm_amr_qualification_unique_profile);
+        pp.queryAdd("sbm_amr_qualification_parent_store_fault",
+                    sbm_amr_qualification_parent_store_fault);
+#else
+        for (const char* name : {"sbm_amr_qualification_test",
+                                 "sbm_amr_qualification_expect_zero_flow",
+                                 "sbm_amr_qualification_expect_split",
+                                 "sbm_amr_qualification_expect_empty_fine_rank",
+                                 "sbm_amr_qualification_unique_profile",
+                                 "sbm_amr_qualification_parent_store_fault"}) {
+            if (pp.contains(name)) {
+                amrex::Error(std::string("erf.") + name + " is available only in "
+                             "the isolated ERF_ENABLE_SBM_AMR_QUALIFICATION build");
+            }
+        }
+#endif
+
         // Test-only SBM failure injections. They remain disabled unless an
         // integration test explicitly enables the corresponding option.
         pp.queryAdd("sbm_test_native_qc_write_fault", sbm_test_native_qc_write_fault);
@@ -814,7 +865,12 @@ struct SolverChoice {
             if (sbm_cloud_rain_split <= 0 || sbm_cloud_rain_split >= sbm_nbins) {
                 amrex::Error("sbm_cloud_rain_split must be strictly inside the liquid bin range");
             }
-            const int expected_sbm_components = sbm_nbins * (sbm_moment_mode == 2 ? 2 : 1);
+            int expected_sbm_components = sbm_nbins * (sbm_moment_mode == 2 ? 2 : 1);
+#ifdef ERF_SBM_AMR_QUALIFICATION
+            if (sbm_amr_qualification_test && sbm_moment_mode == 2) {
+                expected_sbm_components += sbm_nbins;
+            }
+#endif
             if (!sbm_fixture_initial_state.empty() &&
                 sbm_fixture_initial_state.size() != static_cast<amrex::Long>(expected_sbm_components)) {
                 amrex::Error("sbm_fixture_initial_state must match the full runtime SBM component count");
@@ -1082,10 +1138,35 @@ struct SolverChoice {
         rdOcp = R_d / c_p;
 
         // *******************************************************************************
-        // Read anelastic etc and over-ride if necessary
+        // Read compressibility_type etc and over-ride if necessary
         // *******************************************************************************
 
-        read_int_string(max_level, "anelastic", anelastic, 0);
+        compressibility_type.resize(max_level+1);
+        for (int i = 0; i <= max_level; ++i) {
+            compressibility_type[i] = CompressibilityType::FullyCompressible;
+        }
+        if (pp.contains("compressibility_type") && pp.contains("anelastic")) {
+            amrex::Abort("Specify only one of erf.compressibility_type and erf.anelastic "
+                         "(erf.anelastic is deprecated)");
+        }
+        if (pp.contains("anelastic")) {
+            amrex::Print() << "WARNING: erf.anelastic is deprecated; use erf.compressibility_type"
+                           << " = FullyCompressible, Anelastic or PseudoIncompressible" << std::endl;
+            amrex::Vector<int> anelastic;
+            read_int_string(max_level, "anelastic", anelastic, 0);
+            for (int i = 0; i <= max_level; ++i) {
+                if (anelastic[i] != 0 && anelastic[i] != 1) {
+                    amrex::Abort("erf.anelastic must be 0 or 1");
+                }
+                compressibility_type[i] = (anelastic[i] != 0) ? CompressibilityType::Anelastic
+                                                              : CompressibilityType::FullyCompressible;
+            }
+        } else {
+            for (int i = 0; i <= max_level; ++i) {
+                query_one_or_per_level_enum_case_insensitive(
+                    pp, "compressibility_type", compressibility_type[i], i, max_level);
+            }
+        }
         const bool fixed_density_given =
             read_int_string(max_level, "fixed_density", fixed_density, 0);
         read_int_string(max_level, "project_initial_velocity", project_initial_velocity, 0);
@@ -1096,11 +1177,11 @@ struct SolverChoice {
         bool any_anelastic = false;
         bool any_compress  = false;
         for (int i = 0; i <= max_level; ++i) {
-            if (anelastic[i] == 1) {
+            if (compressibility_type[i] != CompressibilityType::FullyCompressible) {
                 if (fixed_density_given && fixed_density[i] == 0) {
                     amrex::Print() << "WARNING: erf.fixed_density = 0 is ignored at level " << i
-                                   << " because erf.anelastic = 1 there; the anelastic equations"
-                                   << " always hold the density fixed in time." << std::endl;
+                                   << " because erf.compressibility_type is not FullyCompressible there; the anelastic"
+                                   << " and pseudo-incompressible equations always hold the density fixed in time." << std::endl;
                 }
                 project_initial_velocity[i] = 1;
                 fixed_density[i]            = 1; // Always fixed when anelastic
@@ -1125,36 +1206,72 @@ struct SolverChoice {
         }
 
         // *******************************************************************************
-        // Read anelastic_type and allow for different values at each level
+        // Read timestepping_type and allow for different values at each level.  The default
+        // depends on the level's compressibility: RK3_ImplicitSubstep at a FullyCompressible
+        // level, MidPoint otherwise.
         // *******************************************************************************
-        anelastic_type.resize(max_level+1);
-
+        timestepping_type.resize(max_level+1);
         for (int i = 0; i <= max_level; i++) {
-            anelastic_type[i] = AnelasticType::RK2;
+            timestepping_type[i] = (compressibility_type[i] == CompressibilityType::FullyCompressible)
+                                 ? TimesteppingType::RK3_ImplicitSubstep : TimesteppingType::MidPoint;
         }
 
-        for (int i = 0; i <= max_level; i++) {
-            query_one_or_per_level_enum_case_insensitive(
-                pp, "anelastic_type", anelastic_type[i], i, max_level);
+        const bool substepping_type_given = pp.contains("substepping_type");
+        const bool anelastic_type_given   = pp.contains("anelastic_type");
+        if (pp.contains("timestepping_type")) {
+            if (substepping_type_given || anelastic_type_given) {
+                amrex::Abort("Specify erf.timestepping_type or the deprecated erf.substepping_type / "
+                             "erf.anelastic_type, not both");
+            }
+            for (int i = 0; i <= max_level; i++) {
+                query_one_or_per_level_enum_case_insensitive(
+                    pp, "timestepping_type", timestepping_type[i], i, max_level);
+            }
+        } else {
+            // The deprecated inputs: erf.substepping_type applied only at FullyCompressible
+            // levels and erf.anelastic_type only at the others
+            if (substepping_type_given) {
+                amrex::Print() << "WARNING: erf.substepping_type is deprecated; use erf.timestepping_type"
+                               << " = RK3_ImplicitSubstep or RK3_NoSubstepping" << std::endl;
+                for (int i = 0; i <= max_level; i++) {
+                    SubsteppingType sub = SubsteppingType::Implicit;
+                    query_one_or_per_level_enum_case_insensitive(pp, "substepping_type", sub, i, max_level);
+                    if (compressibility_type[i] == CompressibilityType::FullyCompressible) {
+                        timestepping_type[i] = (sub == SubsteppingType::None)
+                                             ? TimesteppingType::RK3_NoSubstepping
+                                             : TimesteppingType::RK3_ImplicitSubstep;
+                    }
+                }
+            }
+            if (anelastic_type_given) {
+                amrex::Print() << "WARNING: erf.anelastic_type is deprecated; use erf.timestepping_type"
+                               << " = RK2 or MidPoint" << std::endl;
+                if (!any_anelastic) {
+                    amrex::Print() << "Ignoring erf.anelastic_type because every level is FullyCompressible"
+                                   << std::endl;
+                }
+                for (int i = 0; i <= max_level; i++) {
+                    AnelasticType anelastic_scheme = AnelasticType::MidPoint;
+                    query_one_or_per_level_enum_case_insensitive(pp, "anelastic_type", anelastic_scheme, i, max_level);
+                    if (compressibility_type[i] != CompressibilityType::FullyCompressible) {
+                        timestepping_type[i] = (anelastic_scheme == AnelasticType::MidPoint)
+                                             ? TimesteppingType::MidPoint : TimesteppingType::RK2;
+                    }
+                }
+            }
         }
 
-        if (pp.contains("anelastic_type") && !any_anelastic) {
-            amrex::Print() << "Ignoring erf.anelastic_type because no level is anelastic" << std::endl;
-            for (int i = 0; i <= max_level; i++) { anelastic_type[i] = AnelasticType::RK2; }
-        }
-
-        // *******************************************************************************
-        // Read substepping_type and allow for different values at each level
-        // *******************************************************************************
-        substepping_type.resize(max_level+1);
-
+        // RK3_* are the FullyCompressible integrators and RK2 / MidPoint the others
         for (int i = 0; i <= max_level; i++) {
-            substepping_type[i] = SubsteppingType::Implicit;
-        }
-
-        for (int i = 0; i <= max_level; i++) {
-            query_one_or_per_level_enum_case_insensitive(
-                pp, "substepping_type", substepping_type[i], i, max_level);
+            const bool fc = (compressibility_type[i] == CompressibilityType::FullyCompressible);
+            const bool rk3 = (timestepping_type[i] == TimesteppingType::RK3_ImplicitSubstep ||
+                              timestepping_type[i] == TimesteppingType::RK3_NoSubstepping);
+            if (fc != rk3) {
+                amrex::Abort("erf.timestepping_type at level " + std::to_string(i) + " must be " +
+                             (fc ? "RK3_ImplicitSubstep or RK3_NoSubstepping because the level is "
+                                   "FullyCompressible"
+                                 : "RK2 or MidPoint because the level is not FullyCompressible"));
+            }
         }
 
         pp.queryAdd("substepping_diag", substepping_diag);
@@ -1166,6 +1283,10 @@ struct SolverChoice {
         if (!(beta_d >= amrex::Real(0.0) && beta_d <= amrex::Real(1.0))) {
             amrex::Abort("erf.beta_d must lie in [0, 1]; got " + std::to_string(beta_d));
         }
+
+        // Number of steps between the synchronization of the two copies of a periodic face
+        // velocity (0 = never)
+        pp.query("face_sync_int", face_sync_int);
 
         // Spatially varying beta_s on the w-faces (implicit substepping only):
         //    beta_s = max(beta_s_min, min(beta_s_max, h_xi^2 + h_eta^2))
@@ -1184,7 +1305,7 @@ struct SolverChoice {
         // *******************************************************************************
         int nvals_old = pp.countval("no_substepping");
         if (nvals_old > 0) {
-            amrex::Error("The no_substepping flag is deprecated -- set substepping_type instead");
+            amrex::Error("The no_substepping flag is deprecated -- set erf.timestepping_type instead");
         }
 
         pp.queryAdd("ncorr", ncorr);
@@ -1210,13 +1331,6 @@ struct SolverChoice {
         poisson_abstol = amrex::max(poisson_abstol,amrex::Real(1e-6));
         poisson_reltol = amrex::max(poisson_reltol,amrex::Real(1e-6));
 #endif
-        for (int lev = 0; lev <= max_level; lev++) {
-            if (anelastic[lev] != 0)
-            {
-                substepping_type[lev] = SubsteppingType::None;
-            }
-        }
-
         pp.queryAdd("force_stage1_single_substep", force_stage1_single_substep);
 
         // Include Coriolis forcing?
@@ -1265,6 +1379,8 @@ struct SolverChoice {
         if_surf_heating_rate /= amrex::Real(3600.0);        // [K/s]
 
         pp.queryAdd("if_Olen", if_Olen_in);
+        pp.queryAdd("if_surf_moist_flux", if_surf_moist_flux);
+        pp.queryAdd("if_surf_moist", if_surf_moist);
         pp.queryAdd("if_use_most",if_use_most);
         pp.queryAdd("if_snap_partial_cells",if_snap_partial_cells);
         // The snapped staircase puts full-strength forcing on every wall face,
@@ -1340,14 +1456,14 @@ struct SolverChoice {
             // The wall heat flux and the wall TKE are written by the slow scalar source; the
             // compressible fast substep (erf.immersed_forcing_substep) does not carry them
             if (immersed_forcing_substep) {
-                amrex::Abort("erf.if_wall_form = fraction_stress runs with the anelastic model (erf.anelastic = 1 on "
+                amrex::Abort("erf.if_wall_form = fraction_stress runs with the anelastic model (erf.compressibility_type not FullyCompressible on "
                              "every level); it does not support erf.immersed_forcing_substep = true");
             }
             // ... and the solid cells are held (rho, theta, the moisture species) by the anelastic
             // update only
             for (int lev = 0; lev <= max_level; ++lev) {
-                if (!anelastic[lev]) {
-                    amrex::Abort("erf.if_wall_form = fraction_stress needs erf.anelastic = 1 on every level (level " +
+                if (compressibility_type[lev] == CompressibilityType::FullyCompressible) {
+                    amrex::Abort("erf.if_wall_form = fraction_stress needs erf.compressibility_type not FullyCompressible on every level (level " +
                                  std::to_string(lev) + " is compressible)");
                 }
             }
@@ -1361,6 +1477,33 @@ struct SolverChoice {
             if (if_stability_correction) {
                 amrex::Abort("erf.if_wall_form = fraction_stress always applies the stability functions; "
                              "erf.if_stability_correction is for the legacy wall law");
+            }
+        }
+        // Surface moisture condition of the fraction-stress law: a given kinematic moisture flux or
+        // a given surface mixing ratio (not both), as erf.most.surf_moist_flux / erf.most.surf_moist
+        // on flat ground; it needs a moisture model that carries water vapour (the wall cell's qv
+        // and the cell above's enter q* and the Obukhov length)
+        {
+            const bool moist_flux_set = (if_surf_moist_flux != zero);
+            const bool moist_surf_set = (if_surf_moist >= zero);
+            if (moist_flux_set || moist_surf_set) {
+                if (!if_fraction_stress) {
+                    amrex::Abort("erf.if_surf_moist_flux and erf.if_surf_moist belong to erf.if_wall_form = fraction_stress");
+                }
+                if (moist_flux_set && moist_surf_set) {
+                    amrex::Abort("erf.if_surf_moist_flux and erf.if_surf_moist: give one surface moisture condition, not both");
+                }
+                if (moisture_indices.qv == MoistureComponentIndices::absent) {
+                    amrex::Abort("erf.if_surf_moist_flux / erf.if_surf_moist need a moisture model that carries water vapour "
+                                 "(erf.moisture_model)");
+                }
+                if (!(std::abs(if_surf_moist_flux) <= amrex::Real(0.01))) {
+                    amrex::Abort("erf.if_surf_moist_flux must be in [-0.01, 0.01] kg/kg m/s (a kinematic surface moisture flux; "
+                                 "0.0001 is a strong evaporation)");
+                }
+                if (moist_surf_set && !(if_surf_moist <= amrex::Real(0.1))) {
+                    amrex::Abort("erf.if_surf_moist must be in [0, 0.1] kg/kg (a surface water vapour mixing ratio)");
+                }
             }
         }
         // The wall laws that evaluate the stability functions (the legacy law with
@@ -1490,8 +1633,8 @@ struct SolverChoice {
                 amrex::Abort("erf.if_implicit_projection needs a constant-dz mesh");
             }
             for (int lev = 0; lev <= max_level; ++lev) {
-                if (!anelastic[lev]) {
-                    amrex::Abort("erf.if_implicit_projection needs erf.anelastic = 1 on every level");
+                if (compressibility_type[lev] == CompressibilityType::FullyCompressible) {
+                    amrex::Abort("erf.if_implicit_projection needs erf.compressibility_type not FullyCompressible on every level");
                 }
             }
 #ifndef ERF_USE_FFT
@@ -1661,9 +1804,34 @@ struct SolverChoice {
          spongeChoice.init_params(pp_prefix);
              ebChoice.init_params(pp_prefix);
 
+        // A level that takes no acoustic substeps applies these terms on the slow step instead
+        // (level_substeps); say so when they were asked for
+        for (int lev = 0; lev <= max_level; ++lev) {
+            if (level_substeps(lev)) { continue; }
+            if (dampingChoice.rayleigh_damping_type == RayleighDampingType::FastExplicit ||
+                dampingChoice.rayleigh_damping_type == RayleighDampingType::FastImplicit) {
+                amrex::Print() << "Level " << lev << " takes no acoustic substeps: Rayleigh damping is"
+                               << " applied on the slow step there" << std::endl;
+            }
+            if (forest_substep) {
+                amrex::Print() << "Level " << lev << " takes no acoustic substeps: erf.forest_substep is"
+                               << " ignored there and canopy drag is applied on the slow step" << std::endl;
+            }
+            if (immersed_forcing_substep && pp.contains("immersed_forcing_substep")) {
+                amrex::Print() << "Level " << lev << " takes no acoustic substeps: erf.immersed_forcing_substep"
+                               << " is ignored there and immersed forcing is applied on the slow step" << std::endl;
+            }
+        }
+
         turbChoice.resize(max_level+1);
         for (int lev = 0; lev <= max_level; lev++) {
             turbChoice[lev].init_params(lev,max_level,pp_prefix);
+            // the moist TKE buoyancy of the k-eqn RANS reads the water vapour and its flux
+            if (turbChoice[lev].rans_moist_buoyancy &&
+                moisture_indices.qv == MoistureComponentIndices::absent) {
+                amrex::Abort("erf.rans_moist_buoyancy needs a moisture model that carries water vapour "
+                             "(erf.moisture_model; level " + std::to_string(lev) + ")");
+            }
         }
 
         if (perturbation_auto) {
@@ -1868,7 +2036,7 @@ struct SolverChoice {
         // The default is true (i.e. that it happens before the acoustic substepping).
         pp.queryAdd("implicit_before_substep", implicit_before_substep);
         for (int lev = 0; lev <= max_level; lev++) {
-            if ( (substepping_type[lev] == SubsteppingType::None) && !implicit_before_substep) {
+            if ( (timestepping_type[lev] != TimesteppingType::RK3_ImplicitSubstep) && !implicit_before_substep) {
                 amrex::Print() << "implicit_before_substep cannot be false without substepping; setting to true." << "\n";
                 implicit_before_substep = true;
             }
@@ -1929,14 +2097,14 @@ struct SolverChoice {
         // second stage would reduce the pair to backward Euler, and with the RK2 (Heun)
         // stages there is no stage that plays the role of the midpoint at all.
         for (int lev = 0; lev <= max_level; lev++) {
-            if (anelastic[lev]) {
-                if (anelastic_type[lev] == AnelasticType::RK2) {
+            if (compressibility_type[lev] != CompressibilityType::FullyCompressible) {
+                if (timestepping_type[lev] == TimesteppingType::RK2) {
                     amrex::Print() << "Turning off native vertical implicit solve flag because anelastic at level " << lev
                                    << " with RK2 scheme." << std::endl;
                     vert_implicit_fac[lev][0] = zero;
                     vert_implicit_fac[lev][1] = zero;
                     vert_implicit_fac[lev][2] = zero;
-                } else if (anelastic_type[lev] == AnelasticType::MidPoint) {
+                } else if (timestepping_type[lev] == TimesteppingType::MidPoint) {
                     if (do_vert_implicit && vert_implicit_fac[lev][0] != one) {
                         amrex::Print() << "Forcing implicit factor 1 in first stage of MidPoint to ensure second-order accuracy." << std::endl;
                         vert_implicit_fac[lev][0] = one;
@@ -2172,7 +2340,20 @@ struct SolverChoice {
                            << ", flat-wall dissipation " << (if_flat_wall_dissipation ? "on" : "off") << ")\n";
             if (moisture_type != MoistureType::None) {
                 amrex::Print() << "Immersed forcing: the moisture species see a closed wall "
-                               << "(no diffusion through the wall face, held in the solid, no surface moisture flux)\n";
+                               << "(no diffusion through the wall face, held in the solid); surface moisture condition: ";
+                if (if_surf_moist_flux != zero) {
+                    amrex::Print() << "flux erf.if_surf_moist_flux = " << if_surf_moist_flux << " kg/kg m/s (q* = -F_q/u*)";
+                } else if (if_surf_moist >= zero) {
+                    amrex::Print() << "surface mixing ratio erf.if_surf_moist = " << if_surf_moist << " kg/kg";
+                } else {
+                    amrex::Print() << "none (q* = 0)";
+                }
+                if (moisture_indices.qv != MoistureComponentIndices::absent &&
+                    (if_surf_temp_flux != amrex::Real(1e-8) || if_init_surf_temp > zero || if_Olen_in != amrex::Real(1e-8) ||
+                     if_surf_moist_flux != zero || if_surf_moist >= zero)) {
+                    amrex::Print() << "; the Obukhov length uses theta_v and theta_v* = theta* (1 + epsv qv) + epsv theta q*";
+                }
+                amrex::Print() << "\n";
             }
         }
         // The log-law coarse/fine fill acts only on refined levels
@@ -2385,14 +2566,14 @@ struct SolverChoice {
         }
         for (int lev = 0; lev <= max_level; lev++) {
             amrex::Print() << "At level " << lev << " : " << std::endl;
-            if (anelastic[lev]) {
+            if (compressibility_type[lev] != CompressibilityType::FullyCompressible) {
                 amrex::Print() << "   anelastic with no substepping, using the "
-                               << ((anelastic_type[lev] == AnelasticType::MidPoint) ? "MidPoint" : "RK2")
+                               << ((timestepping_type[lev] == TimesteppingType::MidPoint) ? "MidPoint" : "RK2")
                                << " integrator" << std::endl;
             } else {
-               if (substepping_type[lev] == SubsteppingType::None) {
+               if (timestepping_type[lev] == TimesteppingType::RK3_NoSubstepping) {
                    amrex::Print() << "   compressible with no substepping" << std::endl;
-               } else if (substepping_type[lev] == SubsteppingType::Implicit) {
+               } else if (timestepping_type[lev] == TimesteppingType::RK3_ImplicitSubstep) {
                    amrex::Print() << "   compressible with implicit substepping" << std::endl;
                }
            }
@@ -2658,9 +2839,8 @@ struct SolverChoice {
 
     int         force_stage1_single_substep = 1;
 
-    amrex::Vector<SubsteppingType> substepping_type;
-    amrex::Vector<int> anelastic;
-    amrex::Vector<AnelasticType> anelastic_type;
+    amrex::Vector<CompressibilityType> compressibility_type;
+    amrex::Vector<TimesteppingType> timestepping_type;
     amrex::Vector<int> fixed_density;
     amrex::Vector<int> project_initial_velocity;
     amrex::Vector<int> buoyancy_type;
@@ -2672,6 +2852,7 @@ struct SolverChoice {
     // time off-centering coefficient, > 0 for forward weighting (i.e., bias
     // towards the future time step)
     amrex::Real beta_s = amrex::Real(0.1);
+    int face_sync_int = 1;
 
     // if true, beta_s varies on the w-faces as max(beta_s_min, min(beta_s_max, h_xi^2 + h_eta^2))
     // and beta_s itself is not used (implicit substepping only)
@@ -2741,6 +2922,10 @@ struct SolverChoice {
     amrex::Real if_init_surf_temp        = zero;               // [K]
     amrex::Real if_surf_heating_rate     = zero;               // [K/hr]
     amrex::Real if_Olen_in               = amrex::Real(1e-8);  // [m]
+    // Surface moisture condition of the fraction-stress wall law: a given kinematic moisture flux
+    // (erf.if_surf_moist_flux, 0 = none) or a given surface mixing ratio (erf.if_surf_moist, < 0 = none)
+    amrex::Real if_surf_moist_flux       = zero;               // [kg/kg m/s]
+    amrex::Real if_surf_moist            = amrex::Real(-1.0);  // [kg/kg]
     bool        if_use_most              = false;
     bool        if_snap_partial_cells    = false;
     bool        if_stability_correction  = false;
@@ -2844,6 +3029,49 @@ struct SolverChoice {
         return buildings_type == BuildingsType::ImmersedForcing &&
                std::sqrt(geom.CellSize(0) * geom.CellSize(1)) <=
                    amrex::Real(50.0) * (one + amrex::Real(1.e-6));
+    }
+
+    // Whether a level takes acoustic substeps.  Anelastic, pseudo-incompressible and
+    // RK3_NoSubstepping levels do not, so a source term that is asked to be applied in
+    // the substeps only is applied on the slow step there instead.
+    [[nodiscard]] bool level_substeps (int lev) const noexcept
+    {
+        return timestepping_type[lev] == TimesteppingType::RK3_ImplicitSubstep;
+    }
+
+    // Rayleigh damping of u, v and (rho theta) in the substeps (FastExplicit, FastImplicit)
+    [[nodiscard]] bool rayleigh_fast_uvT (int lev) const noexcept
+    {
+        return level_substeps(lev) &&
+               (dampingChoice.rayleigh_damping_type == RayleighDampingType::FastExplicit ||
+                dampingChoice.rayleigh_damping_type == RayleighDampingType::FastImplicit);
+    }
+
+    // Explicit Rayleigh damping of w in the substeps (FastExplicit only)
+    [[nodiscard]] bool rayleigh_fast_w (int lev) const noexcept
+    {
+        return level_substeps(lev) &&
+               dampingChoice.rayleigh_damping_type == RayleighDampingType::FastExplicit;
+    }
+
+    // Implicit Rayleigh damping of w in the substeps (FastImplicit with erf.rayleigh_damp_W).
+    // It replaces the explicit w damping, which is then applied on neither step.
+    [[nodiscard]] bool rayleigh_implicit_w (int lev) const noexcept
+    {
+        return level_substeps(lev) && dampingChoice.rayleigh_damp_W &&
+               dampingChoice.rayleigh_damping_type == RayleighDampingType::FastImplicit;
+    }
+
+    // Canopy drag in the substeps (erf.forest_substep)
+    [[nodiscard]] bool forest_fast (int lev) const noexcept
+    {
+        return level_substeps(lev) && forest_substep;
+    }
+
+    // Immersed forcing in the substeps (erf.immersed_forcing_substep)
+    [[nodiscard]] bool immersed_forcing_fast (int lev) const noexcept
+    {
+        return level_substeps(lev) && immersed_forcing_substep;
     }
 
     /**
@@ -2977,6 +3205,12 @@ struct SolverChoice {
     int sbm_nbins{4};
     int sbm_moment_mode{1};
     int sbm_cloud_rain_split{-1};
+    bool sbm_amr_qualification_test{false};
+    bool sbm_amr_qualification_expect_zero_flow{false};
+    bool sbm_amr_qualification_expect_split{false};
+    bool sbm_amr_qualification_expect_empty_fine_rank{false};
+    bool sbm_amr_qualification_unique_profile{false};
+    bool sbm_amr_qualification_parent_store_fault{false};
     bool sbm_test_native_qc_write_fault{false};
     bool sbm_test_donor_cfl_fault{false};
     amrex::Vector<amrex::Real> sbm_edges;
@@ -3134,12 +3368,10 @@ struct SolverChoice {
  * @brief Embedded-boundary options.
  * @var SolverChoice::force_stage1_single_substep
  * @brief Flag forcing a single substep in the first RK stage.
- * @var SolverChoice::substepping_type
- * @brief Acoustic substepping type for each AMR level.
- * @var SolverChoice::anelastic
- * @brief Per-level flag selecting anelastic dynamics.
- * @var SolverChoice::anelastic_type
- * @brief Per-level two-stage scheme used by the anelastic integrator.
+ * @var SolverChoice::compressibility_type
+ * @brief Per-level compressibility (FullyCompressible, Anelastic or PseudoIncompressible).
+ * @var SolverChoice::timestepping_type
+ * @brief Per-level time integrator (RK3_ImplicitSubstep, RK3_NoSubstepping, RK2 or MidPoint).
  * @var SolverChoice::fixed_density
  * @brief Per-level flag selecting fixed-density treatment; always 1 at an anelastic level.
  * @var SolverChoice::project_initial_velocity
