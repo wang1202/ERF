@@ -101,7 +101,8 @@ void make_sources (int level, int nrk,
                    const amrex::MultiFab* cons_old,
                    bool is_slow_step,
                    amrex::MultiFab* ib_wall_hfx = nullptr,
-                   amrex::MultiFab* ib_wall_ktarget = nullptr);
+                   amrex::MultiFab* ib_wall_ktarget = nullptr,
+                   amrex::MultiFab* ib_wall_qfx = nullptr);
 
 #if defined(ERF_USE_NETCDF)
 /**
@@ -154,7 +155,8 @@ add_moist_nudging_terms (const amrex::MultiFab& S_data,
                          const int bdy_moist_nudge_type);
 #endif
 
-void make_mom_sources (double time,
+void make_mom_sources (int level,
+                       double time,
                        double dt,
                        const amrex::Vector<amrex::MultiFab>& S_data,
                        const amrex::MultiFab* z_phys_nd,

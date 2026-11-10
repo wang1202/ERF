@@ -135,7 +135,7 @@
                      turbPert,
                      r_avg_to_pass, t_avg_to_pass,
                      forest_drag, &S_old[IntVars::cons],
-                     true, ib_wall_hfx[level].get(), ib_wall_ktarget[level].get());
+                     true, ib_wall_hfx[level].get(), ib_wall_ktarget[level].get(), ib_wall_qfx[level].get());
 
         // *****************************************************************************
         // Inject the fire-to-atmosphere heat flux AFTER make_sources, which resets
@@ -223,12 +223,12 @@
         // *****************************************************************************
         int num_q = micro->Get_Qstate_Moist_Size() - micro->Get_Qstate_Moist_NumConc_Size();
         make_buoyancy(level, S_data, S_prim, qt, buoyancy, fine_geom, solverChoice, base_to_use,
-                      num_q, get_eb(level), solverChoice.anelastic[level]);
+                      num_q, get_eb(level), solverChoice.compressibility_type[level] != CompressibilityType::FullyCompressible);
 
         // *****************************************************************************
         // Make remaining (not gradp or buoyancy) momentum sources
         // *****************************************************************************
-        make_mom_sources(old_stage_time, slow_dt,
+        make_mom_sources(level, old_stage_time, slow_dt,
                          S_data, zpn_to_use, zpc_to_use, stretched_dz_h[level],
                          xvel_new, yvel_new, zvel_new,
                          xmom_src, ymom_src, zmom_src,
@@ -243,6 +243,21 @@
                          (solverChoice.hindcast_lateral_forcing? &forecast_state_interp[level] : nullptr),
                          sounding_at_level(level), lsf_at_level(level), lsf_data[level],
                          get_eb(level), true);
+
+#ifdef ERF_USE_MOVING_BODIES
+        // The structures' force on the air (erf.structures.model), fixed over the step
+        if (m_structure_model && level == m_structure_model->level(finest_level)) {
+            m_structure_model->add_momentum_sources(level, xmom_src, ymom_src, zmom_src);
+        }
+        // On a coarser level, the model's source restricted onto it (ERF::make_structure_coarse_sources)
+        if (m_structure_model && level < m_structure_model->level(finest_level) &&
+            level < static_cast<int>(m_structure_crse_src.size()) &&
+            m_structure_crse_src[level][0].isDefined()) {
+            MultiFab::Add(xmom_src, m_structure_crse_src[level][0], 0, 0, 1, 0);
+            MultiFab::Add(ymom_src, m_structure_crse_src[level][1], 0, 0, 1, 0);
+            MultiFab::Add(zmom_src, m_structure_crse_src[level][2], 0, 0, 1, 0);
+        }
+#endif
 
         // Nudging of the velocity towards observations at stations
         if (solverChoice.nudging_from_observations && obs_nudging) {
@@ -287,7 +302,7 @@
         // Anelastic coarse/fine faces in time (ERF_CoarseFineFaces.cpp): a coarse level adds
         // this stage's mass fluxes to those of its step, a fine level registers the coarse
         // momenta its coarse/fine faces are filled from in this stage
-        if (solverChoice.anelastic[level]) {
+        if (solverChoice.compressibility_type[level] != CompressibilityType::FullyCompressible) {
             if (level < finest_level) { cf_anelastic_record(level, nrk); }
             if (level > 0)            { cf_anelastic_stage_registration(level, nrk); }
         }

@@ -54,6 +54,26 @@
                                          solverChoice.buildings_type == BuildingsType::ImmersedForcing) ?
             terrain_blanking_zface[level].get() : nullptr;
 
+        erf_sbm::SBMAMRStageParent sbm_parent_stage;
+        const erf_sbm::SBMAMRStageParent* sbm_parent_stage_ptr = nullptr;
+        if (sbm_state_manager != nullptr && level > 0) {
+            sbm_parent_stage.conserved_old =
+                &vars_old[level - 1][Vars::cons];
+            sbm_parent_stage.conserved_new =
+                &vars_new[level - 1][Vars::cons];
+            sbm_parent_stage.old_time = t_old[level - 1];
+            sbm_parent_stage.new_time = t_new[level - 1];
+            sbm_parent_stage.fine_step_dt = dt_advance;
+            sbm_parent_stage.refinement_ratio = refRatio(level - 1);
+            sbm_parent_stage.profile_parent_fill =
+                solverChoice.sbm_amr_qualification_test;
+            sbm_parent_stage.validate_split_ghost_values =
+                solverChoice.sbm_amr_qualification_expect_split;
+            sbm_parent_stage.inject_parent_store_fault =
+                solverChoice.sbm_amr_qualification_parent_store_fault;
+            sbm_parent_stage_ptr = &sbm_parent_stage;
+        }
+
         erf_slow_rhs_post(level, finest_level, nrk,
                           old_step_time, old_stage_time, new_stage_time, slow_dt,
                           micro->Get_Qstate_Moist_Size(),
@@ -75,7 +95,8 @@
                           cloud_chamber_config.active ? &cloud_chamber_config : nullptr,
                           cloud_chamber_budget.get(), auxiliary_inert_tracer.get(),
                           sbm_state_manager.get(), sbm_transport.get(),
-                          ib_wall_face33[level].get(), ib_wall_ktarget[level].get());
+                          ib_wall_face33[level].get(), ib_wall_ktarget[level].get(), ib_wall_qfx[level].get(),
+                          sbm_parent_stage_ptr);
 
         // One component list for the solve, stage ghosts and implicit reflux.
         Vector<int> implicit_post_comps;
@@ -241,8 +262,8 @@
             // old + (dt R1 + dt R2) / 2.  So add only the change redistribution makes to this
             // stage's RHS, with this stage's weight: setting S_new = S_old + dt R2 here would
             // drop R1 and make the scalars first order in time (#4876).
-            const Real stage_wt = (solverChoice.anelastic[level] &&
-                                   solverChoice.anelastic_type[level] == AnelasticType::RK2 &&
+            const Real stage_wt = (solverChoice.compressibility_type[level] != CompressibilityType::FullyCompressible &&
+                                   solverChoice.timestepping_type[level] == TimesteppingType::RK2 &&
                                    nrk == 1) ? myhalf : one;
             for ( MFIter mfi(S_new[IntVars::cons],TilingIfNotGPU()); mfi.isValid(); ++mfi)
             {

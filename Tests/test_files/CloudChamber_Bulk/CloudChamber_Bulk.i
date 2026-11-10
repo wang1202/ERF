@@ -2,7 +2,8 @@
 # models. CTest substitutes the model and that model's active output species.
 erf.prob_name = "Cloud Chamber"
 erf.init_type = ConstantDensity
-erf.anelastic = 1
+erf.compressibility_type = Anelastic
+erf.timestepping_type = RK2
 erf.use_gravity = true
 erf.moisture_model = @BULK_MODEL@
 erf.vert_implicit = false

@@ -115,7 +115,9 @@ void erf_slow_rhs_post (int level, int finest_level,
                         erf_sbm::SBMStateManager* sbm_state_manager,
                         erf_sbm::SBMTransport* sbm_transport,
                         const MultiFab* ib_wall_face33,
-                        const MultiFab* ib_wall_ktarget)
+                        const MultiFab* ib_wall_ktarget,
+                        const MultiFab* ib_wall_qfx,
+                        const erf_sbm::SBMAMRStageParent* sbm_parent_stage)
 {
     BL_PROFILE_REGION("erf_slow_rhs_post()");
 
@@ -137,8 +139,8 @@ void erf_slow_rhs_post (int level, int finest_level,
     const bool l_moving_terrain   = (solverChoice.terrain_type == TerrainType::MovingFittedMesh);
     if (l_moving_terrain) AMREX_ALWAYS_ASSERT(l_use_terrain);
 
-    const bool l_anelastic     = solverChoice.anelastic[level];
-    const bool l_anelastic_rk2 = (solverChoice.anelastic_type[level] == AnelasticType::RK2);
+    const bool l_anelastic     = solverChoice.compressibility_type[level] != CompressibilityType::FullyCompressible;
+    const bool l_anelastic_rk2 = (solverChoice.timestepping_type[level] == TimesteppingType::RK2);
 
     // Add to the flux registers only in the stages whose fluxes the step's update applies,
     // weighted as in that update (RefluxStageWeight)
@@ -275,7 +277,7 @@ void erf_slow_rhs_post (int level, int finest_level,
     // caller copies S_data over S_new, preserving the predictor density view.
     if (auxiliary_inert_tracer != nullptr) {
         const auto method = !l_anelastic ? erf_auxiliary::HostIntegrator::CompressibleRK3 :
-            (solverChoice.anelastic_type[level] == AnelasticType::RK2 ?
+            (solverChoice.timestepping_type[level] == TimesteppingType::RK2 ?
                 erf_auxiliary::HostIntegrator::AnelasticHeun :
                 erf_auxiliary::HostIntegrator::AnelasticMidPoint);
         auxiliary_inert_tracer->advance_stage(
@@ -295,7 +297,7 @@ void erf_slow_rhs_post (int level, int finest_level,
             avg_xmom.setVal(Real(1.0e8));
         }
         const auto method = !l_anelastic ? erf_auxiliary::HostIntegrator::CompressibleRK3 :
-            (solverChoice.anelastic_type[level] == AnelasticType::RK2 ?
+            (solverChoice.timestepping_type[level] == TimesteppingType::RK2 ?
                 erf_auxiliary::HostIntegrator::AnelasticHeun :
                 erf_auxiliary::HostIntegrator::AnelasticMidPoint);
         const MultiFab& stage_cons_anchor = S_old[IntVars::cons];
@@ -305,7 +307,8 @@ void erf_slow_rhs_post (int level, int finest_level,
             level, method, nrk, step_old_time, input_time, target_time, dt_d,
             *sbm_state_manager, stage_cons_anchor, stage_cons_input,
             stage_cons_target, avg_xmom, avg_ymom, avg_zmom, geom,
-            solverChoice.moisture_indices.qc, solverChoice.moisture_indices.qr);
+            solverChoice.moisture_indices.qc, solverChoice.moisture_indices.qr,
+            sbm_parent_stage);
     }
 
     // *************************************************************************
@@ -689,7 +692,9 @@ void erf_slow_rhs_post (int level, int finest_level,
                                                    bc_ptr_d,
                                                    l_apply_surface_layer_fluxes_in_diffusion, SurfLayer, l_vert_implicit_fac,
                                                    l_reflux_diffusion,
-                                                   (ib_wall_face33) ? ib_wall_face33->const_array(mfi) : Array4<const Real>{});
+                                                   (ib_wall_face33) ? ib_wall_face33->const_array(mfi) : Array4<const Real>{},
+                                                   Array4<const Real>{},
+                                                   (ib_wall_qfx) ? ib_wall_qfx->const_array(mfi) : Array4<const Real>{});
                         }
                         if (use_physical_chamber_wall_flux) {
                             // Apply the physical wall correction immediately to

@@ -51,7 +51,7 @@ void add_par () {
    // those solves cannot do is split one contiguous column at a box seam.)  Setting
    // amr.no_box_split_dir = -1 in the inputs file restores the amrex behavior of
    // allowing grids to be chopped in every direction; ERF::ReadParameters rejects
-   // that if any level uses erf.substepping_type = Implicit.
+   // that if any level uses erf.timestepping_type = RK3_ImplicitSubstep.
    int no_box_split_dir = 2;
    pp.queryAdd("no_box_split_dir",no_box_split_dir);
 
@@ -273,8 +273,21 @@ auto finalize_mpi_and_return = [](int code) {
 
     if (argc >= 2) {
         for (auto i = 1; i < argc; i++) {
-            if (std::string(argv[i]) == "--describe") {
-                ERF::writeBuildInfo(std::cout);
+            const std::string option(argv[i]);
+            if (option == "--describe" || option == "--describe-json" || option == "--describe-yaml") {
+                int rank = 0;
+#ifdef AMREX_USE_MPI
+                MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+#endif
+                if (rank == 0) {
+                    if (option == "--describe-json") {
+                        ERF::writeBuildInfoJSON(std::cout);
+                    } else if (option == "--describe-yaml") {
+                        ERF::writeBuildInfoYAML(std::cout);
+                    } else {
+                        ERF::writeBuildInfo(std::cout);
+                    }
+                }
                 return finalize_mpi_and_return(0);
             }
         }

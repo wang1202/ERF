@@ -25,7 +25,11 @@
 class CloudChamberBudget;
 
 namespace erf_auxiliary { class AuxiliaryInertTracer; }
-namespace erf_sbm { class SBMStateManager; class SBMTransport; }
+namespace erf_sbm {
+class SBMStateManager;
+class SBMTransport;
+struct SBMAMRStageParent;
+}
 
 /**
  * @brief Driver for the SHOC physics model.
@@ -45,8 +49,8 @@ class ShocDriver;
 inline amrex::Real
 StageFluxWeight (const SolverChoice& solverChoice, int level, int nrk)
 {
-    if (solverChoice.anelastic[level] == 1) {
-        if (solverChoice.anelastic_type[level] == AnelasticType::RK2) {
+    if (solverChoice.compressibility_type[level] != CompressibilityType::FullyCompressible) {
+        if (solverChoice.timestepping_type[level] == TimesteppingType::RK2) {
             return amrex::Real(0.5);
         }
         return (nrk == 1) ? amrex::Real(1.) : amrex::Real(0.);
@@ -249,6 +253,8 @@ void erf_slow_rhs_post (int level, int finest_level, int nrk,
                        erf_sbm::SBMStateManager* sbm_state_manager,
                        erf_sbm::SBMTransport* sbm_transport,
                        const amrex::MultiFab* ib_wall_face33 = nullptr,
-                       const amrex::MultiFab* ib_wall_ktarget = nullptr);
+                       const amrex::MultiFab* ib_wall_ktarget = nullptr,
+                       const amrex::MultiFab* ib_wall_qfx = nullptr,
+                       const erf_sbm::SBMAMRStageParent* sbm_parent_stage = nullptr);
 
 #endif
