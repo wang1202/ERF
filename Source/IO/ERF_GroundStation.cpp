@@ -173,62 +173,80 @@ ERF::sampleGroundStationColumn (int lev,
         const auto z_cc_arr = z_phys_cc[lev]->const_array(mfi);
 
         const bool use_moisture = (solverChoice.moisture_type != MoistureType::None);
-        const Real z_surf = Real(0.25) * (z_nd_arr(i_lev    , j_lev    , klo) +
-                                          z_nd_arr(i_lev + 1, j_lev    , klo) +
-                                          z_nd_arr(i_lev    , j_lev + 1, klo) +
-                                          z_nd_arr(i_lev + 1, j_lev + 1, klo));
-
-        // Diagnose pressure at the lowest cell center, then hydrostatically
-        // extrapolate it downward to the actual terrain surface.
-        const Real rho_low = cons_arr(i_lev, j_lev, klo, Rho_comp);
-        const Real qv_low = use_moisture
-                                ? cons_arr(i_lev, j_lev, klo, RhoQ1_comp) / rho_low
-                                : Real(0.0);
-        const Real p_low = getPgivenRTh(
-            cons_arr(i_lev, j_lev, klo, RhoTheta_comp), qv_low);
-        const Real dz_low_to_surface =
-            amrex::max(z_cc_arr(i_lev, j_lev, klo) - z_surf, Real(0.0));
-        const Real rho_moist_low = rho_low * (Real(1.0) + qv_low);
-
-        packed[0] = p_low + rho_moist_low * CONST_GRAV * dz_low_to_surface;
-
         const int nprecip = std::min(3, static_cast<int>(qmoist[lev].size()));
-        for (int n = 0; n < nprecip; ++n) {
-            if (qmoist[lev][n] != nullptr) {
-                const auto precip_arr = qmoist[lev][n]->const_array(mfi);
-                packed[1] += precip_arr(i_lev, j_lev, klo);
-            }
-        }
+        Array4<const Real> precip_arr0{};
+        Array4<const Real> precip_arr1{};
+        Array4<const Real> precip_arr2{};
+        const bool have_precip0 = nprecip > 0 && qmoist[lev][0] != nullptr;
+        const bool have_precip1 = nprecip > 1 && qmoist[lev][1] != nullptr;
+        const bool have_precip2 = nprecip > 2 && qmoist[lev][2] != nullptr;
+        if (have_precip0) { precip_arr0 = qmoist[lev][0]->const_array(mfi); }
+        if (have_precip1) { precip_arr1 = qmoist[lev][1]->const_array(mfi); }
+        if (have_precip2) { precip_arr2 = qmoist[lev][2]->const_array(mfi); }
 
-        for (int k = klo; k <= khi; ++k) {
-            const int base = 2 + 7 * (k - klo);
+        // MultiFab data can live in device memory. Gather and diagnose the
+        // column on the GPU, then copy the compact result to the host for the
+        // existing MPI reduction and station-file writer.
+        Gpu::DeviceVector<Real> packed_device(packed.size(), Real(0.0));
+        Real* packed_device_ptr = packed_device.dataPtr();
+        ParallelFor(1, [=] AMREX_GPU_DEVICE (int) noexcept
+        {
+            const Real z_surf = Real(0.25) * (z_nd_arr(i_lev    , j_lev    , klo) +
+                                              z_nd_arr(i_lev + 1, j_lev    , klo) +
+                                              z_nd_arr(i_lev    , j_lev + 1, klo) +
+                                              z_nd_arr(i_lev + 1, j_lev + 1, klo));
 
-            const Real rho = cons_arr(i_lev, j_lev, k, Rho_comp);
-            const Real qv = use_moisture ? cons_arr(i_lev, j_lev, k, RhoQ1_comp) / rho : Real(0.0);
-            const Real rhotheta = cons_arr(i_lev, j_lev, k, RhoTheta_comp);
-            const Real theta = rhotheta / rho;
-            const Real temp = getTgivenRandRTh(rho, rhotheta, qv);
-            const Real pressure = getPgivenRTh(rhotheta, qv);
-            const Real u = Real(0.5) * (xvel_arr(i_lev, j_lev, k) + xvel_arr(i_lev + 1, j_lev, k));
-            const Real v = Real(0.5) * (yvel_arr(i_lev, j_lev, k) + yvel_arr(i_lev, j_lev + 1, k));
+            // Diagnose pressure at the lowest cell center, then hydrostatically
+            // extrapolate it downward to the actual terrain surface.
+            const Real rho_low = cons_arr(i_lev, j_lev, klo, Rho_comp);
+            const Real qv_low = use_moisture
+                                    ? cons_arr(i_lev, j_lev, klo, RhoQ1_comp) / rho_low
+                                    : Real(0.0);
+            const Real p_low = getPgivenRTh(
+                cons_arr(i_lev, j_lev, klo, RhoTheta_comp), qv_low);
+            const Real dz_low_to_surface =
+                amrex::max(z_cc_arr(i_lev, j_lev, klo) - z_surf, Real(0.0));
+            const Real rho_moist_low = rho_low * (Real(1.0) + qv_low);
 
-            Real rh = Real(0.0);
-            if (use_moisture) {
-                Real qsat = Real(0.0);
-                erf_qsatw(temp, pressure * Real(0.01), qsat);
-                if (qsat > Real(0.0)) {
-                    rh = Real(100.0) * qv / qsat;
+            packed_device_ptr[0] = p_low + rho_moist_low * CONST_GRAV * dz_low_to_surface;
+
+            if (have_precip0) { packed_device_ptr[1] += precip_arr0(i_lev, j_lev, klo); }
+            if (have_precip1) { packed_device_ptr[1] += precip_arr1(i_lev, j_lev, klo); }
+            if (have_precip2) { packed_device_ptr[1] += precip_arr2(i_lev, j_lev, klo); }
+
+            for (int k = klo; k <= khi; ++k) {
+                const int base = 2 + 7 * (k - klo);
+
+                const Real rho = cons_arr(i_lev, j_lev, k, Rho_comp);
+                const Real qv = use_moisture ? cons_arr(i_lev, j_lev, k, RhoQ1_comp) / rho : Real(0.0);
+                const Real rhotheta = cons_arr(i_lev, j_lev, k, RhoTheta_comp);
+                const Real theta = rhotheta / rho;
+                const Real temp = getTgivenRandRTh(rho, rhotheta, qv);
+                const Real pressure = getPgivenRTh(rhotheta, qv);
+                const Real u = Real(0.5) * (xvel_arr(i_lev, j_lev, k) + xvel_arr(i_lev + 1, j_lev, k));
+                const Real v = Real(0.5) * (yvel_arr(i_lev, j_lev, k) + yvel_arr(i_lev, j_lev + 1, k));
+
+                Real rh = Real(0.0);
+                if (use_moisture) {
+                    Real qsat = Real(0.0);
+                    erf_qsatw(temp, pressure * Real(0.01), qsat);
+                    if (qsat > Real(0.0)) {
+                        rh = Real(100.0) * qv / qsat;
+                    }
                 }
-            }
 
-            packed[base + 0] = z_cc_arr(i_lev, j_lev, k) - z_surf;
-            packed[base + 1] = u;
-            packed[base + 2] = v;
-            packed[base + 3] = theta;
-            packed[base + 4] = temp;
-            packed[base + 5] = qv;
-            packed[base + 6] = rh;
-        }
+                packed_device_ptr[base + 0] = z_cc_arr(i_lev, j_lev, k) - z_surf;
+                packed_device_ptr[base + 1] = u;
+                packed_device_ptr[base + 2] = v;
+                packed_device_ptr[base + 3] = theta;
+                packed_device_ptr[base + 4] = temp;
+                packed_device_ptr[base + 5] = qv;
+                packed_device_ptr[base + 6] = rh;
+            }
+        });
+
+        Gpu::streamSynchronize();
+        Gpu::copy(Gpu::deviceToHost, packed_device.begin(), packed_device.end(), packed.begin());
 
         break;
     }
@@ -456,24 +474,52 @@ ERF::writeGroundStationData (GroundStationConfig& station, Real time, int nstep)
             const auto lmask_arr = land_mask ? land_mask->const_array(mfi)
                                               : Array4<const int> {};
 
-            surface_pack[0] = ustar_arr(i2d, j2d, 0);
-            surface_pack[1] = tstar_arr(i2d, j2d, 0);
-            surface_pack[2] = qstar_arr(i2d, j2d, 0);
-            surface_pack[3] = olen_arr(i2d, j2d, 0);
-            const int is_land = lmask_arr ? lmask_arr(i2d, j2d, 0) : 1;
-            if (t_sfc_arr && t_flux_arr &&
+            const bool have_t_sfc = (noahmp_t_sfc != nullptr);
+            const bool have_t_flux = (noahmp_t_flux != nullptr);
+            const bool have_lmask = (land_mask != nullptr);
+            Vector<Real> surface_raw(10, Real(0.0));
+            Gpu::DeviceVector<Real> surface_raw_device(surface_raw.size(), Real(0.0));
+            Real* surface_raw_device_ptr = surface_raw_device.dataPtr();
+            ParallelFor(1, [=] AMREX_GPU_DEVICE (int) noexcept
+            {
+                surface_raw_device_ptr[0] = ustar_arr(i2d, j2d, 0);
+                surface_raw_device_ptr[1] = tstar_arr(i2d, j2d, 0);
+                surface_raw_device_ptr[2] = qstar_arr(i2d, j2d, 0);
+                surface_raw_device_ptr[3] = olen_arr(i2d, j2d, 0);
+                if (have_t_sfc) {
+                    surface_raw_device_ptr[4] = t_sfc_arr(i2d, j2d, 0);
+                }
+                if (have_t_flux) {
+                    surface_raw_device_ptr[5] = t_flux_arr(i2d, j2d, 0);
+                }
+                surface_raw_device_ptr[6] = have_lmask
+                    ? static_cast<Real>(lmask_arr(i2d, j2d, 0)) : Real(1.0);
+                surface_raw_device_ptr[7] = tsurf_arr(i2d, j2d, 0);
+                surface_raw_device_ptr[8] = qsurf_arr(i2d, j2d, 0);
+                surface_raw_device_ptr[9] = z0_arr(i2d, j2d, 0);
+            });
+            Gpu::streamSynchronize();
+            Gpu::copy(Gpu::deviceToHost, surface_raw_device.begin(),
+                      surface_raw_device.end(), surface_raw.begin());
+
+            surface_pack[0] = surface_raw[0];
+            surface_pack[1] = surface_raw[1];
+            surface_pack[2] = surface_raw[2];
+            surface_pack[3] = surface_raw[3];
+            const int is_land = static_cast<int>(surface_raw[6]);
+            if (have_t_sfc && have_t_flux &&
                 validNoahMPGroundStationSurfaceTemperature(
-                    t_sfc_arr(i2d, j2d, 0), t_flux_arr(i2d, j2d, 0), is_land)) {
+                    surface_raw[4], surface_raw[5], is_land)) {
                 // Noah-MP TSK/t_sfc is a physical skin temperature.  MOST
                 // profiles use potential temperature, so convert it at the
                 // station's diagnosed surface pressure before extrapolating.
                 surface_pack[4] = getThgivenTandP(
-                    t_sfc_arr(i2d, j2d, 0), surface_pressure, R_d / Cp_d);
+                    surface_raw[4], surface_pressure, R_d / Cp_d);
             } else {
-                surface_pack[4] = tsurf_arr(i2d, j2d, 0);
+                surface_pack[4] = surface_raw[7];
             }
-            surface_pack[5] = qsurf_arr(i2d, j2d, 0);
-            surface_pack[6] = z0_arr(i2d, j2d, 0);
+            surface_pack[5] = surface_raw[8];
+            surface_pack[6] = surface_raw[9];
             break;
         }
 
