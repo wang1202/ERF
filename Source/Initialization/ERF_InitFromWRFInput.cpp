@@ -675,15 +675,20 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev, bool read_atmos_state)
         // for this specific input file.
         int use_alt_density = CheckForDensity(nc_init_file[lev][idx]);
 
-        int ratio_from_file;
-        Box subdomain_to_read = read_subdomain_from_wrfinput(lev, nc_init_file[lev][idx], ratio_from_file);
+        // The file's box as the file gives it, and in the global ERF index space
+        Box subdomain_to_read;
+        const Box global_file_box = wrfinput_file_box(lev, idx, nullptr, &subdomain_to_read);
         Print() << "Box in file " << subdomain_to_read << "\n";
-        const Box global_file_box = wrfinput_file_box(lev, idx);
-        // wrfinput_var_box keeps this horizontal low corner for every variable,
-        // including staggered and one-dimensional fields.
-        IntVect file_shift(0);
-        file_shift[0] = global_file_box.smallEnd(0) - subdomain_to_read.smallEnd(0);
-        file_shift[1] = global_file_box.smallEnd(1) - subdomain_to_read.smallEnd(1);
+        // WRF parent starts are relative to the full parent file, whereas an ERF refinement
+        // patch may cover only part of that file, so each variable is shifted by the file's
+        // global origin rather than aligned with the patch.  wrfinput_var_box keeps this
+        // horizontal low corner for every variable, including staggered and one-dimensional
+        // fields.  A WRF nest carries the full eta column of its parent, so its k indices are
+        // already those of the domain: there is no vertical shift at any level, also when
+        // the refined region does not start at the bottom of the domain.
+        IntVect shift_by(0);
+        shift_by[0] = global_file_box.smallEnd(0) - subdomain_to_read.smallEnd(0);
+        shift_by[1] = global_file_box.smallEnd(1) - subdomain_to_read.smallEnd(1);
 
         Box subdomain_to_fill = boxes_at_level[lev][idx];
         Print() << "Box to fill " << subdomain_to_fill << "\n";
@@ -719,16 +724,6 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev, bool read_atmos_state)
                 (var_name == "THM")     || (var_name == "QVAPOR")  || (var_name == "QCLOUD") ||
                 (var_name == "QICE")    || (var_name == "QRAIN")   || (var_name == "QSNOW")  ||
                 (var_name == "QGRAUP")  || (var_name == "PH")      || (var_name == "PHB");
-            const bool required_hydrometeor = solverChoice.use_wrf_bdy_qc_qi &&
-                ((var_name == "QCLOUD" && solverChoice.moisture_indices.qc >= 0) ||
-                 (var_name == "QICE"   && solverChoice.moisture_indices.qi >= 0) ||
-                 (var_name == "QRAIN"  && solverChoice.moisture_indices.qr >= 0) ||
-                 (var_name == "QSNOW"  && solverChoice.moisture_indices.qs >= 0) ||
-                 (var_name == "QGRAUP" && solverChoice.moisture_indices.qg >= 0));
-            if (!success && required_hydrometeor) {
-                amrex::Abort(std::string("erf.use_wrf_bdy_qc_qi requires " + var_name +
-                                         " in wrfinput for the active moisture component").c_str());
-            }
             if (!success && !has_fallback_behavior) {
                 amrex::Abort(std::string("ERF::init_from_wrfinput: failed to read required variable " + var_name).c_str());
             }
@@ -737,22 +732,6 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev, bool read_atmos_state)
             FArrayBox var_fab_crse;
 
             if (success) {
-                // WRF parent starts are relative to the full parent file, whereas an
-                // ERF refinement patch may cover only part of that file.  Accumulate
-                // the file origins instead of aligning its first cell with the patch.
-                IntVect shift_by(file_shift);
-                if (lev > 1) {
-                    Box shift_by_box(subdomains[lev][0].minimalBox());
-                    shift_by[2] = shift_by_box.smallEnd(2) - file_box.smallEnd(2);
-                    // The fab just read lives on the file's vertical grid, so when this level
-                    // is refined in the vertical the z part of the shift has to be expressed
-                    // there too rather than in this level's index space.
-                    if (rr_z > 1) {
-                        shift_by[2] = amrex::coarsen(shift_by_box.smallEnd(2), rr_z)
-                                    - file_box.smallEnd(2);
-                    }
-                }
-
                 // The box the whole variable covers, in this level's index space
                 Box var_box(file_box);
                 var_box.shift(shift_by);
@@ -2324,20 +2303,9 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev, bool read_atmos_state)
                     << " -- reading the boundary data from " << nc_bdy_file << " instead" << std::endl;
             use_erfbdy = false;
         }
-        const bool separate_hydrometeors = solverChoice.use_wrf_bdy_qc_qi &&
-            wrf_bdy_has_separate_hydrometeors(solverChoice.moisture_indices);
         if (write_erfbdy) {
-            nvars_erfbdy = separate_hydrometeors
-                         ? WRFBdyHydrometeorVars::NumTypes
-                         : (solverChoice.use_wrf_bdy_qc_qi
-                            ? WRFBdyVars::NumTypes : WRFBdyVars::LegacyNumTypes);
+            nvars_erfbdy = WRFBdyVars::NumTypes;
         }
-        auto repack_runtime_bdy = [&] (const int itime) {
-            repack_wrfbdy_to_realbdy(bdy_data_xlo[itime], solverChoice.use_wrf_bdy_qc_qi, separate_hydrometeors);
-            repack_wrfbdy_to_realbdy(bdy_data_xhi[itime], solverChoice.use_wrf_bdy_qc_qi, separate_hydrometeors);
-            repack_wrfbdy_to_realbdy(bdy_data_ylo[itime], solverChoice.use_wrf_bdy_qc_qi, separate_hydrometeors);
-            repack_wrfbdy_to_realbdy(bdy_data_yhi[itime], solverChoice.use_wrf_bdy_qc_qi, separate_hydrometeors);
-        };
 
         // Path 1: Load from existing erfbdy file.
         if (use_erfbdy) {
@@ -2350,17 +2318,8 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev, bool read_atmos_state)
                                                        ntimes_erfbdy, nvars_erfbdy, real_width,
                                                        bdy_times, start_bdy_time, final_bdy_time);
 
-            if (nvars_erfbdy != WRFBdyVars::LegacyNumTypes &&
-                nvars_erfbdy != WRFBdyVars::NumTypes &&
-                nvars_erfbdy != WRFBdyHydrometeorVars::NumTypes) {
-                amrex::Error("ERFBdy cache has an unsupported boundary-variable layout");
-            }
-            const int expected_bdy_nvars = separate_hydrometeors
-                ? WRFBdyHydrometeorVars::NumTypes
-                : (solverChoice.use_wrf_bdy_qc_qi ? WRFBdyVars::NumTypes
-                                                  : WRFBdyVars::LegacyNumTypes);
-            if (nvars_erfbdy != expected_bdy_nvars) {
-                amrex::Error("ERFBdy cache layout does not match the active WRF hydrometeor boundary mode; regenerate it from wrfbdy");
+            if (nvars_erfbdy != WRFBdyVars::NumTypes) {
+                amrex::Error("ERFBdy cache has an unsupported boundary-variable layout; regenerate it from wrfbdy");
             }
 
             Print() << "erfbdy file contains " << ntimes_erfbdy << " time slices" << std::endl;
@@ -2379,7 +2338,6 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev, bool read_atmos_state)
                                  bdy_data_xlo, bdy_data_xhi,
                                  bdy_data_ylo, bdy_data_yhi,
                                  nvars_erfbdy, real_width);
-                repack_runtime_bdy(itime);
                 Print() << "Loaded erfbdy time slice " << itime << std::endl;
             }
 
@@ -2424,9 +2382,6 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev, bool read_atmos_state)
                                              wrf_MUB, wrf_C1H, wrf_C2H, wrf_RDNW, wrf_PHB, z_phys_cc[lev], z_phys_nd[lev],
                                              lev_new[Vars::xvel], lev_new[Vars::yvel], lev_new[Vars::cons],
                                              r_hse, area_vec, geom[lev], use_moist,
-                                             solverChoice.use_wrf_bdy_qc_qi,
-                                             solverChoice.moisture_indices.qi >= 0,
-                                             separate_hydrometeors,
                                              solverChoice.rebalance_wrf_input, domain_bcs_type,
                                              real_width, bdy_time_interval, is_anelastic);
 
@@ -2438,10 +2393,6 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev, bool read_atmos_state)
                                          nvars_erfbdy);
                     Print() << "Wrote erfbdy time index " << itime << " of " << ntimes_total-1 << std::endl;
                 }
-                if (itime == ntimes_total-1 && itime > 0) {
-                    repack_runtime_bdy(itime-1);
-                }
-                repack_runtime_bdy(itime);
             } // itime
 
             // If writing erfbdy and we have more than 3 times, then process the remaining times.
@@ -2453,9 +2404,6 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev, bool read_atmos_state)
                                                  wrf_MUB, wrf_C1H, wrf_C2H, wrf_RDNW, wrf_PHB, z_phys_cc[lev], z_phys_nd[lev],
                                                  lev_new[Vars::xvel], lev_new[Vars::yvel], lev_new[Vars::cons],
                                                  r_hse, area_vec, geom[lev], use_moist,
-                                                 solverChoice.use_wrf_bdy_qc_qi,
-                                                 solverChoice.moisture_indices.qi >= 0,
-                                                 separate_hydrometeors,
                                                  solverChoice.rebalance_wrf_input, domain_bcs_type,
                                                  real_width, bdy_time_interval, is_anelastic);
 
@@ -2464,11 +2412,6 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev, bool read_atmos_state)
                                          bdy_data_ylo[itime], bdy_data_yhi[itime],
                                          nvars_erfbdy);
                     Print() << "Wrote erfbdy time index " << itime << " of " << ntimes_total-1 << std::endl;
-
-                    if (itime == ntimes_total-1 && itime > 0) {
-                        repack_runtime_bdy(itime-1);
-                    }
-                    repack_runtime_bdy(itime);
 
                     bdy_data_xlo[itime].clear();
                     bdy_data_xhi[itime].clear();
@@ -2723,7 +2666,7 @@ init_base_state_from_wrfinput (const Box& subdomain,
                                              "init_base_state_from_wrfinput requires boxes that "
                                              "reach the bottom of the region being initialized: "
                                              "each column is seeded there and integrated upward. "
-                                             "Set erf.max_grid_size_z large enough that the grids "
+                                             "Set amr.max_grid_size_z large enough that the grids "
                                              "are not decomposed in z.");
             bx.makeSlab(2,klo);
 
@@ -3490,13 +3433,21 @@ ERF::read_psfc_from_own_init_file (int lev)
 }
 
 /** Return a WRF file's box in the global ERF index space.  WRF's I/J_PARENT_START
- * are relative to the complete parent file, not to the smaller ERF patch on it. */
+ * are relative to the complete parent file, not to the smaller ERF patch on it.
+ * file_local_box, if given, is set to the box as the file itself gives it. */
 Box
-ERF::wrfinput_file_box (int lev, int file_index, int* ratio_out) const
+ERF::wrfinput_file_box (int lev, int file_index, int* ratio_out, Box* file_local_box) const
 {
     AMREX_ALWAYS_ASSERT(lev >= 0 && file_index >= 0 &&
                         file_index < static_cast<int>(nc_init_file[lev].size()));
-    if (lev == 0) { return geom[0].Domain(); }
+    if (lev == 0) {
+        if (file_local_box != nullptr) {
+            int ratio;
+            *file_local_box = read_subdomain_from_wrfinput(0, nc_init_file[0][file_index], ratio);
+            if (ratio_out != nullptr) { *ratio_out = ratio; }
+        }
+        return geom[0].Domain();
+    }
 
     IntVect parent_origin(0);
     for (int level = 1; level <= lev; ++level) {
@@ -3526,6 +3477,7 @@ ERF::wrfinput_file_box (int lev, int file_index, int* ratio_out) const
                          ", which must both be divisible by PARENT_GRID_RATIO = " +
                          std::to_string(ratio) + ".");
         }
+        if (level == lev && file_local_box != nullptr) { *file_local_box = file_box; }
         for (int d = 0; d < 2; ++d) {
             file_box.shift(d, parent_origin[d] * expected_ratio[d]);
         }

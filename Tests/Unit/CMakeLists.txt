@@ -116,6 +116,7 @@ target_sources(${erf_exe_name}
     # direction must take the plane at the periodic image, not the near side of the seam.
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestBndryPlaneIndex.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestMultiScalarSlots.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestInflowProfile.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestSurfaceLayerStress.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestSurfaceLayer.cpp
     # Motivation: the roughness inverted from surface fluxes must stay inside its bounds.
@@ -136,7 +137,6 @@ target_sources(${erf_exe_name}
     # refined region that does not reach the top was read outside its data.
     ${CMAKE_CURRENT_SOURCE_DIR}/Utils/ERF_GTestReduceToMaxPerHeight.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestWrfBoundaryDensity.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestWrfBoundaryMoisture.cpp
     # Motivation: the wrfbdy time-interpolation weight must follow the elapsed time to roundoff,
     # not to the ~2.4e-7 s spacing of doubles at epoch times.
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestBdyTimeWeights.cpp
@@ -161,6 +161,9 @@ target_sources(${erf_exe_name}
     # Motivation: the chamber profile and perturbation must remain analytic,
     # bounded, and independent of MPI decomposition and tile shape.
     ${CMAKE_CURRENT_SOURCE_DIR}/Prob/ERF_GTestCloudChamber.cpp
+    # Motivation: the ABL warm bubble (prob.bubble_*) must follow WRF's cos^2 form on each
+    # cell's own height, and a compressible bubble must be made at constant pressure.
+    ${CMAKE_CURRENT_SOURCE_DIR}/Prob/ERF_GTestABLWarmBubble.cpp
     # Motivation: RICO's moisture source must be continuous at prob.moisture_source_cutoff and
     # default to RICO's 2980 m (erf-model/ERF#4626).
     ${CMAKE_CURRENT_SOURCE_DIR}/Prob/ERF_GTestRICOMoistureSource.cpp
@@ -225,6 +228,10 @@ target_sources(${erf_exe_name}
     # Motivation: a calm cell above an immersed wall gave the wall law u* = 0, an Obukhov length
     # of zero and z / 0 (erf-model/ERF#4016); the stability estimate is now bounded as on flat ground.
     ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/ERF_GTestImmersedWallStability.cpp
+    # Motivation: the building wall function's Louis (1979) factors must be 1
+    # at neutral, follow the published closed forms on both sides and weaken
+    # mixing monotonically with the bulk Richardson number.
+    ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/ERF_GTestIBSEBLouis.cpp
     # Motivation: the immersed-forcing temperature kernels applied the MOST similarity functions whatever
     # erf.if_stability_correction said, while the momentum kernels gate on it (erf-model/ERF#4931); off,
     # every kernel is the log law.
@@ -266,6 +273,13 @@ target_sources(${erf_exe_name}
     # off the ground the buildings shade; the shadow must be the buildings' geometry,
     # across a periodic edge too, and under an overhang, in every box of a level.
     ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/ERF_GTestIBSEBGroundShadow.cpp
+    # Motivation: with erf.ibseb.ground_view_shadow a face takes the beam the ground
+    # reflects through the sunlit part of its ground view; that part must be the
+    # buildings' geometry (a closed form behind a long wall, a count from the geometry
+    # for a building set), and the answer must not depend on where a rank's map ends.
+    ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/ERF_GTestIBSEBGroundViewShadow.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/ERF_GTestIBSEBGroundWalls.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/SourceTerms/ERF_GTestIBSEBRoofs.cpp
     # Motivation: observation nudging must read a station file exactly, relax
     # to the closed-form target with the right weight, sigma band and rate cap,
     # and put its sources on the right faces over flat, fitted and immersed
@@ -276,6 +290,7 @@ target_sources(${erf_exe_name}
     # and reflect (1 - eps) of the downwelling LW at a gray surface.
     ${CMAKE_CURRENT_SOURCE_DIR}/Radiation/ERF_GTestTwoStreamKernels.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Radiation/ERF_GTestTwoStreamColumn.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Radiation/ERF_GTestTwoStreamRoof.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Radiation/ERF_GTestTwoStreamRadiationDriver.cpp
     # Motivation: the Simple longwave scheme must stay inside the column when the
     # moist layer reaches the domain top (erf-model/ERF#4484), and give the top
@@ -403,23 +418,14 @@ target_sources(${erf_exe_name}
     # from water (erf-model/ERF#4390), keeping each coarse mean and cell_cons_interp elsewhere.
     ${CMAKE_CURRENT_SOURCE_DIR}/LandSurfaceModel/ERF_GTestTypedInterp.cpp
 )
-# The fire coupling's headers are only on the include path, and its sources
-# only in the library, when the fire coupling is built.
-if(ERF_ENABLE_FIRE)
-  target_sources(${erf_exe_name} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestFireAnchorLevel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestFireAtmInjection.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestFireCoupler.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestFirePrecip.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestFireRegistry.cpp
-  )
-endif()
 if(ERF_DIM STREQUAL "3")
   # Motivation: the auxiliary mapped state must reproduce ERF's computational
   # divergence, exact host stage recipes, canonical metric transfers, and ledger.
   target_sources(${erf_exe_name} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/AuxiliaryState/ERF_GTestAuxiliaryMappedTransport.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Microphysics/SBM/ERF_GTestSBMTransport.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Microphysics/SBM/ERF_GTestSBMBoundary.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Microphysics/SBM/ERF_GTestSBMParticleMixing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Microphysics/SBM/ERF_GTestSBMAMRTransfer.cpp)
 endif()
 if(ERF_ENABLE_NETCDF)
@@ -503,6 +509,30 @@ if(ERF_ENABLE_MOVING_BODIES)
   target_sources(${erf_exe_name} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/MovingBodies/ERF_GTestStructureRegistry.cpp
   )
+  # Motivation: a structure model's source restricted onto the coarser levels must put the
+  # same force on the air as on the model's level, over a hill (with the mesh Jacobian),
+  # one and two levels down, with anisotropic ratios and a fine level split into boxes and
+  # across a periodic boundary; without the Jacobian the hill must change the force.
+  target_sources(${erf_exe_name} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/MovingBodies/ERF_GTestStructureCoarseSource.cpp
+  )
+  # A structure model directory may define erf_structure_model_add_unit_tests(target) in its
+  # ERFStructureModel.cmake to build its own GoogleTest files into this executable, with
+  # ERF's test main; ERF_STRUCTURE_MODEL_DIR holds the directory during the call. The file
+  # is included again here because CMake keeps only the last definition of a function, and
+  # the empty definition before each include keeps a directory without the hook from
+  # calling the one of the directory before it. Called before build_erf_exe, so that a
+  # CUDA build compiles the added files as CUDA too. A relative directory is resolved
+  # against Exec/, as build_erf_lib resolves it, so both name the same folder. The file
+  # must therefore be safe to include twice: definitions only, no targets or options.
+  foreach(_structure_dir IN LISTS ERF_STRUCTURE_MODEL_DIRS)
+    get_filename_component(_structure_dir "${_structure_dir}" ABSOLUTE BASE_DIR "${ERF_SOURCE_DIR}/Exec")
+    function(erf_structure_model_add_unit_tests target)
+    endfunction()
+    set(ERF_STRUCTURE_MODEL_DIR "${_structure_dir}")
+    include("${_structure_dir}/ERFStructureModel.cmake")
+    erf_structure_model_add_unit_tests(${erf_exe_name})
+  endforeach()
 endif()
 build_erf_exe(${erf_exe_name} NO_ERF_MAIN)
 target_link_libraries(${erf_exe_name} PRIVATE GTest::gtest)
@@ -512,18 +542,6 @@ erf_register_gtest_suite(${erf_exe_name}
   DISCOVERY_TIMEOUT 60
   EXECUTION_TIMEOUT 600
 )
-
-# The fire coupling kernels under the floating-point traps a fire run arms.
-# clang at -O2/-O3 evaluates the unselected arm of `c ? a/b : x`, so a guarded
-# 0/0 or log(0) raises FE_INVALID/FE_DIVBYZERO and kills the run; the plain
-# unit run never arms the traps and cannot see it.
-if(ERF_ENABLE_FIRE)
-  add_test(NAME FireCouplingGTests_FpeTraps
-    COMMAND ${erf_exe_name}
-      --gtest_filter=FireAnchorLevel.*:FireCoupler.*:FirePrecip.*:FireRegistry.*:ExnerTendency.*:HeatInjection.*:SmokeInjection.*
-      amrex.fpe_trap_invalid=1 amrex.fpe_trap_zero=1 amrex.fpe_trap_overflow=1)
-  set_tests_properties(FireCouplingGTests_FpeTraps PROPERTIES LABELS "unit;fire" TIMEOUT 600)
-endif()
 
 add_test(NAME erf_unit_tests_shuffle_repeat
   COMMAND ${erf_exe_name}
@@ -592,12 +610,16 @@ if(TARGET erf_exec AND ERF_DIM STREQUAL "3" AND
     ${CMAKE_CURRENT_SOURCE_DIR}/ERF_GTestRuntimeStubs.cpp)
   build_erf_exe(erf_sbm_checkpoint_corruptor NO_ERF_MAIN)
 
-  # The fire coupling's smoke scalar adds a component ahead of the moisture
-  # ones in the checkpoint (NSCALARS in ERF_IndexDefines.H); every RunM3Smoke
-  # test passes the count so the runner can insert it in the expected values.
+  # The dust coupling's dust scalars and the fire coupling's smoke scalar add
+  # components ahead of the moisture ones in the checkpoint (NSCALARS in
+  # ERF_IndexDefines.H); every RunM3Smoke test passes the count so the runner
+  # can insert them in the expected values.
   set(_sbm_extra_scalars 0)
   if(ERF_ENABLE_FIRE)
     math(EXPR _sbm_extra_scalars "${_sbm_extra_scalars} + 1")
+  endif()
+  if(ERF_ENABLE_DUST)
+    math(EXPR _sbm_extra_scalars "${_sbm_extra_scalars} + ${ERF_NUM_DUST_SCALARS}")
   endif()
 
   add_test(NAME SBM_M3_ZeroCarrier_ERF_Smoke
@@ -646,11 +668,39 @@ if(TARGET erf_exec AND ERF_DIM STREQUAL "3" AND
   add_sbm_expected_failure_test(SBM_M3_Donor_CFL inputs_zero_carrier
     "SBM M3 donor outgoing-demand condition failed"
     "-DOVERRIDE=erf.sbm_test_donor_cfl_fault=true")
+  # Multilevel SBM outside the qualified two-level envelope is rejected at
+  # construction, in production and qualification builds alike.
+  add_sbm_expected_failure_test(SBM_AMR_Reject_ThreeLevels
+    inputs_amr_production_2level
+    "SBM supports at most two AMR levels"
+    "-DOVERRIDE=amr.max_level=2")
+  add_sbm_expected_failure_test(SBM_AMR_Reject_RefRatio4
+    inputs_amr_production_2level
+    "SBM AMR supports amr.ref_ratio = 2 in every direction only"
+    "-DOVERRIDE=amr.ref_ratio=4")
+  add_sbm_expected_failure_test(SBM_AMR_Reject_OneWayCoupling
+    inputs_amr_production_2level
+    "SBM AMR requires erf.coupling_type = TwoWay"
+    "-DOVERRIDE=erf.coupling_type=OneWay")
+  add_sbm_expected_failure_test(SBM_AMR_Reject_StretchedDz
+    inputs_amr_production_2level
+    "SBM AMR requires a ConstantDz mesh without terrain"
+    "-DOVERRIDE=erf.grid_stretching_ratio=1.1 erf.initial_dz=0.025")
+  # (ERF itself makes levels of different compressibility one-way coupled.)
+  add_sbm_expected_failure_test(SBM_AMR_Reject_MixedIntegrators
+    inputs_amr_production_2level
+    "SBM AMR requires the same compressibility and erf.timestepping_type on every level"
+    "-DOVERRIDE=erf.compressibility_type=Anelastic erf.timestepping_type=RK2 MidPoint")
+  add_sbm_expected_failure_test(SBM_AMR_Reject_AnelasticStratified
+    inputs_amr_production_2level
+    "SBM AMR with anelastic levels requires a constant base density"
+    "-DOVERRIDE=erf.init_type=Isentropic erf.compressibility_type=Anelastic erf.timestepping_type=MidPoint")
   add_test(NAME SBM_M3_Adaptive_Anelastic_Donor_CFL
     COMMAND ${CMAKE_COMMAND}
       -DERF_EXECUTABLE=$<TARGET_FILE:erf_exec>
       -DINPUT_FILE=${PROJECT_SOURCE_DIR}/Tests/test_files/SBM/inputs_adaptive_anelastic_donor
       -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+      "-DEXPECTED_STDOUT=SBM transport host integrator: AnelasticHeun"
       -DEXPECT_SECOND_CHECKPOINT=true
       -DSKIP_RESTART=true
       -DEXTRA_SCALAR_COMPONENTS=${_sbm_extra_scalars}
@@ -659,21 +709,58 @@ if(TARGET erf_exec AND ERF_DIM STREQUAL "3" AND
     LABELS "integration;sbm"
     RUN_SERIAL TRUE
     TIMEOUT 120)
+  # The same deck with ERF's default anelastic integrator, MidPoint
+  add_test(NAME SBM_M3_Adaptive_Anelastic_MidPoint_Donor_CFL
+    COMMAND ${CMAKE_COMMAND}
+      -DERF_EXECUTABLE=$<TARGET_FILE:erf_exec>
+      -DINPUT_FILE=${PROJECT_SOURCE_DIR}/Tests/test_files/SBM/inputs_adaptive_anelastic_donor
+      -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+      -DRUN_ARGS=erf.timestepping_type=MidPoint
+      "-DEXPECTED_STDOUT=SBM transport host integrator: AnelasticMidPoint"
+      -DEXPECT_SECOND_CHECKPOINT=true
+      -DSKIP_RESTART=true
+      -DEXTRA_SCALAR_COMPONENTS=${_sbm_extra_scalars}
+      -P ${PROJECT_SOURCE_DIR}/Tests/test_files/SBM/RunM3Smoke.cmake)
+  set_tests_properties(SBM_M3_Adaptive_Anelastic_MidPoint_Donor_CFL PROPERTIES
+    LABELS "integration;sbm"
+    RUN_SERIAL TRUE
+    TIMEOUT 120)
   add_sbm_expected_failure_test(SBM_M3_Fixed_Unsafe_Donor_DT
     inputs_adaptive_anelastic_donor
     "SBM M3 fixed timestep exceeds donor positivity limit"
     "-DOVERRIDE=erf.fixed_dt=0.2")
+  add_sbm_expected_failure_test(SBM_M3_Reject_PseudoIncompressible
+    inputs_adaptive_anelastic_donor
+    "SBM M3 does not yet support erf.compressibility_type = PseudoIncompressible"
+    "-DOVERRIDE=erf.compressibility_type=PseudoIncompressible")
 
   add_test(NAME SBM_M3_Adaptive_Anelastic_Stretched_Donor_CFL
     COMMAND ${CMAKE_COMMAND}
       -DERF_EXECUTABLE=$<TARGET_FILE:erf_exec>
       -DINPUT_FILE=${PROJECT_SOURCE_DIR}/Tests/test_files/SBM/inputs_adaptive_anelastic_stretched_donor
       -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+      "-DEXPECTED_STDOUT=SBM transport host integrator: AnelasticHeun"
       -DEXPECT_SECOND_CHECKPOINT=true
       -DSKIP_RESTART=true
       -DEXTRA_SCALAR_COMPONENTS=${_sbm_extra_scalars}
       -P ${PROJECT_SOURCE_DIR}/Tests/test_files/SBM/RunM3Smoke.cmake)
   set_tests_properties(SBM_M3_Adaptive_Anelastic_Stretched_Donor_CFL PROPERTIES
+    LABELS "integration;sbm"
+    RUN_SERIAL TRUE
+    TIMEOUT 120)
+  # The stretched deck with MidPoint: non-uniform cell measures and the dt/2 first stage together
+  add_test(NAME SBM_M3_Adaptive_Anelastic_Stretched_MidPoint_Donor_CFL
+    COMMAND ${CMAKE_COMMAND}
+      -DERF_EXECUTABLE=$<TARGET_FILE:erf_exec>
+      -DINPUT_FILE=${PROJECT_SOURCE_DIR}/Tests/test_files/SBM/inputs_adaptive_anelastic_stretched_donor
+      -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+      -DRUN_ARGS=erf.timestepping_type=MidPoint
+      "-DEXPECTED_STDOUT=SBM transport host integrator: AnelasticMidPoint"
+      -DEXPECT_SECOND_CHECKPOINT=true
+      -DSKIP_RESTART=true
+      -DEXTRA_SCALAR_COMPONENTS=${_sbm_extra_scalars}
+      -P ${PROJECT_SOURCE_DIR}/Tests/test_files/SBM/RunM3Smoke.cmake)
+  set_tests_properties(SBM_M3_Adaptive_Anelastic_Stretched_MidPoint_Donor_CFL PROPERTIES
     LABELS "integration;sbm"
     RUN_SERIAL TRUE
     TIMEOUT 120)
@@ -709,14 +796,114 @@ if(TARGET erf_exec AND ERF_DIM STREQUAL "3" AND
   add_sbm_expected_failure_test(SBM_Implicit_Substepping inputs_zero_carrier
     "SBM M3 does not support acoustic substepping"
     "-DOVERRIDE=erf.timestepping_type=RK3_ImplicitSubstep")
-  add_sbm_expected_failure_test(SBM_Nonperiodic_Geometry inputs_nonperiodic
-    "SBM M3 currently requires triply periodic geometry")
   add_sbm_expected_failure_test(SBM_Immersed_Buildings inputs_zero_carrier
     "SBM M3 requires buildings_type=None"
     "-DOVERRIDE=erf.buildings_type=ImmersedForcing")
   add_sbm_expected_failure_test(SBM_M3_Moving_Terrain inputs_zero_carrier
     "SBM M3 requires static non-EB geometry"
     "-DOVERRIDE=erf.terrain_type=MovingFittedMesh")
+
+  # Physical faces: walls carry nothing, outflow loses only what its ledger
+  # records, inflow brings a complete spectrum. Every run checks its leaf
+  # inventory against the boundary ledger after each coarse step.
+  function(add_sbm_boundary_budget_test test_name input_file expect_transfer)
+    add_test(NAME ${test_name}
+      COMMAND ${CMAKE_COMMAND}
+        -DERF_EXECUTABLE=$<TARGET_FILE:erf_exec>
+        -DINPUT_FILE=${PROJECT_SOURCE_DIR}/Tests/test_files/SBM/${input_file}
+        -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+        -DEXPECT_TRANSFER=${expect_transfer}
+        ${ARGN}
+        -P ${PROJECT_SOURCE_DIR}/Tests/test_files/SBM/RunBoundaryBudget.cmake)
+    set_tests_properties(${test_name} PROPERTIES
+      LABELS "integration;sbm"
+      RUN_SERIAL TRUE
+      TIMEOUT 300)
+  endfunction()
+  set(_sbm_boundary_2m
+    "erf.sbm_moment_mode=2|erf.sbm_edges=1.0e-18 2.0e-18 4.0e-18 8.0e-18 1.6e-17|erf.sbm_fixture_initial_state=1.5e-6 6.0e-6 1.8e-5 4.8e-5 1.0e12 2.0e12 3.0e12 4.0e12")
+  add_sbm_boundary_budget_test(SBM_Boundary_Walls_SlipCompressible inputs_boundary_walls zero)
+  add_sbm_boundary_budget_test(SBM_Boundary_Walls_NoSlipCompressible inputs_boundary_walls zero
+    "-DRUN_ARGS=zlo.type=NoSlipWall|zhi.type=NoSlipWall")
+  add_sbm_boundary_budget_test(SBM_Boundary_Walls_AnelasticMidPoint inputs_boundary_walls zero
+    "-DRUN_ARGS=erf.compressibility_type=Anelastic|erf.timestepping_type=MidPoint")
+  add_sbm_boundary_budget_test(SBM_Boundary_InflowOutflow_1M_Compressible
+    inputs_boundary_inflow_outflow nonzero)
+  add_sbm_boundary_budget_test(SBM_Boundary_InflowOutflow_2M_Compressible
+    inputs_boundary_inflow_outflow nonzero
+    "-DRUN_ARGS=${_sbm_boundary_2m}|xlo.sbm_inflow_z=1.2e-6 3.0e-6 3.6e-5 2.4e-5 0.8e12 1.0e12 6.0e12 2.0e12")
+  add_sbm_boundary_budget_test(SBM_Boundary_InflowOutflow_AnelasticHeun
+    inputs_boundary_inflow_outflow nonzero
+    "-DRUN_ARGS=erf.compressibility_type=Anelastic|erf.timestepping_type=RK2")
+  add_sbm_boundary_budget_test(SBM_Boundary_InflowOutflow_AnelasticMidPoint
+    inputs_boundary_inflow_outflow nonzero
+    "-DRUN_ARGS=erf.compressibility_type=Anelastic|erf.timestepping_type=MidPoint")
+  add_sbm_boundary_budget_test(SBM_Boundary_InflowOutflow_HostTypes
+    inputs_boundary_inflow_outflow nonzero
+    "-DRUN_ARGS=xlo.type=inflow_outflow|xhi.type=ho_outflow")
+  add_sbm_boundary_budget_test(SBM_Boundary_OutflowOnly inputs_boundary_inflow_outflow nonzero
+    "-DRUN_ARGS=xlo.sbm_inflow_z=0 0 0 0")
+  add_sbm_boundary_budget_test(SBM_Boundary_InflowOutflow_Stretched
+    inputs_boundary_inflow_outflow nonzero
+    "-DRUN_ARGS=erf.grid_stretching_ratio=1.1|erf.initial_dz=0.25")
+  add_sbm_boundary_budget_test(SBM_Boundary_InflowOutflow_StaticTerrain
+    inputs_boundary_static_terrain nonzero)
+  # The qualification build's executable accepts only its own two-level decks.
+  if(NOT ERF_ENABLE_SBM_AMR_QUALIFICATION)
+    add_sbm_boundary_budget_test(SBM_Boundary_AMR_Outflow_Compressible
+      inputs_boundary_amr_2level nonzero -DEXPECTED_LEVELS=2)
+    add_sbm_boundary_budget_test(SBM_Boundary_AMR_Outflow_AnelasticMidPoint
+      inputs_boundary_amr_2level nonzero -DEXPECTED_LEVELS=2
+      "-DRUN_ARGS=erf.compressibility_type=Anelastic|erf.timestepping_type=MidPoint")
+    add_sbm_boundary_budget_test(SBM_Boundary_AMR_Inflow_Compressible
+      inputs_boundary_amr_2level nonzero -DEXPECTED_LEVELS=2
+      "-DRUN_ARGS=erf.box1.in_box_lo=0.0 0.25 0.0|erf.box1.in_box_hi=0.375 0.75 0.375|erf.box1.move_speed_x=0")
+  endif()
+
+  add_sbm_expected_failure_test(SBM_Boundary_Reject_ReverseOutflow
+    inputs_boundary_inflow_outflow
+    "SBM advective outflow xhi received an inward dry-air carrier"
+    "-DOVERRIDE=prob.U_0=-0.8 xlo.velocity=-0.8 0.6 0.0")
+  add_sbm_expected_failure_test(SBM_Boundary_Reject_MissingInflow
+    inputs_boundary_inflow_outflow
+    "SBM prescribed inflow at xhi requires xhi.sbm_inflow_z"
+    "-DOVERRIDE=xhi.type=Inflow xhi.velocity=0.8 0.6 0.0 xhi.density=1.0 xhi.theta=300.0")
+  add_sbm_expected_failure_test(SBM_Boundary_Reject_CompactInflow
+    inputs_boundary_inflow_outflow
+    "SBM owns compact qc/qr: xlo.qc cannot define or override a spectral inflow"
+    "-DOVERRIDE=xlo.qc=1.e-6")
+  add_sbm_expected_failure_test(SBM_Boundary_Reject_IncompleteInflow
+    inputs_boundary_inflow_outflow
+    "SBM inflow spectrum xlo.sbm_inflow_z is not admissible: it has 2 values"
+    "-DOVERRIDE=xlo.sbm_inflow_z=4.e-6 3.e-6")
+  add_sbm_expected_failure_test(SBM_Boundary_Reject_IncompleteTwoMomentGroup
+    inputs_boundary_inflow_outflow
+    "SBM inflow spectrum xlo.sbm_inflow_z is not admissible: population 0 bin 0 is not canonical"
+    "-DOVERRIDE=erf.sbm_moment_mode=2 erf.sbm_edges=1.0e-18 2.0e-18 4.0e-18 8.0e-18 1.6e-17 erf.sbm_fixture_initial_state=1.5e-6 6.0e-6 1.8e-5 4.8e-5 1.0e12 2.0e12 3.0e12 4.0e12 xlo.sbm_inflow_z=1.2e-6 3.0e-6 3.6e-5 2.4e-5 0 1.0e12 6.0e12 2.0e12")
+  add_sbm_expected_failure_test(SBM_Boundary_Reject_InflowOnWall
+    inputs_boundary_inflow_outflow
+    "zlo.sbm_inflow_z is set but zlo is not an inflow boundary"
+    "-DOVERRIDE=zlo.sbm_inflow_z=4.e-6 3.e-6 2.e-6 1.e-6")
+  add_sbm_expected_failure_test(SBM_Boundary_Reject_Open
+    inputs_boundary_inflow_outflow
+    "SBM physical boundary xhi is not supported: open boundaries"
+    "-DOVERRIDE=xhi.type=Open")
+  add_sbm_expected_failure_test(SBM_Boundary_Reject_Symmetry
+    inputs_boundary_inflow_outflow
+    "SBM physical boundary zlo is not supported: ERF does not hold the normal dry-air carrier"
+    "-DOVERRIDE=zlo.type=Symmetry zhi.type=Symmetry")
+  add_sbm_expected_failure_test(SBM_Boundary_Reject_SurfaceLayer
+    inputs_boundary_inflow_outflow
+    "SBM physical boundary zlo is not supported: a surface_layer boundary"
+    "-DOVERRIDE=zlo.type=surface_layer")
+  add_sbm_expected_failure_test(SBM_Boundary_Reject_BoundaryPlanes
+    inputs_boundary_inflow_outflow
+    "SBM does not support erf.input_bndry_planes"
+    "-DOVERRIDE=erf.input_bndry_planes=1")
+  add_sbm_expected_failure_test(SBM_Budget_Reject_WithoutSBM
+    inputs_boundary_walls
+    "erf.sbm_budget_check requires erf.moisture_model = SBM"
+    "-DOVERRIDE=erf.moisture_model=None")
 
   add_test(NAME SBM_M3_Stretched_Static_Mesh
     COMMAND ${CMAKE_COMMAND}
@@ -786,6 +973,70 @@ if(TARGET erf_exec AND ERF_DIM STREQUAL "3" AND
       LABELS "integration;sbm"
       RUN_SERIAL TRUE
       TIMEOUT 180)
+
+    # Production two-level SBM: a refined box that moves one coarse cell per
+    # step is regridded every step, and a restart from the middle of the run
+    # reproduces the continuous run bitwise on both levels.  The qualification
+    # build's executable accepts only its own decks.
+    if(NOT ERF_ENABLE_SBM_AMR_QUALIFICATION)
+      foreach(_sbm_host IN ITEMS Compressible AnelasticMidPoint)
+        set(_sbm_host_args)
+        if(_sbm_host STREQUAL "AnelasticMidPoint")
+          set(_sbm_host_args -DANELASTIC=MidPoint)
+        endif()
+        add_test(NAME SBM_AMR_Production_Regrid_Restart_${_sbm_host}
+          COMMAND ${CMAKE_COMMAND}
+            -DERF_EXECUTABLE=$<TARGET_FILE:erf_exec>
+            -DCOMPARE_EXECUTABLE=$<TARGET_FILE:erf_sbm_checkpoint_compare>
+            -DINPUT_FILE=${PROJECT_SOURCE_DIR}/Tests/test_files/SBM/inputs_amr_production_2level
+            -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/sbm_amr_production_${_sbm_host}
+            -DPRODUCTION=ON
+            -DMODE=equivalence
+            -DRESTART_STEP=2
+            -DFINAL_STEP=4
+            -DEXPECTED_FINAL_LEVELS=2
+            ${_sbm_host_args}
+            -P ${PROJECT_SOURCE_DIR}/Tests/test_files/SBM/RunAMRRestart.cmake)
+        set_tests_properties(SBM_AMR_Production_Regrid_Restart_${_sbm_host} PROPERTIES
+          LABELS "integration;sbm"
+          RUN_SERIAL TRUE
+          TIMEOUT 300)
+      endforeach()
+    endif()
+
+    # A restart carries the boundary ledger and re-reads the inflow it was
+    # fingerprinted with; a changed inflow is a different schema.
+    function(add_sbm_boundary_restart_test test_name input_file mode)
+      add_test(NAME ${test_name}
+        COMMAND ${CMAKE_COMMAND}
+          -DERF_EXECUTABLE=$<TARGET_FILE:erf_exec>
+          -DCOMPARE_EXECUTABLE=$<TARGET_FILE:erf_sbm_checkpoint_compare>
+          -DINPUT_FILE=${PROJECT_SOURCE_DIR}/Tests/test_files/SBM/${input_file}
+          -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/sbm_boundary_restart_${test_name}
+          -DPRODUCTION=ON
+          -DMODE=${mode}
+          -DRESTART_STEP=2
+          -DFINAL_STEP=4
+          -DEXPECT_BOUNDARY_LEDGER=ON
+          ${ARGN}
+          -P ${PROJECT_SOURCE_DIR}/Tests/test_files/SBM/RunAMRRestart.cmake)
+      set_tests_properties(${test_name} PROPERTIES
+        LABELS "integration;sbm"
+        RUN_SERIAL TRUE
+        TIMEOUT 300)
+    endfunction()
+    add_sbm_boundary_restart_test(SBM_Boundary_Restart_Equivalence
+      inputs_boundary_inflow_outflow equivalence -DEXPECTED_FINAL_LEVELS=1)
+    add_sbm_boundary_restart_test(SBM_Boundary_Restart_ChangedInflow
+      inputs_boundary_inflow_outflow changed_restart_inputs
+      "-DRESTART_ARGS=xlo.sbm_inflow_z=4.e-6 3.e-6 2.e-6 2.e-6"
+      "-DEXPECTED_DIAGNOSTIC=SBM restart schema does not exactly match")
+    if(NOT ERF_ENABLE_SBM_AMR_QUALIFICATION)
+      add_sbm_boundary_restart_test(SBM_Boundary_AMR_Restart_Equivalence_Compressible
+        inputs_boundary_amr_2level equivalence -DEXPECTED_FINAL_LEVELS=2)
+      add_sbm_boundary_restart_test(SBM_Boundary_AMR_Restart_Equivalence_AnelasticMidPoint
+        inputs_boundary_amr_2level equivalence -DEXPECTED_FINAL_LEVELS=2 -DANELASTIC=MidPoint)
+    endif()
   endif()
 
   foreach(_mode IN ITEMS 1m 2m)
@@ -979,6 +1230,12 @@ if(ERF_ENABLE_MPI)
     target_sources(${erf_parallel_exe_name} PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/MovingBodies/ERF_GTestActuatorSampling.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/MovingBodies/ERF_GTestActuatorSpreading.cpp
+    )
+  endif()
+  if(ERF_DIM STREQUAL "3")
+    # The coefficient check and the rate maximum reduce over the ranks: check them across ranks
+    target_sources(${erf_parallel_exe_name} PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/Microphysics/SBM/ERF_GTestSBMParticleMixing.cpp
     )
   endif()
   build_erf_exe(${erf_parallel_exe_name} NO_ERF_MAIN)

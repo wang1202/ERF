@@ -34,13 +34,17 @@ Governing Equations
 +=================================+==========================================================+====================+==================+
 | **erf.compressibility_type**    | Equation set at each AMR level (per-level).              | FullyCompressible, | Fully-           |
 |                                 | FullyCompressible solves the compressible equations.     | Anelastic,         | Compressible     |
-|                                 | Anelastic and PseudoIncompressible hold the density at   | Pseudo-            |                  |
-|                                 | its base-state value and project the velocity; they      | Incompressible     |                  |
-|                                 | set ``project_initial_velocity=1``,                      |                    |                  |
-|                                 | ``fixed_density=1``, and never substep acoustically.     |                    |                  |
-|                                 | The stored ``buoyancy_type=3`` does not select the       |                    |                  |
-|                                 | buoyancy kernel. PseudoIncompressible currently runs     |                    |                  |
-|                                 | exactly the anelastic equations.                         |                    |                  |
+|                                 | Anelastic holds the density at its base-state value      | Pseudo-            |                  |
+|                                 | and projects the velocity; it sets                       | Incompressible     |                  |
+|                                 | ``project_initial_velocity=1``, ``fixed_density=1``,     |                    |                  |
+|                                 | and never substeps acoustically. The stored              |                    |                  |
+|                                 | ``buoyancy_type=3`` does not select the buoyancy         |                    |                  |
+|                                 | kernel. PseudoIncompressible evolves the density,        |                    |                  |
+|                                 | enforces div(rho_0 theta_0 u) = S with a                 |                    |                  |
+|                                 | variable-coefficient projection, and sets                |                    |                  |
+|                                 | ``project_initial_velocity=1``, ``fixed_density=0``      |                    |                  |
+|                                 | and ``buoyancy_type=1``; see                             |                    |                  |
+|                                 | :ref:`PseudoIncompressibleEquations`.                    |                    |                  |
 +---------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.buoyancy_type**           | Compressible choices: 1=full density departure;          | 1, 2, 3, 4         | 1 (3 if          |
 |                                 | 2/3=identical temperature approximations;                |                    | anelastic)       |
@@ -263,13 +267,22 @@ List of Parameters
 |                             | moisture model                                           |                    |                  |
 +-----------------------------+----------------------------------------------------------+--------------------+------------------+
 | **<face>.velocity**         | velocity imposed at an ``inflow`` face.  Required on an  | 3 Reals            | must be set      |
-|                             | inflow face unless ``<face>.dirichlet_file`` is given    |                    |                  |
+|                             | inflow face unless ``<face>.dirichlet_file`` or          |                    |                  |
+|                             | ``<face>.inflow_profile`` is given                       |                    |                  |
 +-----------------------------+----------------------------------------------------------+--------------------+------------------+
 | **<face>.dirichlet_file**   | file of height-varying Dirichlet inflow data, used in    | String             | None             |
 |                             | place of ``<face>.velocity``                             |                    |                  |
 +-----------------------------+----------------------------------------------------------+--------------------+------------------+
 | **<face>.read_prim_theta**  | the ``dirichlet_file`` supplies theta rather than        | Boolean            | true             |
 |                             | (rho*theta); read only when that file is given           |                    |                  |
++-----------------------------+----------------------------------------------------------+--------------------+------------------+
+| **<face>.inflow_profile**   | terrain-following inflow on an ``inflow`` or             | log_law, file      | None             |
+|                             | ``inflow_outflow`` face: each boundary cell takes the    |                    |                  |
+|                             | profile at its own height above the ground beneath it.   |                    |                  |
+|                             | ``log_law`` uses ``inflow_log_law.*``; ``file`` reads    |                    |                  |
+|                             | ``<face>.inflow_profile_file``.  Replaces                |                    |                  |
+|                             | ``<face>.velocity``; cannot be combined with             |                    |                  |
+|                             | ``dirichlet_file``.  See Boundary Conditions             |                    |                  |
 +-----------------------------+----------------------------------------------------------+--------------------+------------------+
 | **<face>.nonreflecting**    | let upstream-propagating acoustic waves leave through    | Boolean            | false            |
 |                             | the face instead of reflecting off the Dirichlet         |                    |                  |
@@ -591,6 +604,15 @@ List of Parameters
 | **erf.<indicator>.adjacent_difference_greater**  | tag cells where the difference between adjacent values   | List of Reals      | None                 |
 |                                                  | exceeds this, one value per level                        |                    |                      |
 +--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
+| **erf.<indicator>.conditions**                   | names of several conditions the indicator tests          | List of Strings    | None                 |
+|                                                  | together; each is given by **field_name** and one of the |                    |                      |
+|                                                  | three tests above under ``erf.<indicator>.<condition>``, |                    |                      |
+|                                                  | and those keys may then not be given for the indicator   |                    |                      |
+|                                                  | itself                                                   |                    |                      |
++--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
+| **erf.<indicator>.combine**                      | whether a cell is tagged when all of the conditions hold | ``and``, ``or``    | ``and``              |
+|                                                  | (``and``) or when any one of them does (``or``)          |                    |                      |
++--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
 | **erf.<indicator>.max_level**                    | finest level at which the indicator is applied.          | Integer >= 1       | finest level         |
 |                                                  | Optional when the box is given in real coordinates;      |                    |                      |
 |                                                  | **required** when it is given in index space             |                    |                      |
@@ -602,9 +624,19 @@ List of Parameters
 |                                                  | inactive                                                 |                    |                      |
 +--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
 | **erf.<indicator>.in_box_lo**                    | low corner, in physical coordinates, of the region the   | 2 or 3 Reals       | None                 |
-|                                                  | indicator tags                                           |                    |                      |
+|                                                  | indicator tags. For an indicator that tests a field it   |                    |                      |
+|                                                  | only restricts where cells may be tagged, and z is the   |                    |                      |
+|                                                  | height chosen by **box_z_coordinate**; two values leave  |                    |                      |
+|                                                  | z unrestricted                                           |                    |                      |
 +--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
 | **erf.<indicator>.in_box_hi**                    | high corner, in physical coordinates                     | 2 or 3 Reals       | None                 |
++--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
+| **erf.<indicator>.box_z_coordinate**             | height of the cell center compared with the z extent of  | ``above_ground``,  | ``above_ground``     |
+|                                                  | the box of an indicator that tests a field: above the    | ``physical``       |                      |
+|                                                  | ground under its column, or ``z_phys_cc`` itself.        |                    |                      |
+|                                                  | ``above_ground`` uses the bottom of the mesh, so with    |                    |                      |
+|                                                  | ImmersedForcing or EB terrain a box with a z extent      |                    |                      |
+|                                                  | must use ``physical``                                    |                    |                      |
 +--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
 | **erf.<indicator>.in_box_lo_indices**            | low corner in fine-level index space; may not be         | 3 Integers         | None                 |
 |                                                  | combined with the real-coordinate form                   |                    |                      |
@@ -1018,6 +1050,13 @@ List of Parameters
 +--------------------------------------+----------------------------------------------------------+--------------------+-------------------+
 | **erf.poisson_reltol**               | relative tolerance for the Poisson solve; raised to      | Real > 0           | 1.e-8             |
 |                                      | 1.e-6 in single precision builds                         |                    |                   |
++--------------------------------------+----------------------------------------------------------+--------------------+-------------------+
+| **erf.pi_drift_factor**              | drift correction c of a PseudoIncompressible level:      | Real >= 0          | 0.5               |
+|                                      | the constraint is div(rho_0 theta_0 u) = Q + c (rho      |                    |                   |
+|                                      | theta - rho_0 theta_0) / dt, with Q the non-advective    |                    |                   |
+|                                      | tendency of rho theta; 0 turns the correction off,       |                    |                   |
+|                                      | and values above about 1 can be unstable; see            |                    |                   |
+|                                      | :ref:`PseudoIncompressibleEquations`                     |                    |                   |
 +--------------------------------------+----------------------------------------------------------+--------------------+-------------------+
 | **erf.terrain_poisson_solver**       | solver for the projection on a terrain-fitted mesh       | "gmres_fft",       | "gmres_fft"       |
 |                                      | (anelastic, and the initial projection). ``gmres_fft``:  | "mlmg",            |                   |
@@ -1725,6 +1764,35 @@ directions, and its lo end may not be above its hi end; ERF aborts otherwise. Li
 ``sample_line_lo_real`` and ``sample_line_hi_real`` are not supported with moving terrain
 (``erf.terrain_type = MovingFittedMesh``); lines given by indices are.
 
+In a run with latitude and longitude arrays (a WRF or metgrid initialization, or a restart from
+one), a line may instead be given by ``sample_line_lo_latlon`` and ``sample_line_hi_latlon``:
+latitude, longitude (in degrees) and z of each end. Each end is placed on the grid as a station
+placed by ``.lat`` and ``.long`` is, and the line is then treated as one given by
+``sample_line_lo_real`` and ``sample_line_hi_real``, so z is measured as described below,
+including with ``erf.sample_line_z_agl``. ERF aborts in a run without latitude and longitude
+arrays, and when an end is outside the domain.
+
+- A vertical line (``sample_line_dir = 2``) gives the same latitude and longitude at both ends,
+  for example a profile over a site.
+- A horizontal line (``sample_line_dir = 0`` or ``1``) gives the same z at both ends. On a
+  projected grid two points are in general not on one row of cells, so the ends must lie within
+  one cell of each other across the line; the line is then sampled along the row through its lo
+  end. The lo end must be at the lower x (or y) of the two; ERF aborts otherwise. The latitude
+  and longitude that each end reaches, and how far the hi end is from the row, are printed at
+  start-up.
+
+For example, a profile up to 2 km above the ground over one site, and an east-west transect at
+500 m between two sites at the same latitude:
+
+::
+
+   erf.do_line_sampling      = true
+   erf.line_sampling_interval = 10
+   erf.sample_line_dir       = 2 0
+   erf.sample_line_lo_latlon = 40.00 -105.20    0.   40.00 -105.40 500.
+   erf.sample_line_hi_latlon = 40.00 -105.20 2000.   40.00 -105.00 500.
+   erf.sample_line_z_agl     = true
+
 On a stretched or terrain-fitted mesh, the cells of a line given by ``sample_line_lo_real`` and
 ``sample_line_hi_real`` come from the heights of the column through its first point. A vertical
 line (``sample_line_dir = 2``) runs from the cell that holds the lower z to the cell that holds the
@@ -1738,27 +1806,70 @@ variable ``z``, the height of each sample, is always written with the line, sinc
 coordinates of a line plotfile assume equally spaced levels; it may be requested on any mesh.
 Plane sampling has not been implemented for terrain.
 
+With ``erf.sample_line_interp = true``, lines given by ``sample_line_lo_real`` and
+``sample_line_hi_real`` (or ``sample_line_lo_latlon`` and ``sample_line_hi_latlon``) are sampled
+at the requested heights instead of at the cells that hold them, as for a comparison with a tower
+or a lidar, on any mesh:
+
+- A vertical line is sampled at ``erf.sample_line_npts`` heights evenly spaced from its lo z to
+  its hi z, in the column of cells that holds it; one height, with lo z equal to hi z, gives a
+  single tower height. Without ``erf.sample_line_npts``, every vertical line must have its lo z
+  equal to its hi z and is sampled at that height.
+- A horizontal line is sampled at its z in every column of cells it crosses, so over terrain it
+  stays at a constant height rather than following the mesh; its ``erf.sample_line_npts`` is 0.
+
+The heights are above sea level, or with ``erf.sample_line_z_agl = true`` above the ground under
+each column, so a horizontal line then follows the terrain at a constant height above it. The
+ground of a column is that of the level the line is sampled on, the mean of the four nodes under
+the column (the terrain surface with immersed terrain), as for stations; on a level that stops
+above the ground it is the level-0 ground, bilinear at the column's centre. Each variable is
+interpolated linearly in height between the two cell centres of the column that bracket the
+height, as for stations: between the ground and the lowest cell centre it takes that cell's
+value, and between the top cell centre and the top of the domain the top cell's. A sample below
+the ground (for example where a horizontal line crosses a hill) or above the top of the domain is
+written as ``erf.sampling_covered_value``, with a volume fraction of 0. With immersed terrain,
+cells covered by the terrain are not used, and the lowest cell centre is that of the lowest cell
+with fluid.
+
+The variable ``z`` is the height of each sample above sea level. In a line plotfile the z
+coordinate is instead the requested height, so with ``erf.sample_line_z_agl = true`` it is the
+height above the ground while ``z`` is the height above sea level. With text output,
+``plt_line_levL.zcc`` holds the heights of the samples above sea level.
+
+A line is sampled on the finest level that holds every cell its samples read, so a horizontal
+line that crosses the edge of a refined level is sampled, all of it, on a coarser level that
+holds all of it. The samples are not interpolated across a line: a horizontal line takes the
+columns of the row of cells through its lo end, and a vertical line its column.
+``erf.sample_line_interp`` is not supported for lines given by ``sample_line_lo`` and
+``sample_line_hi``, which name cells rather than heights.
+
 Plane samples are written as true multi-level AMReX plotfiles: every refinement level
 whose grids intersect the plane is written (``Level_0``, ``Level_1``, ...), so a plane
 that cuts through static refinement patches retains the finer in-plane resolution there.
 By default all intersecting levels are written; ``erf.plane_sampling_max_level = <int>``
 caps the finest level (``0`` forces level-0-only output). The slice-normal direction is
 resolved natively on each level by replicating the sampled plane across the level's cells,
-so the resulting dataset has an isotropic refinement ratio and loads cleanly in amrvis.
+so the resulting dataset has an isotropic refinement ratio and loads cleanly in amrvis. A plane is
+interpolated linearly between the two layers of cells on either side of it, across grid and
+periodic boundaries; within half a cell of the domain boundary, or of the edge of a refined
+level, it takes the value of the cell it lies in.
 
 Line and plane samples will be default be written to plotfiles, one plotfile per output
 snapshot, with all output variables in the same file. Alternatively, line sampling has
 the ``erf.line_sampling_text_output`` option, which writes one text file per output
 variable, with all snapshots appended to the same file over time. This is similar to the
 tslist output from WRF but output is provided only from the finest domain that contains
-the entire requested sampling line; velocities are also destaggered.
+the entire requested sampling line; velocities are also destaggered. With text output, the
+heights of the cells of each line on level ``L`` are written to ``plt_line_levL.zcc``, one row
+per line, when the level is made and again whenever a regrid changes its grids.
 
 The sampled variables can be selected with the ``erf.line_sampling_vars`` and
 ``erf.plane_sampling_vars`` options and include a subset of the plotfile outputs:
 ``density``, ``x_velocity``, ``y_velocity``, ``z_velocity``, ``magvel``,
 ``theta``, ``qv``, ``qc``, and ``pressure``. Line sampling additionally supports
 ``conserved``, ``z``, ``sgs_tke``, ``sgs_tau11``, ``sgs_tau12``, ``sgs_tau13``, ``sgs_tau22``,
-``sgs_tau23``, ``sgs_tau33``, and ``sgs_hfx3``. ``conserved`` writes every component of the
+``sgs_tau23``, ``sgs_tau33``, and ``sgs_hfx3``. Both also support ``volfrac``, the volume
+fraction of each cell (1 without immersed terrain). ``conserved`` writes every component of the
 conserved state as stored, named ``cons_0``, ``cons_1``, ... in component order (density,
 rho theta, ...). The variables are written in a fixed order, not the order they are listed in.
 The SGS stresses ``sgs_tau11``, ``sgs_tau22`` and ``sgs_tau33`` are stored at cell centers; the
@@ -1771,6 +1882,18 @@ rho*theta and will account for moisture if ``qv`` is requested.
 (``Deardorff``, k-equation RANS, MYJ/MYNN, or a SHOC-family PBL); Smagorinsky
 and ``les_type = None`` do not provide prognostic TKE and their unused state
 slot is never sampled.
+
+With immersed terrain (``erf.terrain_type = EB`` or ``ImmersedForcing``), a cell covered by the
+terrain (volume fraction 0) holds no fluid, so every variable sampled there is written as
+``erf.sampling_covered_value`` (default -9999) instead, except ``z`` and ``volfrac``. A plane
+sample interpolated from a covered cell is written the same way. This applies to
+``ImmersedForcing`` too, where covered cells carry a state forced towards rest; that state is not
+written. The fill value is finite rather than NaN so that writing the samples cannot trip a
+floating-point exception trap.
+
+A cut cell is written as is, with the value of the cell. Requesting ``volfrac`` shows which
+samples are in cut cells; to leave out cells that are almost covered, threshold on ``volfrac``
+rather than test for ``erf.sampling_covered_value``.
 
 .. _list-of-parameters-10b:
 
@@ -1801,8 +1924,18 @@ List of Parameters
 | **erf.sample_line_lo_real**,       | Bounding point on the line(s)                            | 3 Reals per line   | None             |
 | **erf.sample_line_hi_real**        |                                                          |                    |                  |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.sample_line_lo_latlon**,     | Latitude, longitude (degrees) and z of each end of the   | 3 Reals per line   | None             |
+| **erf.sample_line_hi_latlon**      | line(s); needs latitude/longitude arrays                 |                    |                  |
++------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.sample_line_z_agl**          | z of the real bounding points of the lines is the height | Boolean            | false            |
 |                                    | above the ground instead of above sea level              |                    |                  |
++------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.sample_line_interp**         | Sample the real lines at their requested heights,        | Boolean            | false            |
+|                                    | interpolated in height in each column                    |                    |                  |
++------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.sample_line_npts**           | With erf.sample_line_interp: the number of heights of    | 1 Integer per line | 1 for a vertical |
+|                                    | each vertical line, from lo z to hi z; 0 for a           |                    | line with equal  |
+|                                    | horizontal line                                          |                    | lo and hi z      |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.sample_plane_lo/hi**         | Bounding point on the plane(s)                           | 3 Reals per plane  | None             |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
@@ -1818,37 +1951,77 @@ List of Parameters
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.plane_sampling_vars**        | Specify sampled variables                                | List of strings    | theta, magvel    |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.sampling_covered_value**     | Line and plane sampling: value written for samples in    | Real               | -9999            |
+|                                    | cells covered by immersed terrain (EB, ImmersedForcing)  |                    |                  |
++------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.plane_sampling_max_level**   | Cap on finest level written to the plane plotfile        | Integer            | -1 (all          |
 |                                    |                                                          |                    | intersecting     |
 |                                    |                                                          |                    | levels)          |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.sample_point**               | points at which the state is written to a log, given as  | List of Integers,  | None             |
-|                                    | flattened (i,j,k) index triples                          | in triples         |                  |
+|                                    | flattened (i,j,k) index triples of level 0               | in triples         |                  |
++------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.sample_point_real**          | as above, but the points are given as flattened (x,y,z)  | List of Reals, in  | None             |
+|                                    | physical-coordinate triples                              | triples            |                  |
++------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.sample_point_latlon**        | as above, but the points are given as flattened          | List of Reals, in  | None             |
+|                                    | (latitude, longitude, z) triples; needs                  | triples            |                  |
+|                                    | latitude/longitude arrays                                |                    |                  |
++------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.sample_point_z_agl**         | z of ``erf.sample_point_real`` / ``_latlon`` is the      | Boolean            | false            |
+|                                    | height above the ground instead of above sea level       |                    |                  |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.sample_point_log**           | log-file name for each sampled point; exactly one name   | List of Strings    | None             |
 |                                    | per point is required                                    |                    |                  |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.sample_line**                | lines along which the state is written to a log, given   | List of Integers,  | None             |
 |                                    | as flattened (i,j,k) index triples; may not be combined  | in triples         |                  |
-|                                    | with ``erf.sample_line_real``                            |                    |                  |
+|                                    | with ``erf.sample_line_real`` or ``_latlon``             |                    |                  |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.sample_line_real**           | as above, but the lines are given as flattened (x,y,z)   | List of Reals, in  | None             |
 |                                    | physical-coordinate triples; may not be combined with    | triples            |                  |
-|                                    | ``erf.sample_line``                                      |                    |                  |
+|                                    | ``erf.sample_line`` or ``_latlon``                       |                    |                  |
++------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.sample_line_latlon**         | as above, but the lines are given as flattened           | List of Reals, in  | None             |
+|                                    | (latitude, longitude) pairs in degrees; needs            | pairs              |                  |
+|                                    | latitude/longitude arrays                                |                    |                  |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.sample_line_log**            | log-file name for each sampled line; exactly one name    | List of Strings    | None             |
 |                                    | per line is required                                     |                    |                  |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
 
-``erf.sample_line`` and ``erf.sample_line_real`` are a shorthand for line sampling. Each line is
-the full-depth vertical column through the given cell or point on level 0 (its k or z is not
-used, and only x and y must lie in the domain), sampled with the line-sampling machinery above with the variables
+``erf.sample_line``, ``erf.sample_line_real`` and ``erf.sample_line_latlon`` are a shorthand for
+line sampling. Each line is the full-depth vertical column through the given cell or point on
+level 0 (its k or z is not used, and only x and y must lie in the domain), sampled with the line-sampling machinery above with the variables
 ``conserved``, ``x_velocity``, ``y_velocity``, ``z_velocity`` and ``sgs_tau11`` ...
 ``sgs_tau33``. Each line is written to its own log at the cadence of the other logs
 (``erf.sum_interval`` or ``erf.sum_per``), one row per sample: the time, then each variable over
-the column from bottom to top, in that order. The stresses are at cell centers, as for line
+the column from bottom to top, in that order. A point of ``erf.sample_line_latlon`` is placed on
+the grid as a station placed by ``.lat`` and ``.long`` is, in a run with latitude and longitude
+arrays (a WRF or metgrid initialization, or a restart from one); the latitude and longitude it
+reaches are printed at start-up. ERF aborts in a run without those arrays, and when a point is
+outside the domain. The stresses are at cell centers, as for line
 sampling; before this used the line sampler, ``tau12``, ``tau13`` and ``tau23`` were written at the
 lower corner edge of each cell instead.
+
+``erf.sample_point``, ``erf.sample_point_real`` and ``erf.sample_point_latlon`` (only one of
+them) give single points, each written to its own log, ``erf.sample_point_log``, at the same
+cadence: one row per sample, the time and then every conserved component of the cell that
+holds the point. Each point is a line of one cell of the line-sampling machinery above.
+
+- A point of ``erf.sample_point`` is that (i,j,k) cell of level 0, and is sampled on level 0.
+- A point of ``erf.sample_point_real`` is sampled on the finest level that holds it. On a
+  stretched or terrain-fitted mesh its cell is found from the heights of its column, as for a
+  line of ``erf.sample_line_lo_real``, and z is clamped to the column. z is the height above
+  sea level, or above the ground under the point if ``erf.sample_point_z_agl = true`` (with
+  immersed terrain, the terrain surface). These points are not supported with moving terrain.
+- A point of ``erf.sample_point_latlon`` is placed on the grid as a station placed by
+  ``.lat`` and ``.long`` is, and is then a point of ``erf.sample_point_real``. It needs a run with
+  latitude and longitude arrays; the latitude and longitude it reaches are printed at start-up.
+
+ERF aborts when a point is outside the domain. With ``erf.terrain_type = EB`` or
+``ImmersedForcing``, a point in a covered cell is written as ``erf.sampling_covered_value``. For
+interpolated values, or other variables at a point, see station output (``erf.station_names``).
 
 .. _examples-of-usage-10b:
 
@@ -2622,6 +2795,12 @@ List of Parameters
 | **erf.pbl_mrf_highres_bounds**           | Enable alternative high-resolution grid-dependent        | Boolean            | false            |
 |                                          | diffusivity bounds                                       |                    |                  |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.pbl_mrf_Sc_t**                     | MRF only: turbulent Schmidt number of the passive        | Real >= 0          | 0                |
+|                                          | scalars. Their vertical diffusivity is the heat one      |                    |                  |
+|                                          | times erf.Pr_t / Sc_t; 0 leaves it equal to the heat     |                    |                  |
+|                                          | one. The same for every passive scalar (base, dust,      |                    |                  |
+|                                          | smoke); see erf-model/ERF#5080                           |                    |                  |
++------------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.enable_mrf_unbounded_vpert**       | Enable physically superior unbounded VPERT in MRF PBL    | Boolean            | false            |
 |                                          | scheme                                                   |                    |                  |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
@@ -2632,6 +2811,14 @@ List of Parameters
 | **erf.pbl_mrf_use_zero_ri_extent**       | MRF only: extend the K profile to the PBL height         | Boolean            | false            |
 |                                          | diagnosed with Ribcr = 0, a taller mixing region; false  |                    |                  |
 |                                          | uses the Ribcr = 0.5 corrected height, as WRF does       |                    |                  |
++------------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.pbl_mrf_fire_thermal_excess**      | MRF with the fire coupling only: raise the convective    | Boolean            | false            |
+|                                          | velocity scale w* of burning columns with the lagged     |                    |                  |
+|                                          | fire heat flux; needs erf.fire.coupling_type = lagged    |                    |                  |
+|                                          | or synchronous                                           |                    |                  |
++------------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.mrf_fire_q_threshold**             | Fire heat flux [W/m2] above which a column counts as     | Real >= 0          | 50               |
+|                                          | burning for that boost                                   |                    |                  |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.advect_tke**                       | advect the turbulent kinetic energy (per-level); read    | Boolean            | true             |
 |                                          | only when the PBL scheme carries TKE                     |                    |                  |
@@ -2832,7 +3019,8 @@ The wind farm parameterization is selected with ``erf.windfarm_type``.
 |                                    |                                                          | GeneralAD          |                  |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.windfarm_loc_type**          | coordinate system in which the turbine locations are     | None, lat_lon, x_y | None             |
-|                                    | given                                                    |                    |                  |
+|                                    | given; required (lat_lon or x_y) when                    |                    |                  |
+|                                    | ``windfarm_type`` is not None                            |                    |                  |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.windfarm_loc_table**         | file listing the turbine locations                       | String             | None             |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
@@ -3204,26 +3392,20 @@ Lateral Boundary Nudging
 | **erf.bdy_rho_nudge_factor**  | Davies factor used for density specifically; a           | Real               | -1.0 (use                  |
 |                               | non-positive value means ``bdy_nudge_factor`` is used    |                    | ``erf.bdy_nudge_factor``)  |
 +-------------------------------+----------------------------------------------------------+--------------------+----------------------------+
-| **erf.bdy_moist_nudge_type**  | which approach is used to nudge the moist variables in   | 0, 1, 2, 3         | 1                          |
-|                               | the boundary region; 3 requires ``use_wrf_bdy_qc_qi`` =  |                    |                            |
-|                               | true                                                     |                    |                            |
+| **erf.bdy_moist_nudge_type**  | which approach is used to nudge the moist variables in   | 0, 1, 2            | 1                          |
+|                               | the boundary region                                      |                    |                            |
 +-------------------------------+----------------------------------------------------------+--------------------+----------------------------+
 | **erf.use_wrf_bdy_density**   | use the dry-air density reconstructed from the           | Boolean            | true                       |
 |                               | ``wrfbdy`` data.  Ignored (set to false) unless real     |                    |                            |
 |                               | boundary conditions are used with ``init_type`` =        |                    |                            |
 |                               | ``WRFInput``                                             |                    |                            |
 +-------------------------------+----------------------------------------------------------+--------------------+----------------------------+
-| **erf.use_wrf_bdy_qc_qi**     | ingest cloud water and cloud ice from ``wrfinput`` and   | Boolean            | false                      |
-|                               | ``wrfbdy``; requires an active moisture model and real   |                    |                            |
-|                               | boundary conditions with ``init_type`` = ``WRFInput``    |                    |                            |
-+-------------------------------+----------------------------------------------------------+--------------------+----------------------------+
 
 For WRF real boundaries, moisture nudging type 0 relaxes only ``qv`` toward
 ``QVAPOR``. Type 1 applies a ``qv`` tendency based on ERF ``qv+qc+qi`` versus
 WRF ``QVAPOR``. Type 2 relaxes ``qv`` toward ``QVAPOR`` and active ``qc``/``qi``
-toward zero with the existing latent-heat terms. Type 3 directly relaxes active
-``qv``, ``qc``, and ``qi`` toward ``QVAPOR``, ``QCLOUD``, and ``QICE`` without
-an added latent-heat term. Type 3 requires ``erf.use_wrf_bdy_qc_qi = true``.
+toward zero with the existing latent-heat terms. Hydrometeors are not read
+from ``wrfbdy``, so no type nudges ``qc``/``qi`` toward WRF values.
 
 .. _sec:CustomForcingInputs:
 
@@ -4210,7 +4392,8 @@ column would be taken for a building), a uniform vertical grid (no
 | **erf.ibseb.dump_faces_file**     | prefix of a per-rank CSV of every face (geometry, view   | String             | ""                     |
 |                                   | fractions, shadow, shortwave, skin temperature), written |                    |                        |
 |                                   | at every report; a refined level N adds ``.levN`` to the |                    |                        |
-|                                   | prefix; empty disables                                   |                    |                        |
+|                                   | prefix; with ground_view_shadow a column f_ground_lit    |                    |                        |
+|                                   | after f_bldg; empty disables                             |                    |                        |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------------+
 | **erf.ibseb.radiation**           | where the faces' sunlight, sky light and longwave come   | "prescribed",      | "prescribed"           |
 |                                   | from. ``prescribed``: the clear-sky formulas and inputs  | "two_stream"       |                        |
@@ -4286,15 +4469,47 @@ column would be taken for a building), a uniform vertical grid (no
 | **erf.ibseb.albedo_ground**       | ground albedo for the reflected diffuse term; not with   | Real in [0, 1]     | 0.2                    |
 |                                   | radiation = two_stream                                   |                    |                        |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------------+
+| **erf.ibseb.ground_view_shadow**  | true: the ground reflects the direct beam onto a face    | Boolean            | false                  |
+|                                   | through the sunlit part of the face's ground view only   |                    |                        |
+|                                   | (the buildings' shadow at each column its view rays land |                    |                        |
+|                                   | in, cast every step); false: through the whole ground    |                    |                        |
+|                                   | view, the ground a face sees being sunlit everywhere     |                    |                        |
++-----------------------------------+----------------------------------------------------------+--------------------+------------------------+
+| **erf.ibseb.two_stream_roofs**    | true: the two-stream column under a building starts on   | Boolean            | false                  |
+|                                   | the building's roof, with the roof face's albedo,        |                    |                        |
+|                                   | emissivity and skin temperature; false: it passes        |                    |                        |
+|                                   | through the building down to the held ground under it.   |                    |                        |
+|                                   | The run stops unless erf.ibseb.enable,                   |                    |                        |
+|                                   | erf.radiation_model = TwoStream and                      |                    |                        |
+|                                   | erf.ibseb.two_stream_buildings are set and no            |                    |                        |
+|                                   | land-surface model is used                               |                    |                        |
++-----------------------------------+----------------------------------------------------------+--------------------+------------------------+
+| **erf.ibseb.ground_sky_view**     | true: the two-stream ground balance beside the buildings | Boolean            | false                  |
+|                                   | keeps the sky's diffuse light and longwave through the   |                    |                        |
+|                                   | part of the ground's view the walls leave open, and      |                    |                        |
+|                                   | takes the walls' reflected light and longwave through    |                    |                        |
+|                                   | the rest; false: the ground sees the whole sky. The run  |                    |                        |
+|                                   | stops unless erf.ibseb.enable, erf.radiation_model =     |                    |                        |
+|                                   | TwoStream, erf.ibseb.two_stream_buildings,               |                    |                        |
+|                                   | erf.ibseb.radiation = two_stream, erf.radiation          |                    |                        |
+|                                   | seb_enable, seb_use_radiation_fluxes, sw_enabled and     |                    |                        |
+|                                   | lw_enabled are all set and no land-surface model is used.|                    |                        |
+|                                   | In street canyons raise erf.ibseb.view_n_az / view_n_el  |                    |                        |
++-----------------------------------+----------------------------------------------------------+--------------------+------------------------+
 | **erf.ibseb.emissivity**          | longwave emissivity of the faces                         | Real in (0, 1]     | 0.9                    |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------------+
 | **erf.ibseb.emissivity_ground**   | ground emissivity for the ground term; not with lw_mode  | Real in (0, 1]     | 0.95                   |
 |                                   | = two_stream                                             |                    |                        |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------------+
 | **erf.ibseb.view_n_az**           | azimuths of the hemisphere sampling for the view         | Integer >= 1       | 16                     |
-|                                   | fractions                                                |                    |                        |
+|                                   | fractions. With erf.ibseb.ground_sky_view in street      |                    |                        |
+|                                   | canyons, use 32 (and view_n_el = 16), or 64 and 32 for   |                    |                        |
+|                                   | walls more than five times as high as the street is      |                    |                        |
+|                                   | wide: the default counts too little wall from the street |                    |                        |
+|                                   | floor (see the IBSEB theory page)                        |                    |                        |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------------+
-| **erf.ibseb.view_n_el**           | elevations of the hemisphere sampling                    | Integer >= 1       | 8                      |
+| **erf.ibseb.view_n_el**           | elevations of the hemisphere sampling; see view_n_az for | Integer >= 1       | 8                      |
+|                                   | street canyons with erf.ibseb.ground_sky_view            |                    |                        |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------------+
 | **erf.ibseb.sun_min_elev_deg**    | lowest sun elevation [deg] at which the shadow test is   | Real in (0, 90)    | 2.0                    |
 |                                   | exact everywhere: each rank's ray map reaches (tallest   |                    |                        |
@@ -4428,10 +4643,15 @@ the ones marked **Required** abort the run if they are not given.
 |                                       | ``erf.most.pblh_calc`` to be set                         |                     |                  |
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
 | **erf.most.pblh_calc**                | which scheme diagnoses the PBL height used by the *w*\*  | none, MYNN25,       | none             |
-|                                       | correction                                               | MYNNEDMF, YSU, MRF  |                  |
+|                                       | correction                                               | MYNNEDMF, YSU,      |                  |
+|                                       |                                                          | YSUNew, MRF         |                  |
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
 | **erf.most.pot_surf_temp**            | prescribed surface potential temperature [K]; a positive | Real > 0            | -1.0 (not set)   |
-|                                       | value selects the surface-temperature formulation        |                     |                  |
+|                                       | value selects the surface-temperature formulation.       |                     |                  |
+|                                       | **Required** when ``flux_type`` = ``bulk_coeff`` (the    |                     |                  |
+|                                       | surface value of the ``Ch`` form); with                  |                     |                  |
+|                                       | ``erf.most.surf_temp_flux`` it is still read but no      |                     |                  |
+|                                       | longer sets the heat flux                                |                     |                  |
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
 | **erf.most.abs_surf_temp**            | prescribed surface absolute temperature [K], converted   | Real > 0            | -1.0 (not set)   |
 |                                       | to potential temperature each step with the surface      |                     |                  |
@@ -4445,15 +4665,29 @@ the ones marked **Required** abort the run if they are not given.
 |                                       | given must be positive                                   |                     |                  |
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
 | **erf.most.surf_moist**               | prescribed surface moisture [kg/kg]; read only with an   | Real >= 0           | -1.0 (not set)   |
-|                                       | active moisture model                                    |                     |                  |
+|                                       | active moisture model, except with ``flux_type`` =       |                     |                  |
+|                                       | ``bulk_coeff``, where it is **Required** in every run    |                     |                  |
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
 | **erf.most.surf_heating_rate**        | rate of change [K/h] applied to the prescribed surface   | Real                | 0.0              |
 |                                       | temperature (absolute with ``abs_surf_temp``) from the   |                     |                  |
 |                                       | start of the simulation; may not be combined with        |                     |                  |
-|                                       | ``erf.most.surf_temp_flux``                              |                     |                  |
+|                                       | ``erf.most.surf_temp_flux`` (an abort with               |                     |                  |
+|                                       | ``bulk_coeff``); not read by the ``bulk_coeff`` ``Ch``   |                     |                  |
+|                                       | form                                                     |                     |                  |
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
-| **erf.most.surf_temp_flux**           | prescribed surface heat flux [K m/s]; may not be         | Real                | 0.0              |
-|                                       | combined with ``erf.most.surf_heating_rate``             |                     |                  |
+| **erf.most.surf_temp_flux**           | prescribed surface heat flux <theta'w'> [K m/s],         | Real (finite with   | 0.0 (bulk_coeff: |
+|                                       | positive upward; may not be combined with                | ``bulk_coeff``)     | not set)         |
+|                                       | ``erf.most.surf_heating_rate``.  With ``flux_type`` =    |                     |                  |
+|                                       | ``bulk_coeff`` it is optional and, when given, imposes   |                     |                  |
+|                                       | the heat flux rho*F in place of the ``Ch`` form (WRF's   |                     |                  |
+|                                       | ``isfflx = 0`` with ``tke_heat_flux``), at any wind; it  |                     |                  |
+|                                       | then may not be combined with SST/TSK data,              |                     |                  |
+|                                       | ``most.use_sfc_fluxes``, ``most.use_sfc_sst``, a         |                     |                  |
+|                                       | land-surface or surface model or a coupled ocean.  In    |                     |                  |
+|                                       | calm air t*, q* and the Obukhov length then use u*       |                     |                  |
+|                                       | floored at 0.001 m/s (as the MOST imposed-flux path      |                     |                  |
+|                                       | does), so t* = -F/0.001 there: finite, but not a         |                     |                  |
+|                                       | meaningful stability scale for a PBL scheme              |                     |                  |
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
 | **erf.most.surf_moist_flux**          | prescribed surface moisture flux; used when              | Real                | 0.0              |
 |                                       | ``erf.most.surf_moist`` is not set                       |                     |                  |
@@ -4500,7 +4734,9 @@ the ones marked **Required** abort the run if they are not given.
 |                                       | when ``flux_type`` = ``bulk_coeff``                      |                     |                  |
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
 | **erf.most.Ch**                       | bulk transfer coefficient for heat.  **Required** when   | Real                | must be set      |
-|                                       | ``flux_type`` = ``bulk_coeff``                           |                     |                  |
+|                                       | ``flux_type`` = ``bulk_coeff``, unless                   |                     |                  |
+|                                       | ``erf.most.surf_temp_flux`` is given: then it is not     |                     |                  |
+|                                       | used, and a warning says so if it is set                 |                     |                  |
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
 | **erf.most.Cq**                       | bulk transfer coefficient for moisture.  **Required**    | Real                | must be set      |
 |                                       | when ``flux_type`` = ``bulk_coeff``                      |                     |                  |
@@ -4539,6 +4775,12 @@ the ones marked **Required** abort the run if they are not given.
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
 | **erf.most.ignore_sst**               | use the skin temperature rather than the sea-surface     | Boolean             | false            |
 |                                       | temperature from the input data                          |                     |                  |
++---------------------------------------+----------------------------------------------------------+---------------------+------------------+
+| **erf.most.surface_current**          | uniform velocity [m/s] of the water surface along x and  | 2 Reals             | None             |
+|                                       | y, such as an ocean current; the surface layer then uses |                     |                  |
+|                                       | the wind relative to it (see :ref:`sec:MovingSurface`).  |                     |                  |
+|                                       | Land stays at rest. Requires water at the surface, and   |                     |                  |
+|                                       | is not supported with EB terrain                         |                     |                  |
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
 | **erf.most.use_lsm_skin_temperature** | take the land model's skin temperature (SLM ``tsurf``,   | Boolean             | false            |
 |                                       | Noah-MP ``t_sfc``) as an absolute temperature and        |                     |                  |
@@ -4711,10 +4953,10 @@ contains the developing Eulerian spectral-bin capability selected with
 ``erf.moisture_model = SBM``.
 
 The current ``SBM`` option transports a liquid-water size distribution by
-resolved advection on one atmospheric grid level. It is not yet a complete
-warm-cloud microphysics scheme and does not support operational multilevel
-spectral transport. See :ref:`sec:SpectralBinMicrophysics` for the spectral
-representation, configuration, and current limitations.
+resolved advection on one atmospheric grid level or on a two-level adaptive
+mesh. It is not yet a complete warm-cloud microphysics scheme. See
+:ref:`sec:SpectralBinMicrophysics` for the spectral representation,
+configuration, and current limitations.
 
 The following run-time options control the moisture model.
 
@@ -4787,7 +5029,7 @@ SBM inputs
 ----------
 
 The inputs below are read only when ``erf.moisture_model = SBM``. They
-configure the current single-level liquid-spectrum advection capability;
+configure the current liquid-spectrum advection capability;
 see :ref:`sec:SpectralBinMicrophysics` for its scientific representation and
 execution restrictions.
 
@@ -4842,6 +5084,20 @@ execution restrictions.
      - :math:`N_{\mathrm{bins}}` values for 1M or
        :math:`2N_{\mathrm{bins}}` values for 2M
      - All zero
+   * - ``erf.sbm_budget_check``
+     - After every coarse step, check that the composite spectral inventory
+       changed only by that step's accepted transfer through the physical
+       faces; print ``SBM_BUDGET`` lines and abort beyond the roundoff bound.
+       Requires ``erf.moisture_model = SBM``.
+     - Boolean
+     - ``false``
+   * - ``<face>.sbm_inflow_z``
+     - Constant spectrum entering through an ``Inflow`` or ``inflow_outflow``
+       face, one value per component per kilogram of dry air, in the order of
+       ``erf.sbm_fixture_initial_state``. Required on every such face and
+       rejected on any other; ``<face>.density`` must also be given.
+     - One value per spectral component
+     - None
 
 .. note::
 
@@ -5136,7 +5392,10 @@ heat flux it computes responds to the skin. The net shortwave the balance absorb
 update after the dycore is written as ``seb_sw_net``. With immersed-boundary buildings and
 ``erf.ibseb.two_stream_buildings`` (the default) the balance holds the ground under the buildings
 and, with ``seb_use_radiation_fluxes``, takes the direct beam off the ground they shade
-(``ibseb_ground_shadow``); see :ref:`the IBSEB theory page <sec:IBSEB>`.
+(``ibseb_ground_shadow``); see :ref:`the IBSEB theory page <sec:IBSEB>`. The net longwave
+of that update is ``seb_lw_net``. With :cpp:`erf.ibseb.ground_sky_view` the ground beside the
+buildings also takes the walls' reflected light and longwave in place of the part of the sky
+they cover (``ibseb_ground_wall_view``).
 
 
 
@@ -5816,9 +6075,11 @@ List of Parameters
 |                                      | solid fraction below which the forcing treats a cell or  |                    | immersed forcing |
 |                                      | face as fluid                                            |                    |                  |
 +--------------------------------------+----------------------------------------------------------+--------------------+------------------+
-| **erf.eb_boundary_type**             | condition imposed on the embedded boundary               | SlipWall,          | NoSlipWall       |
-|                                      |                                                          | NoSlipWall,        |                  |
-|                                      |                                                          | SurfaceLayer       |                  |
+| **erf.eb_boundary_type**             | condition imposed on the embedded boundary.              | SlipWall,          | NoSlipWall       |
+|                                      | ``SurfaceLayer`` and ``zlo.type`` = ``surface_layer``    | NoSlipWall,        |                  |
+|                                      | must be set together (ERF stops at start-up otherwise);  | SurfaceLayer       |                  |
+|                                      | the surface layer is then applied on the embedded        |                    |                  |
+|                                      | boundary, and no other face may be ``surface_layer``     |                    |                  |
 +--------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.eb_diff_constraint_x**         | apply the tangential-diffusion constraint on x-faces at  | Boolean            | false            |
 |                                      | the embedded boundary; read only when                    |                    |                  |
@@ -6235,8 +6496,7 @@ Lateral Boundary Nudging for Real-Data Runs
 -------------------------------------------
 
 * :ref:`Forcing Terms <inputs-forcing-terms>` -- ``erf.bdy_moist_nudge_type``,
-  ``erf.bdy_nudge_factor``, ``erf.bdy_rho_nudge_factor``, ``erf.use_wrf_bdy_density``,
-  ``erf.use_wrf_bdy_qc_qi``
+  ``erf.bdy_nudge_factor``, ``erf.bdy_rho_nudge_factor``, ``erf.use_wrf_bdy_density``
 
 Inflow Perturbation
 -------------------

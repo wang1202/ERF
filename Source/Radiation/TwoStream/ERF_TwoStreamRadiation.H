@@ -261,8 +261,11 @@ public:
      *              columns reach @p m_top
      * @param m_top highest interface the faces read (IBFaceSet::top_sample_interface()),
      *              in [0, number of cells in z]
+     * @param ground_albedo also keep the direct-beam albedo the sweep gives each column's
+     *              ground (one more 2D field, TwoStreamCanopyView::ground_albedo_dir), for
+     *              the faces of erf.ibseb.ground_view_shadow; without it that pointer is null
      */
-    void supply_canopy_forcing (int lev, int m_top);
+    void supply_canopy_forcing (int lev, int m_top, bool ground_albedo = false);
 
     /** @brief True when supply_canopy_forcing() was called for @p lev since its last define_level(). */
     [[nodiscard]] bool supplies_canopy_forcing (int lev) const noexcept {
@@ -281,6 +284,7 @@ public:
         if (supplies_canopy_forcing(lev) && m_canopy_step[lev] == nstep) {
             v.beam = m_canopy[lev].get();
             v.cos_zenith = m_canopy_cosz[lev].get();
+            v.ground_albedo_dir = m_canopy_alb[lev].get();
         }
         return v;
     }
@@ -306,8 +310,58 @@ public:
      * @param blanking the level's cell-centred blanking (ERF::terrain_blanking), on the
      *                 state's grids: 0 in the air, 1 inside a building
      * @param domain   the level's domain Box; its bottom cell is the ground's
+     * @param take_ground_walls also take, at the update after the dycore, what the walls
+     *                 send to the open ground (erf.ibseb.ground_sky_view, the field of
+     *                 ground_walls_for_step()): only where the ground takes the shadow
+     *                 and the longwave is on (takes_ground_walls())
      */
-    void set_building_cover (int lev, const amrex::MultiFab& blanking, const amrex::Box& domain);
+    void set_building_cover (int lev, const amrex::MultiFab& blanking, const amrex::Box& domain,
+                             bool take_ground_walls = false, bool start_on_roofs = false);
+
+    /// Components of the field of roofs_for_step().
+    enum Roof : int { ROOF_SET = 0, ROOF_ALBEDO = 1, ROOF_EMISSIVITY = 2, ROOF_TEMPERATURE = 3, ROOF_LIT = 4, ROOF_NCOMP = 5 };
+
+    /**
+     * @brief True when the columns of @p lev under a building start on its roof
+     * (erf.ibseb.two_stream_roofs; set_building_cover() with start_on_roofs, on a level
+     * that sweeps its own columns): the one condition for the fields and for the sweep.
+     */
+    [[nodiscard]] bool starts_on_roofs (int lev) const noexcept {
+        return lev >= 0 && lev < static_cast<int>(m_roof.size()) && m_roof[lev] != nullptr;
+    }
+
+    /**
+     * @brief For each column of @p lev, the first cell above the building that stands on
+     * its ground (the cell on the roof), or the bottom cell on open ground (2D: i,j);
+     * nullptr unless starts_on_roofs(). A cell above the level's top means the building
+     * fills the column. Solid cells above an air gap (an overhang) are not a roof here:
+     * under an overhang above open ground the cell is the bottom cell, and under an
+     * overhang above a lower roof it is the cell on that lower roof.
+     */
+    [[nodiscard]] const amrex::iMultiFab* roof_cell (int lev) const noexcept {
+        return starts_on_roofs(lev) ? m_roof_k[lev].get() : nullptr;
+    }
+
+    /**
+     * @brief The field the immersed-boundary balance fills, before the sweep of step
+     * @p nstep, with the roof face of each column under a building (2D: i,j; ROOF_SET 1
+     * where a roof face stands on roof_cell(), then its albedo, emissivity, skin
+     * temperature and the share of the beam that reaches it), or nullptr unless
+     * starts_on_roofs(). Marks the field as that step's:
+     * the sweep stops unless the roofs are of its own step. Where ROOF_SET is 0 the
+     * column keeps the ground as its lower boundary.
+     */
+    [[nodiscard]] amrex::MultiFab* roofs_for_step (int lev, int nstep);
+
+    /** @brief True once roofs_for_step() has been called for @p lev since its building cover was set. */
+    [[nodiscard]] bool roofs_given (int lev) const noexcept {
+        return starts_on_roofs(lev) && m_roof_step[lev] >= 0;
+    }
+
+    /** @brief True when the ground balance of @p lev takes what the walls send it (see set_building_cover()): the one condition for the field, what the sweep keeps for it, and the shortwave and longwave terms. */
+    [[nodiscard]] bool takes_ground_walls (int lev) const noexcept {
+        return lev >= 0 && lev < static_cast<int>(m_ground_walls.size()) && m_ground_walls[lev] != nullptr;
+    }
 
     /** @brief True when set_building_cover() was called for @p lev since its last define_level(). */
     [[nodiscard]] bool has_building_cover (int lev) const noexcept {
@@ -324,6 +378,36 @@ public:
      * the step its sweep ran in.
      */
     [[nodiscard]] amrex::MultiFab* ground_shadow_for_step (int lev, int nstep);
+
+    /**
+     * @brief The field the immersed-boundary balance fills with what the walls send to
+     * the ground of @p lev for step @p nstep (IBFaceSet::compute_ground_walls(): the
+     * walls' share of the ground's view, their reflected shortwave and their longwave
+     * arriving on the ground, W/m^2), or nullptr when the level's ground balance takes
+     * none (takes_ground_walls()). Marks the
+     * field as that step's. At the update after the dycore the open ground then keeps
+     * its absorbed diffuse shortwave and the sky's longwave through the part of its
+     * view the walls leave open, and takes the walls' through the rest:
+     *   SW += (1 - alb_dif) SW_walls - v (SW - SW_beam),   LW += emis (LW_walls - v LW_down),
+     * with v the walls' share (two_stream_ground_wall_terms()).
+     */
+    [[nodiscard]] amrex::MultiFab* ground_walls_for_step (int lev, int nstep);
+
+    /** @brief What the walls sent to the ground of @p lev last (see ground_walls_for_step()), or nullptr before any or when the level takes none. Read-only: for output. */
+    [[nodiscard]] const amrex::MultiFab* ground_walls (int lev) const noexcept {
+        return (lev >= 0 && lev < static_cast<int>(m_ground_walls.size()) && m_walls_step[lev] >= 0)
+             ? m_ground_walls[lev].get() : nullptr;
+    }
+
+    /**
+     * @brief The net longwave [W/m^2] the ground balance of @p lev used at its last update
+     * after the dycore (with the walls' longwave of erf.ibseb.ground_sky_view); nullptr as
+     * for seb_sw_net(). Read-only: for output.
+     */
+    [[nodiscard]] const amrex::MultiFab* seb_lw_net (int lev) const {
+        return (active() && m_rad->seb_enable && lev < static_cast<int>(m_lw_flux_sfc.size()) && m_seb_updated[lev] != 0)
+             ? m_lw_flux_sfc[lev].get() : nullptr;
+    }
 
     /** @brief The ground's shadow last given for @p lev (see ground_shadow_for_step()), or nullptr before one is given or when the level takes none. Read-only: for output. */
     [[nodiscard]] const amrex::MultiFab* ground_shadow (int lev) const noexcept {
@@ -427,6 +511,7 @@ private:
     // (-1 before any).
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_canopy;       // the beam, interfaces 0 .. m_top
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_canopy_cosz;  // cos z, floored at zero (2D)
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_canopy_alb;   // the ground's direct-beam albedo of the sweep (2D)
     amrex::Vector<int> m_canopy_m;
     amrex::Vector<int> m_canopy_step;
 
@@ -442,6 +527,18 @@ private:
     amrex::Vector<std::unique_ptr<amrex::MultiFab>>  m_footprint;
     amrex::Vector<std::unique_ptr<amrex::MultiFab>>  m_ground_shadow;
     amrex::Vector<std::unique_ptr<amrex::MultiFab>>  m_sw_beam_sfc;
+    // erf.ibseb.ground_sky_view: what the walls send to the ground (ground_walls_for_step(),
+    // three components) of step m_walls_step, and what the sweep keeps for it per column
+    // (2D): the longwave down at the ground, the ground's diffuse absorptance 1 - alb_dif,
+    // and its longwave emissivity.
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>>  m_ground_walls;
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>>  m_ground_keep;
+    amrex::Vector<int> m_walls_step;
+    // erf.ibseb.two_stream_roofs: the cell on the roof of each column (roof_cell()) and the
+    // roof faces the balance gave for step m_roof_step (roofs_for_step()).
+    amrex::Vector<std::unique_ptr<amrex::iMultiFab>> m_roof_k;
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>>  m_roof;
+    amrex::Vector<int> m_roof_step;
     amrex::Vector<int> m_shadow_step;
     amrex::Vector<int> m_sweep_step;
     amrex::Vector<int> m_shaded_step;

@@ -44,8 +44,7 @@ using namespace amrex;
 double ERF::startCPUTime        = 0.0;
 double ERF::previousCPUTimeUsed = 0.0;
 
-Vector<AMRErrorTag> ERF::ref_tags;
-Vector<std::string> ERF::ref_tag_indicator_names;
+Vector<RefinementCriterion> ERF::ref_criteria;
 
 SolverChoice ERF::solverChoice;
 
@@ -215,6 +214,11 @@ ERF::Evolve ()
         int iteration = 1;
         timeStep(0, cur_time, iteration);
 
+#ifdef ERF_USE_DUST
+        // The dust model's own state, over the level-0 step just taken
+        advance_dust_model(step, cur_time);
+#endif
+
         cur_time += static_cast<double>(dt[0]);
         t_new[0] = cur_time;
 
@@ -252,6 +256,11 @@ ERF::Evolve ()
     }
 
     WriteAtFinalTime();
+
+#ifdef ERF_USE_MOVING_BODIES
+    // The structure model closes its own files and solvers, after the last plotfile and checkpoint
+    if (m_structure_model) { m_structure_model->finalize(); }
+#endif
 
     flush_stations();
 
@@ -317,6 +326,12 @@ ERF::WriteAtIntermediateTime (int step, double cur_time)
         }
     }
 
+#ifdef ERF_USE_DUST
+    // Dust output before the checkpoint, so a checkpoint of this step records
+    // the step's dust output as written and a restart from it does not repeat it
+    if (m_dust_model) { m_dust_model->write_output(step+1, cur_time, false); }
+#endif
+
     if (writeNow(cur_time, step+1, m_check_int, m_check_per, dt[0], last_check_file_time)) {
         last_check_file_step = step+1;
         WriteCheckpointFile();
@@ -365,6 +380,11 @@ ERF::WriteAtFinalTime ()
             if (m_subvol_per[i] > zero) {last_subvol_time[i] += m_subvol_per[i];}
         }
     }
+
+#ifdef ERF_USE_DUST
+    // Dust output before the checkpoint, as in WriteAtIntermediateTime
+    if (m_dust_model) { m_dust_model->write_output(istep[0], t_new[0], true); }
+#endif
 
     if ( (m_check_int > 0 || m_check_per > zero) && istep[0] > last_check_file_step) {
         WriteCheckpointFile();
@@ -712,9 +732,17 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
             } // mfi
 
             // This call refluxes the cell-centered variables from the lev/lev+1 interface onto lev:
-            // all "slow" variables, plus (rho theta) on anelastic levels. Density is never refluxed
-            // (it is fixed on anelastic levels), nor is (rho theta) on compressible levels.
-            int reflux_comp = (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible) ? RhoTheta_comp : RhoTheta_comp + 1;
+            // all "slow" variables, plus (rho theta) on anelastic levels and rho and (rho theta) on
+            // pseudo-incompressible levels.  Density is not refluxed on anelastic levels (it is fixed),
+            // nor are rho and (rho theta) on compressible levels.
+            int reflux_comp;
+            if (solverChoice.compressibility_type[lev] == CompressibilityType::PseudoIncompressible) {
+                reflux_comp = Rho_comp;
+            } else if (solverChoice.compressibility_type[lev] == CompressibilityType::Anelastic) {
+                reflux_comp = RhoTheta_comp;
+            } else {
+                reflux_comp = RhoTheta_comp + 1;
+            }
             getAdvFluxReg(lev+1)->Reflux(vars_new[lev][Vars::cons], reflux_comp, reflux_comp, ncomp-reflux_comp);
 
             // Here we multiply (rho S) by m^2 after refluxing
@@ -740,14 +768,14 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
             // We need to do this before anything else because refluxing changes the
             // values of coarse cells underneath fine grids with the assumption they'll
             // be over-written by averaging down
-            int src_comp;
-            if (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible) {
-                src_comp = 1;
-            } else {
-                src_comp = 0;
-            }
+            // (rho is not averaged down on an anelastic level, where it is rho0)
+            int src_comp = (solverChoice.compressibility_type[lev] == CompressibilityType::Anelastic) ? 1 : 0;
             int num_comp = ncomp - src_comp;
             AverageDownTo(lev,src_comp,num_comp);
+
+            // The impulse the reflux of the pressure gives the coarse/fine faces normal to the
+            // momentum, from this step, given over the next (erf.momentum_reflux, ERF_MomentumReflux.cpp)
+            momentum_reflux(lev);
 
             // The surface precipitation accumulators under the fine level's patches that
             // stand on the ground, which (like the state) the fine level tracks better
@@ -800,6 +828,12 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
     if (cloud_chamber_budget && sbm_moisture) {
         report_cloud_chamber_budget();
     }
+    if (sbm_state_manager && sbm_moisture) {
+        sbm_check_budget(nstep);
+    }
+
+    // The next coarse step sums the pressure afresh
+    if (momentum_reflux_enabled()) { momentum_reflux_reset(); }
 
     if (is_it_time_for_action(nstep, time, dt_lev0, sum_interval, sum_per)) {
         sum_integrated_quantities(time);
@@ -847,7 +881,7 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
         run_line_sampler(*line_sampler);
     }
     if (plane_sampler && is_it_time_for_action(nstep+1, time, dt_lev0, plane_sampling_interval, plane_sampling_per)) {
-        plane_sampler->get_sample_data(geom, vars_new);
+        plane_sampler->get_sample_data(geom, vars_new, sampling_volfrac());
         plane_sampler->write_sample_data(t_new, istep, ref_ratio, geom);
     }
 
@@ -1018,6 +1052,10 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
         MultiFab::Copy(base_state[lev],base_state_new[lev],0,0,BaseState::num_comps,base_state[lev].nGrowVect());
 
         make_zcc(geom[lev],*z_phys_nd[lev],*z_phys_cc[lev]);
+      }
+      // Coarsest first, since a level's z_sfc_nd may take values from the one below it
+      for (int lev = 0; lev <= finest_level; ++lev) {
+        update_zsfc_nd(lev);
       }
     }
 
@@ -1317,14 +1355,6 @@ ERF::InitData_post ()
             int n_time_old = static_cast<int>(time_since_start_bdy /  bdy_time_interval);
             MultiFab r_hse(base_state[0], make_alias, BaseState::r0_comp, 1);
             Array<MultiFab*, AMREX_SPACEDIM> area_vec = {ax[0].get(), ay[0].get(), az[0].get()};
-            auto repack_runtime_bdy = [&] (const int itime) {
-                const bool separate_hydrometeors = solverChoice.use_wrf_bdy_qc_qi &&
-                    wrf_bdy_has_separate_hydrometeors(solverChoice.moisture_indices);
-                repack_wrfbdy_to_realbdy(bdy_data_xlo[itime], solverChoice.use_wrf_bdy_qc_qi, separate_hydrometeors);
-                repack_wrfbdy_to_realbdy(bdy_data_xhi[itime], solverChoice.use_wrf_bdy_qc_qi, separate_hydrometeors);
-                repack_wrfbdy_to_realbdy(bdy_data_ylo[itime], solverChoice.use_wrf_bdy_qc_qi, separate_hydrometeors);
-                repack_wrfbdy_to_realbdy(bdy_data_yhi[itime], solverChoice.use_wrf_bdy_qc_qi, separate_hydrometeors);
-            };
 
             // Need itime=0 for vertical interpolation
             if (n_time_old > 0) {
@@ -1334,14 +1364,8 @@ ERF::InitData_post ()
                                              bdy_data_xlo,bdy_data_xhi,bdy_data_ylo,bdy_data_yhi,
                                              wrf_MUB, wrf_C1H, wrf_C2H, wrf_RDNW, wrf_PHB, z_phys_cc[0], z_phys_nd[0],
                                              vars_new[0][Vars::xvel], vars_new[0][Vars::yvel], vars_new[0][Vars::cons],
-                                             r_hse, area_vec, geom[0], use_moist,
-                                             solverChoice.use_wrf_bdy_qc_qi,
-                                             solverChoice.moisture_indices.qi >= 0,
-                                             solverChoice.use_wrf_bdy_qc_qi &&
-                                             wrf_bdy_has_separate_hydrometeors(solverChoice.moisture_indices),
-                                             solverChoice.rebalance_wrf_input, domain_bcs_type,
+                                             r_hse, area_vec, geom[0], use_moist, solverChoice.rebalance_wrf_input, domain_bcs_type,
                                              real_width, bdy_time_interval, is_anelastic);
-                repack_runtime_bdy(itime);
             }
 
             int ntimes = std::min(n_time_old+3, static_cast<int>(bdy_data_xlo.size()));
@@ -1353,17 +1377,8 @@ ERF::InitData_post ()
                                              bdy_data_xlo,bdy_data_xhi,bdy_data_ylo,bdy_data_yhi,
                                              wrf_MUB, wrf_C1H, wrf_C2H, wrf_RDNW, wrf_PHB, z_phys_cc[0], z_phys_nd[0],
                                              vars_new[0][Vars::xvel], vars_new[0][Vars::yvel], vars_new[0][Vars::cons],
-                                             r_hse, area_vec, geom[0], use_moist,
-                                             solverChoice.use_wrf_bdy_qc_qi,
-                                             solverChoice.moisture_indices.qi >= 0,
-                                             solverChoice.use_wrf_bdy_qc_qi &&
-                                             wrf_bdy_has_separate_hydrometeors(solverChoice.moisture_indices),
-                                             solverChoice.rebalance_wrf_input, domain_bcs_type,
+                                             r_hse, area_vec, geom[0], use_moist, solverChoice.rebalance_wrf_input, domain_bcs_type,
                                              real_width, bdy_time_interval, is_anelastic);
-                if (itime == static_cast<int>(bdy_data_xlo.size())-1 && itime > 0) {
-                    repack_runtime_bdy(itime-1);
-                }
-                repack_runtime_bdy(itime);
             } // itime
         } // use_real_bcs
 
@@ -1644,6 +1659,18 @@ ERF::InitData_post ()
     }
 
     //
+    // On a pseudo-incompressible level, start from rho theta = rho0 theta0 (pressure p0), the state
+    //    that the constraint div(rho0 theta0 u) = 0 maintains, whatever the initialization
+    //
+    if (restart_chkfile == "") {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            if (solverChoice.compressibility_type[lev] == CompressibilityType::PseudoIncompressible) {
+                make_pseudo_incompressible_initial_state(lev);
+            }
+        }
+    }
+
+    //
     // If we are starting from scratch, we have the option to project the initial velocity field
     //    regardless of how we initialized.  Note that project_initial_velocity operates on vars_new.
     // pp_inc is used as scratch space here; we zero it out after the projection
@@ -1656,6 +1683,25 @@ ERF::InitData_post ()
                 double dummy_dt = 1.0;
                 if (verbose > 0) {
                     amrex::Print() << "Projecting initial velocity field at level " << lev << std::endl;
+                }
+
+                // A pseudo-incompressible projection maps rho0 theta0 / rho onto the faces with the
+                // advection stencil, which reads the density in the ghost cells (two or three deep
+                // with the higher-order schemes); fill them now, from the rescaled state of
+                // make_pseudo_incompressible_initial_state and, at a coarse/fine boundary, from
+                // the coarse level, since the full fill of the levels comes after the projection
+                if (solverChoice.compressibility_type[lev] == CompressibilityType::PseudoIncompressible) {
+                    auto& lev_new = vars_new[lev];
+                    if (lev == 0) {
+                        FillPatchCrseLevel(lev, t_new[lev],
+                                           {&lev_new[Vars::cons],&lev_new[Vars::xvel],&lev_new[Vars::yvel],&lev_new[Vars::zvel]},
+                                           true);
+                    } else {
+                        FillPatchFineLevel(lev, t_new[lev],
+                                           {&lev_new[Vars::cons],&lev_new[Vars::xvel],&lev_new[Vars::yvel],&lev_new[Vars::zvel]},
+                                           {&lev_new[Vars::cons],&rU_new[lev],&rV_new[lev],&rW_new[lev]},
+                                           false, true);
+                    }
                 }
 
                 project_initial_velocity(lev, t_new[lev], dummy_dt);
@@ -2255,6 +2301,19 @@ ERF::InitData_post ()
     }
 #endif
 
+#ifdef ERF_USE_DUST
+    // The dust model starts after the fire, which it may read; on a restart it
+    // restores its own state, and on a fresh start the dust scalars start at zero
+    initialize_dust_model();
+#else
+    {   // a dust deck on a build without the coupling would run as plain ERF, silently
+        amrex::ParmParse pp("erf.dust"); bool want = false; pp.query("enable", want);
+        if (want) { amrex::Abort("erf.dust.enable = true but this executable was built without the dust coupling"
+                                 "; rebuild with it (CMake ERF_ENABLE_DUST=ON, GNU make USE_DUST=TRUE)"
+                                 " and a dust model directory (CMake ERF_DUST_MODEL_DIRS, GNU make DUST_HOME)"); }
+    }
+#endif
+
     // Update micro vars and finish moisture model initializations before first plot file
     if (solverChoice.moisture_type != MoistureType::None) {
         const bool lagrangian =
@@ -2398,6 +2457,12 @@ ERF::InitData_post ()
     if (m_structure_model) { initialize_structure_model(); }
 #endif
 
+#ifdef ERF_USE_DUST
+    // Dust output of step 0 before the plotfiles and the initial checkpoint
+    // (written below), as in WriteAtIntermediateTime
+    if (m_dust_model) { m_dust_model->write_output(istep[0], t_new[0], false); }
+#endif
+
     if ( (restart_chkfile.empty()) ||
          (!restart_chkfile.empty() && plot_file_on_restart) )
     {
@@ -2514,43 +2579,104 @@ ERF::InitData_post ()
         }
     }
 
-    if (pp.contains("sample_point_log") && pp.contains("sample_point"))
+    // Points sampled to logs: cells of level 0 (erf.sample_point), or points in domain
+    //    coordinates or latitude and longitude, each a one-cell LineSampler line
+    bool has_sample_point = pp.contains("sample_point");
+    bool has_sample_point_real = pp.contains("sample_point_real");
+    bool has_sample_point_latlon = pp.contains("sample_point_latlon");
+    if (int(has_sample_point) + int(has_sample_point_real) + int(has_sample_point_latlon) > 1) {
+        Abort("Specify only one of erf.sample_point, erf.sample_point_real or erf.sample_point_latlon");
+    }
+    bool sample_point_z_agl = false;
+    pp.queryAdd("sample_point_z_agl", sample_point_z_agl);
+    if (sample_point_z_agl && has_sample_point) {
+        Abort("erf.sample_point_z_agl applies to erf.sample_point_real and erf.sample_point_latlon,"
+              " not to points given by cell indices");
+    }
+
+    if (pp.contains("sample_point_log") && (has_sample_point || has_sample_point_real || has_sample_point_latlon))
     {
-        int lev = 0;
+        const std::string key = has_sample_point      ? "sample_point"
+                              : has_sample_point_real ? "sample_point_real" : "sample_point_latlon";
+        const int num_vals = pp.countval(key.c_str());
+        if (num_vals % AMREX_SPACEDIM != 0) {
+            Abort("erf." + key + " must be specified as " +
+                  (has_sample_point ? "(i,j,k)" : has_sample_point_real ? "(x,y,z)" : "(lat,long,z)") +
+                  " triples");
+        }
+        const int num_samplepts = num_vals / AMREX_SPACEDIM;
 
-        int num_samplepts = pp.countval("sample_point") / AMREX_SPACEDIM;
-        if (num_samplepts > 0) {
-            Vector<int> index; index.resize(num_samplepts*AMREX_SPACEDIM);
-            samplepoint.resize(num_samplepts);
-
-            pp.queryarr("sample_point",index,0,num_samplepts*AMREX_SPACEDIM);
+        Vector<IntVect> cells;
+        Vector<RealVect> points;
+        const Box& domain = geom[0].Domain();
+        if (has_sample_point) {
+            Vector<int> index;
+            pp.getarr("sample_point", index, 0, num_vals);
             for (int i = 0; i < num_samplepts; i++) {
                 IntVect iv(index[AMREX_SPACEDIM*i+0],index[AMREX_SPACEDIM*i+1],index[AMREX_SPACEDIM*i+2]);
-                samplepoint[i] = iv;
+                if (!domain.contains(iv)) {
+                    Abort("erf.sample_point " + std::to_string(i) + " is not a cell of the level-0 domain");
+                }
+                cells.push_back(iv);
+            }
+        } else {
+            Vector<Real> vals;
+            pp.getarr(key.c_str(), vals, 0, num_vals);
+            std::unique_ptr<LatLonMap> latlon_map;
+            if (has_sample_point_latlon) {
+                if (lat_m.empty() || lat_m[0] == nullptr || lon_m.empty() || lon_m[0] == nullptr) {
+                    Abort("erf.sample_point_latlon needs a run with latitude/longitude arrays "
+                          "(a WRF or metgrid initialization, or a restart from one).  Give the "
+                          "points with erf.sample_point_real in domain coordinates instead");
+                }
+                latlon_map = std::make_unique<LatLonMap>(*lat_m[0], *lon_m[0], ba2d[0], dmap[0], geom[0]);
+            }
+            const auto* prob_lo = geom[0].ProbLo();
+            const auto* prob_hi = geom[0].ProbHi();
+            for (int i = 0; i < num_samplepts; i++) {
+                const std::string what = "erf." + key + " " + std::to_string(i);
+                RealVect p(vals[AMREX_SPACEDIM*i+0], vals[AMREX_SPACEDIM*i+1], vals[AMREX_SPACEDIM*i+2]);
+                if (latlon_map) {
+                    const LatLonLocation where = latlon_map->locate_or_abort(p[0], p[1], what);
+                    Print() << what << " at lat=" << p[0] << " long=" << p[1]
+                            << " reaches lat=" << where.lat << " long=" << where.lon
+                            << " (x=" << where.x << " y=" << where.y << ")" << std::endl;
+                    p[0] = where.x;
+                    p[1] = where.y;
+                }
+                if (p[0] < prob_lo[0] || p[0] > prob_hi[0] || p[1] < prob_lo[1] || p[1] > prob_hi[1]) {
+                    Abort(what + " must lie within the level-0 domain in x and y");
+                }
+                // Found from column heights, z is clamped to the column; otherwise it must be
+                //    in the domain to be in a cell
+                const bool by_height = sample_point_z_agl || SolverChoice::mesh_type != MeshType::ConstantDz;
+                if (!by_height && (p[2] < prob_lo[2] || p[2] >= prob_hi[2])) {
+                    Abort(what + " must lie within the level-0 domain in z");
+                }
+                points.push_back(p);
             }
         }
 
-        int num_sampleptlogs = pp.countval("sample_point_log");
-        AMREX_ALWAYS_ASSERT(num_sampleptlogs == num_samplepts);
+        const int num_sampleptlogs = pp.countval("sample_point_log");
+        if (num_sampleptlogs != num_samplepts) {
+            Abort("erf.sample_point_log must give exactly one log name per point of erf." + key);
+        }
         if (num_sampleptlogs > 0) {
-            sampleptlog.resize(num_sampleptlogs);
-            sampleptlogname.resize(num_sampleptlogs);
-            pp.queryarr("sample_point_log",sampleptlogname,0,num_sampleptlogs);
-
-            for (int i = 0; i < num_sampleptlogs; i++) {
-                setRecordSamplePointInfo(i,lev,samplepoint[i],sampleptlogname[i]);
-            }
+            Vector<std::string> sampleptlogname;
+            pp.getarr("sample_point_log", sampleptlogname, 0, num_sampleptlogs);
+            sample_point_sampler = std::make_unique<LineSampler>(cells, points, sampleptlogname,
+                                                                 sample_point_z_agl);
         }
-
     }
 
     bool has_sample_line = pp.contains("sample_line");
     bool has_sample_line_real = pp.contains("sample_line_real");
-    if (has_sample_line && has_sample_line_real) {
-        Abort("Specify only one of erf.sample_line or erf.sample_line_real");
+    bool has_sample_line_latlon = pp.contains("sample_line_latlon");
+    if (int(has_sample_line) + int(has_sample_line_real) + int(has_sample_line_latlon) > 1) {
+        Abort("Specify only one of erf.sample_line, erf.sample_line_real or erf.sample_line_latlon");
     }
 
-    if (pp.contains("sample_line_log") && (has_sample_line || has_sample_line_real))
+    if (pp.contains("sample_line_log") && (has_sample_line || has_sample_line_real || has_sample_line_latlon))
     {
         int lev = 0;
 
@@ -2569,17 +2695,43 @@ ERF::InitData_post ()
                 }
             }
         } else {
-            int num_real_vals = pp.countval("sample_line_real");
-            if (num_real_vals % AMREX_SPACEDIM != 0) {
-                Abort("erf.sample_line_real must be specified as (x,y,z) triples");
+            // (x,y,z) triples, or (lat,long) pairs placed on the grid as stations are; the
+            //    z of a triple is not used
+            const std::string key = has_sample_line_real ? "sample_line_real" : "sample_line_latlon";
+            const int nper = has_sample_line_real ? AMREX_SPACEDIM : 2;
+            int num_real_vals = pp.countval(key.c_str());
+            if (num_real_vals % nper != 0) {
+                Abort(has_sample_line_real ? "erf.sample_line_real must be specified as (x,y,z) triples"
+                                           : "erf.sample_line_latlon must be specified as (lat,long) pairs");
             }
 
-            num_samplelines = num_real_vals / AMREX_SPACEDIM;
+            num_samplelines = num_real_vals / nper;
             if (num_samplelines > 0) {
-                Vector<Real> location; location.resize(num_real_vals);
+                Vector<Real> location; location.resize(num_samplelines*AMREX_SPACEDIM);
                 sampleline.resize(num_samplelines);
 
-                pp.queryarr("sample_line_real",location,0,num_real_vals);
+                if (has_sample_line_real) {
+                    pp.queryarr("sample_line_real",location,0,num_real_vals);
+                } else {
+                    if (lat_m.empty() || lat_m[0] == nullptr || lon_m.empty() || lon_m[0] == nullptr) {
+                        Abort("erf.sample_line_latlon needs a run with latitude/longitude arrays "
+                              "(a WRF or metgrid initialization, or a restart from one).  Give the "
+                              "lines with erf.sample_line_real in domain coordinates instead");
+                    }
+                    Vector<Real> latlon;
+                    pp.getarr("sample_line_latlon",latlon,0,num_real_vals);
+                    const LatLonMap latlon_map(*lat_m[0], *lon_m[0], ba2d[0], dmap[0], geom[0]);
+                    for (int i = 0; i < num_samplelines; i++) {
+                        const std::string what = "erf.sample_line_latlon line " + std::to_string(i);
+                        const LatLonLocation where = latlon_map.locate_or_abort(latlon[2*i], latlon[2*i+1], what);
+                        location[AMREX_SPACEDIM*i+0] = where.x;
+                        location[AMREX_SPACEDIM*i+1] = where.y;
+                        location[AMREX_SPACEDIM*i+2] = Real(0.0);
+                        Print() << what << " at lat=" << latlon[2*i] << " long=" << latlon[2*i+1]
+                                << " reaches lat=" << where.lat << " long=" << where.lon
+                                << " (x=" << where.x << " y=" << where.y << ")" << std::endl;
+                    }
+                }
 
                 const Box& domain = geom[lev].Domain();
                 const auto* prob_lo = geom[lev].ProbLo();
@@ -2593,7 +2745,8 @@ ERF::InitData_post ()
 
                     if (xloc < prob_lo[0] || xloc > prob_hi[0] ||
                         yloc < prob_lo[1] || yloc > prob_hi[1]) {
-                        Abort("erf.sample_line_real must lie within the level-0 domain in x and y");
+                        Abort(has_sample_line_real ? "erf.sample_line_real must lie within the level-0 domain in x and y"
+                                                   : "erf.sample_line_latlon must lie within the level-0 domain");
                     }
 
                     int i_cell = domain.smallEnd(0) + static_cast<int>(std::floor((xloc - prob_lo[0]) / dx[0]));
@@ -2634,8 +2787,18 @@ ERF::InitData_post ()
             Abort("Need to specify line_sampling_interval or line_sampling_per");
         }
         line_sampler = std::make_unique<LineSampler>();
+        if (line_sampler->uses_latlon()) {
+            if (lat_m.empty() || lat_m[0] == nullptr || lon_m.empty() || lon_m[0] == nullptr) {
+                Abort("erf.sample_line_lo/hi_latlon need a run with latitude/longitude arrays "
+                      "(a WRF or metgrid initialization, or a restart from one).  Give the "
+                      "lines with erf.sample_line_lo/hi_real in domain coordinates instead");
+            }
+            const LatLonMap latlon_map(*lat_m[0], *lon_m[0], ba2d[0], dmap[0], geom[0]);
+            line_sampler->resolve_latlon(latlon_map, geom[0]);
+        }
         line_sampler->write_coords(z_phys_cc, z_phys_nd, geom,
-                                   line_sampler->needs_ground() ? &station_ground(0) : nullptr);
+                                   line_sampler->needs_ground() ? &station_ground(0) : nullptr,
+                                   sampling_ground(*line_sampler), sampling_volfrac());
     }
     if (do_plane) {
         if (plane_sampling_interval < 0 && plane_sampling_per < 0) {
@@ -2747,6 +2910,7 @@ ERF::InitData_post ()
 #ifdef ERF_SBM_AMR_QUALIFICATION
     sbm_qualification_record_initial_inventory();
 #endif
+    sbm_record_budget_reference();
 }
 
 //
@@ -3371,6 +3535,38 @@ ERF::initializeFire (const int& /*a_nlevsmax*/ /*!< number of AMR levels */)
     // The coupling inputs, with their range checks; with erf.fire.enable the
     // engine must be one compiled into this executable (ERF_REGISTER_FIRE_ENGINE)
     m_fire_params = FireCouplingParams::read();
+
+    // erf.pbl_mrf_fire_thermal_excess adds the lagged fire flux to the MRF
+    // thermal excess; it is inert without an injecting fire or another PBL.
+    // TurbChoice reads it only under erf.pbl_type = MRF, so with any other PBL
+    // the key was silently ignored: check the deck for it directly.
+    {
+        amrex::ParmParse pp_erf("erf");
+        bool any_mrf = false;
+        for (int lev = 0; lev <= max_level; ++lev) {
+            any_mrf = any_mrf || (solverChoice.turbChoice[lev].pbl_type == PBLType::MRF);
+        }
+        if (!any_mrf && pp_erf.contains("pbl_mrf_fire_thermal_excess")) {
+            amrex::Abort("[FIRE] erf.pbl_mrf_fire_thermal_excess is set but no level runs erf.pbl_type = MRF;"
+                         " the key is read only by the MRF scheme");
+        }
+    }
+    for (int lev = 0; lev <= max_level; ++lev) {
+        const auto& tc = solverChoice.turbChoice[lev];
+        if (!tc.mrf_fire_thermal_excess) { continue; }
+        if (!m_fire_params.enable || !m_fire_params.injects_flux()) {
+            amrex::Abort("[FIRE] erf.pbl_mrf_fire_thermal_excess = true on level " + std::to_string(lev)
+                         + " needs erf.fire.enable = true with erf.fire.coupling_type = lagged or synchronous"
+                         " (the fire flux it adds)");
+        }
+        // the lagged flux carries 5 halo columns (FireCoupler::initialize); the
+        // smoothing stencil must fit them
+        if (tc.enable_pblh_smoothing && tc.pblh_smoothing_passes > 5) {
+            amrex::Abort("[FIRE] erf.pbl_mrf_fire_thermal_excess reads the lagged fire flux in a halo of 5 columns;"
+                         " erf.pblh_smoothing_passes = " + std::to_string(tc.pblh_smoothing_passes) + " needs more."
+                         " Use at most 5 passes with the fire thermal excess.");
+        }
+    }
     if (!m_fire_params.enable) { return; }
 
     // Contracts between the fire inputs and the solver inputs, checked here
@@ -4164,6 +4360,22 @@ ERF::ReadParameters ()
         }
     }
 
+    // A moving mesh advances its base state column by column, with a bottom-face flux
+    // extrapolated from the three lowest cells of the box, and erf_substep_MT takes the bottom
+    // of the box as the moving surface; both need every grid to span the full height of the
+    // domain.  A moving mesh has only level 0 (amr.max_level = 0), whose grids cover the
+    // domain, so amr.no_box_split_dir = 2 (the default) gives exactly that.
+    if (solverChoice.terrain_type == TerrainType::MovingFittedMesh) {
+        if (no_box_split_dir != 2) {
+            Abort("erf.terrain_type = MovingFittedMesh requires amr.no_box_split_dir = 2 (the ERF "
+                  "default), so that every grid spans the full height of the domain; remove "
+                  "amr.no_box_split_dir = " + std::to_string(no_box_split_dir) + " from the inputs file.");
+        }
+        if (geom[0].Domain().length(2) < 3) {
+            Abort("erf.terrain_type = MovingFittedMesh requires at least 3 cells in z (amr.n_cell)");
+        }
+    }
+
     // Set a default value for write_erfbdy following these rules.
     // Prioritize write_erfbdy provided by user.
     // write_erfbdy must be false for restarts.
@@ -4545,21 +4757,6 @@ ERF::ParameterSanityChecks ()
                 << "WRF boundary density nudge factor: " << rho_factor << std::endl;
     } else {
         Print() << "WRF lateral boundary density forcing: disabled" << std::endl;
-    }
-
-    if (solverChoice.use_wrf_bdy_qc_qi) {
-        if (!solverChoice.use_real_bcs || solverChoice.init_type != InitType::WRFInput) {
-            Abort("erf.use_wrf_bdy_qc_qi requires standard WRFInput real boundary conditions");
-        }
-        if (nc_bdy_file.empty()) {
-            Abort("erf.use_wrf_bdy_qc_qi requires erf.nc_bdy_file");
-        }
-        if (input_bndry_planes) {
-            Abort("erf.use_wrf_bdy_qc_qi is not supported with generic boundary-plane input");
-        }
-        Print() << "WRF lateral boundary cloud-water/cloud-ice forcing: enabled" << std::endl;
-    } else {
-        Print() << "WRF lateral boundary cloud-water/cloud-ice forcing: disabled" << std::endl;
     }
 
     AMREX_ALWAYS_ASSERT(real_width >= 0);

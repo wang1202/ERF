@@ -9,6 +9,7 @@
 #include <AMReX_PlotFileUtil.H>
 #include "ERF.H"
 
+#include <limits>
 #include <optional>
 #include <AMReX_Math.H>
 
@@ -478,7 +479,8 @@ SLM::Init (const int& /*lev*/,
     // Following Noah-MP, zref is modified to become ztop (canopy top height) + dz0 (height above the ground of the center of the atmosphere's lowest cell)
     if (!use_wrfinput) {
         Real dz       = m_geom.CellSize(2);
-        // The ground nodes under every box, including those that start above the ground
+        // The ground nodes under every box, including those that start above the ground; its
+        //    plane k = 0 is also the ground heights Compute_Zrel_AtCellCenter wants
         const auto z_ground = (use_terrain) ? copy_ground_plane(*z_phys_nd, m_geom.Domain().smallEnd(2))
                                             : std::unique_ptr<MultiFab>{};
         for ( MFIter mfi(cons_in,TileNoZ()); mfi.isValid(); ++mfi) {
@@ -488,7 +490,7 @@ SLM::Init (const int& /*lev*/,
             auto zrefxy_arr = zrefxy.array(mfi);
 
             ParallelFor(xybx, [=] AMREX_GPU_DEVICE(int i, int j, int) noexcept {
-                amrex::Real znd = (z_nd_arr) ? Compute_Zrel_AtCellCenter(i, j, 0, z_nd_arr) : myhalf*dz;
+                amrex::Real znd = (z_nd_arr) ? Compute_Zrel_AtCellCenter(i, j, 0, z_nd_arr, z_nd_arr) : myhalf*dz;
                 zrefxy_arr(i,j,0) = ztop_arr(i,j,0) + znd;
             });
         }
@@ -1500,7 +1502,8 @@ void
 SLM::initialize_zrefxy ()
 {
     const Real dz = m_geom.CellSize(2);
-    // The ground nodes under every box, including those that start above the ground
+    // The ground nodes under every box, including those that start above the ground; its
+    //    plane k = 0 is also the ground heights Compute_Zrel_AtCellCenter wants
     const auto z_ground = use_terrain ? copy_ground_plane(*z_phys_nd, m_geom.Domain().smallEnd(2))
                                       : std::unique_ptr<MultiFab>{};
     for (MFIter mfi(landtype, TileNoZ()); mfi.isValid(); ++mfi) {
@@ -1513,7 +1516,7 @@ SLM::initialize_zrefxy ()
 
         ParallelFor(xybx, [=] AMREX_GPU_DEVICE(int i, int j, int) noexcept {
             if (landmask_arr(i, j, 0) == 1) {
-                const Real znd = z_nd_arr ? Compute_Zrel_AtCellCenter(i, j, 0, z_nd_arr)
+                const Real znd = z_nd_arr ? Compute_Zrel_AtCellCenter(i, j, 0, z_nd_arr, z_nd_arr)
                                            : myhalf * dz;
                 zrefxy_arr(i, j, 0) = ztop_arr(i, j, 0) + znd;
             }
@@ -3177,6 +3180,12 @@ SLM::AdvanceSLM ()
     Real dt = m_dt;
     const int d_khi_lsm = khi_lsm;
 
+    // The canopy starts at the reference-level air temperature, so check it before the first step.
+    if (!m_initial_canopy_checked) {
+        check_canopy_above_freezing("at the start of the run");
+        m_initial_canopy_checked = true;
+    }
+
     net_rad.setVal(0.0, SLM_NetRad::net_sw1, 1, 0);
     net_rad.setVal(0.0, SLM_NetRad::net_sw2, 1, 0);
     net_rad.setVal(0.0, SLM_NetRad::net_rad1, 1, 0);
@@ -3487,6 +3496,31 @@ SLM::AdvanceSLM ()
     lsm_fab_flux[LsmFlux_SLM::tau13]->FillBoundary(m_geom.periodicity());
     lsm_fab_flux[LsmFlux_SLM::tau23]->FillBoundary(m_geom.periodicity());
     lsm_fab_flux[LsmFlux_SLM::olen]->FillBoundary(m_geom.periodicity());
+
+    check_canopy_above_freezing("after an SLM step");
+}
+
+void SLM::check_canopy_above_freezing (const char* when) const
+{
+    // The minimum canopy temperature over the vegetated land cells, in one reduction per call
+    // rather than a test in every canopy subcycle.
+    auto const& t_canop_ma   = t_canop.const_arrays();
+    auto const& landmask_ma  = landmask.const_arrays();
+    auto const& vegetype_ma  = vegetype.const_arrays();
+    Real t_canop_min = ParReduce(TypeList<ReduceOpMin>{}, TypeList<Real>{}, t_canop, IntVect(0),
+        [=] AMREX_GPU_DEVICE (int box_no, int i, int j, int k) noexcept -> GpuTuple<Real>
+        {
+            const bool vegetated = landmask_ma[box_no](i, j, k) == 1 && vegetype_ma[box_no](i, j, k) == 1;
+            return { vegetated ? t_canop_ma[box_no](i, j, k) : std::numeric_limits<Real>::max() };
+        });
+    ParallelDescriptor::ReduceRealMin(t_canop_min);
+
+    if (t_canop_min <= tfriz) {
+        amrex::Abort("SLM: the canopy temperature of a vegetated land cell is "
+                     + std::to_string(t_canop_min) + " K " + when
+                     + ", at or below freezing (273.15 K). SLM does not treat a frozen canopy;"
+                     + " see the limitations in the SLM documentation (erf-model/ERF#4467).");
+    }
 }
 
 
@@ -4089,9 +4123,8 @@ void SLM::fluxes_canopy (const amrex::MFIter &mfi)
                 shf_canop_arr(i, j, 0) = (t_canop_arr(i, j, 0) - t_sfc_arr(i, j, 0)) * rhow * cp * two * LAI_arr(i, j, 0) / r_b_arr(i, j, 0);
                 shf0 += shf_canop_arr(i, j, 0);
 
-                // Evaporation from canopy
-                // only treat the case where t_canop_arr > tfriz;
-                AMREX_ALWAYS_ASSERT(t_canop_arr(i, j, 0) > tfriz);
+                // Evaporation from canopy. SLM treats only a canopy above freezing:
+                // check_canopy_above_freezing stops the run otherwise.
 
                 erf_qsatw(t_canop_arr(i, j, 0), pref_arr(i, j, 0), qsat_canop);
 

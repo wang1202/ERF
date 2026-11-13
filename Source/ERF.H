@@ -45,6 +45,7 @@
 #include <ERF_NumericalConstants.H>
 #include <ERF_IndexDefines.H>
 #include <ERF_DataStruct.H>
+#include <ERF_RefinementCriterion.H>
 #include <ERF_TopographicShading.H>
 #include <ERF_PlotfileSelection.H>
 #include <ERF_BaseStateParams.H>
@@ -78,6 +79,9 @@
 #ifdef ERF_USE_FIRE
 #include "ERF_FireCoupler.H"
 #endif
+#ifdef ERF_USE_DUST
+#include "ERF_DustModel.H"
+#endif
 #include "ERF_Urban.H"
 #include "ERF_TwoStreamRadiation.H"
 #include "ERF_Plotfile2DCloudOptics.H"
@@ -87,6 +91,7 @@
 #endif
 #ifdef ERF_USE_MOVING_BODIES
 #include "ERF_StructureModel.H"
+#include "ERF_ActuatorSampling.H"
 #endif
 #include <ERF_SurfaceModel.H>
 
@@ -276,9 +281,15 @@ public:
     // Tag cells for refinement
     void ErrorEst (int lev, amrex::TagBoxArray& tags, amrex::Real time, int ngrow) override;
 
+    // Fill mf (one component, one ghost cell) at level levc with the refinement field named field
+    void compute_tag_field (int levc, const std::string& field, amrex::Real time,
+                            amrex::MultiFab& mf, amrex::TagBoxArray& tags);
+
     // Tag cells in a given box
     void read_box_for_refinement   (std::string& ref_prefix, int& lev_for_box, amrex::RealBox& real_box);
     void update_box_for_refinement (std::string& ref_prefix, int& lev_for_box, amrex::RealBox& real_box, const double time);
+    void refinement_box_offset     (const std::string& ref_prefix, const double time,
+                                    amrex::Real& offset_x, amrex::Real& offset_y);
 
     // Refinement criteria for hurricanes
     void HurricaneTracker (int lev,
@@ -426,6 +437,18 @@ public:
     // (ERF_CFFluxHistory.cpp).  Public because it launches device lambdas (CUDA requires it)
     void cf_flux_history_targets (int lev, amrex::Real t_beg, amrex::Real t_end);
 
+    // The reflux of the pressure impulse on the coarse/fine faces normal to the momentum
+    // (ERF_MomentumReflux.cpp, erf.momentum_reflux).  Public because they launch device lambdas
+    // (CUDA requires it)
+    static bool momentum_reflux_enabled ();
+    amrex::MultiFab* momentum_reflux_pressure (int lev);
+    void momentum_reflux_add_slow (int lev, amrex::MultiFab& P, const amrex::MultiFab& cons,
+                                   const amrex::MultiFab& p0, const amrex::MultiFab& qt,
+                                   bool moist, amrex::Real dt_stage);
+    void momentum_reflux (int crse_lev);
+    void momentum_reflux_add_sources (int lev, amrex::MultiFab& xmom_src, amrex::MultiFab& ymom_src);
+    void momentum_reflux_reset ();
+
     void WriteMyEBSurface ();
 
     // Compute the divergence -- whether EB, no-terrain, flat terrain or general terrain
@@ -441,7 +464,8 @@ public:
     bool has_nonunit_mapfac (int lev) const;
 
     // Does the projection at this level use the terrain Poisson solver?  Always on a
-    //     terrain-fitted mesh, and on a flat mesh whose map factors are not all one (#4903)
+    //     terrain-fitted mesh, on a flat mesh whose map factors are not all one (#4903),
+    //     and at a pseudo-incompressible level (variable-coefficient operator)
     bool projection_uses_terrain_solver (int lev) const;
 
     // Project the velocities to be divergence-free -- this is only relevant if anelastic == 1
@@ -610,8 +634,20 @@ public:
     void sbm_qualification_check_step (int nstep, amrex::Real correction_linf,
                                        std::uint64_t reflux_calls,
                                        std::uint64_t reflux_syncs);
+    void sbm_qualification_check_regrid (int lev, amrex::Long cells,
+                                         amrex::Long retained,
+                                         amrex::Long prolonged,
+                                         amrex::Long released,
+                                         const std::vector<amrex::Real>& inventory_before,
+                                         const std::vector<std::uint64_t>& phase_bytes);
     [[nodiscard]] std::vector<amrex::Real>
     sbm_qualification_composite_inventory () const;
+
+    // SBM leaf-domain inventory and its boundary budget
+    // (Microphysics/SBM/ERF_SBMAMRCoupling.cpp); public because they launch device lambdas.
+    [[nodiscard]] std::vector<amrex::Real> sbm_composite_inventory () const;
+    void sbm_record_budget_reference ();
+    void sbm_check_budget (int nstep);
 
     // Do whatever writing needs to be done at intermediate times
     void WriteAtIntermediateTime (int nstep, double time);
@@ -635,9 +671,14 @@ public:
     // Fill the physical boundary conditions for cell-centered velocity (diagnostic only)
     void FillBdyCCVels (amrex::MultiFab& mf_cc_vel, amrex::Geometry& lev_geom);
 
-    void sample_points (int ifile, int lev, double time, amrex::IntVect cell, amrex::MultiFab& mf);
     // Sample and write the lines of sampler, with the stresses and heat flux of each level
     void run_line_sampler (LineSampler& sampler);
+    // The volume fraction of each level for line and plane sampling, or nullptr without
+    // immersed terrain
+    amrex::Vector<const amrex::MultiFab*> sampling_volfrac () const;
+    // The ground of each level for line sampling (station_ground), or nullptr where the
+    // sampler does not need it
+    amrex::Vector<const amrex::MultiFab*> sampling_ground (const LineSampler& sampler);
 
     void derive_diag_profiles (double time,
                                amrex::Gpu::HostVector<amrex::Real>& h_avg_u   , amrex::Gpu::HostVector<amrex::Real>& h_avg_v,
@@ -967,6 +1008,8 @@ public:
     void ibseb_check_sun_matches_two_stream () const;
     void ibseb_check_two_stream_provider () const;
     void ibseb_check_two_stream_buildings () const;
+    void ibseb_give_ground_walls (int lev);
+    void ibseb_give_roofs (int lev);
     [[nodiscard]] bool ibseb_two_stream_buildings () const {
         return ibseb_params.enable && ibseb_params.two_stream_buildings && solverChoice.rad_type == RadiationType::TwoStream;
     }
@@ -1029,6 +1072,8 @@ public:
     void GetEnsembleCheckpointName (int da_iter, int ens_no);
 
     void init_custom (int lev);
+    // Set rho = rho0 theta0 / theta on a pseudo-incompressible level, keeping the mixing ratios
+    void make_pseudo_incompressible_initial_state (int lev);
 
 #ifdef ERF_USE_MULTIBLOCK
     // constructor used when ERF is created by a multiblock driver
@@ -1185,6 +1230,7 @@ public:
     void init_zphys            (int lev, double elapsed_time);
     void remake_zphys          (int lev, amrex::Real time, std::unique_ptr<amrex::MultiFab>& temp_zphys_nd);
     void update_terrain_arrays (int lev);
+    void update_zsfc_nd        (int lev);
     void make_terrain_blanking (int lev);
 
     [[nodiscard]] bool immersed_forcing_active (int lev) const noexcept
@@ -1241,7 +1287,11 @@ private:
     void init_sbm_level_from_coarse (int lev, amrex::Real time,
                                      const amrex::BoxArray& ba,
                                      const amrex::DistributionMapping& dm);
+    void remake_sbm_level (int lev, amrex::Real time,
+                           const amrex::BoxArray& ba,
+                           const amrex::DistributionMapping& dm);
     void sbm_synchronize_levels (int nstep);
+    void configure_sbm_physical_boundaries ();
 
     void Construct_ERFFillPatchers (int lev);
 
@@ -1251,6 +1301,9 @@ private:
 
     void init_bcs ();
     void init_phys_bcs (bool& read_prim_theta);
+
+    // The EB factories of a level on the grids (ba, dm), built before init_stuff needs them
+    void make_eb_factories (int lev, const amrex::BoxArray& ba, const amrex::DistributionMapping& dm);
 
     void init_stuff (int lev, const amrex::BoxArray& ba, const amrex::DistributionMapping& dm,
                      amrex::Vector<amrex::MultiFab>& lev_new, amrex::Vector<amrex::MultiFab>& lev_old,
@@ -1417,7 +1470,8 @@ private:
 
     // The full WRF file box in ERF's global index space, including all ancestor nest offsets;
     // optionally return the requested refined file's parent-grid ratio
-    amrex::Box wrfinput_file_box (int lev, int file_index, int* ratio_out = nullptr) const;
+    amrex::Box wrfinput_file_box (int lev, int file_index, int* ratio_out = nullptr,
+                                  amrex::Box* file_local_box = nullptr) const;
 
     // The cells at a level > 0 that its own init file covers
     amrex::Box nest_box_from_own_init_file (int lev);
@@ -1452,12 +1506,19 @@ private:
     amrex::Vector<amrex::Gpu::DeviceVector<amrex::Real>> zvel_bc_data;
     amrex::Vector<amrex::Gpu::DeviceVector<amrex::Real>> th_bc_data;
 
+    // Terrain-following inflow profiles per face (xlo.inflow_profile = log_law or file)
+    amrex::Array<InflowProfile, 2*AMREX_SPACEDIM> m_inflow_profiles;
+
     // Planar averages for immersed forcing (computed on slow step, used in slow and fast steps)
     amrex::Vector<amrex::TableData<amrex::Real, 1>> r_plane_avg;   // density planar average per level
     amrex::Vector<amrex::TableData<amrex::Real, 1>> t_plane_avg;   // RhoTheta planar average per level
 
     // Function to read and populate above vectors (if input file exists)
     bool init_Dirichlet_bc_data (const std::string input_file);
+
+    // Build the terrain-following inflow profile of face ori (xlo.inflow_profile)
+    void init_inflow_profile (const std::string& bcid, amrex::Orientation ori,
+                              const std::string& kind, amrex::ParmParse& pp);
 
     // Read the file passed to amr.restart and use it as an initial condition for
     // the current simulation. Supports a different number of components and
@@ -1532,6 +1593,29 @@ private:
     // Used for anelastic or when we impose an initial projection
     amrex::Vector<amrex::MultiFab> pp_inc;
 
+    // Pseudo-incompressible (non-EB) levels: the upwind direction on each face (+1, -1, or 0 for
+    // a zero momentum, which selects the centered blend), the sign of the momentum the latest
+    // projection on the level started from.  The projection maps rho0 theta0 / rho onto the
+    // faces with it, and the advection of the cell-centered scalars from the projected state
+    // picks its upwind side from it rather than from the sign of the projected mass flux, so
+    // that with rho theta = rho0 theta0 the advective flux of (rho theta) is the flux the
+    // projection made divergence-free, even where the projection reverses the flow.
+    // pi_upw_dir_stage is the copy an RK stage advects with: the stage's projection overwrites
+    // pi_upw_dir before erf_slow_rhs_post advects the remaining scalars.
+    amrex::Vector<amrex::Array<std::unique_ptr<amrex::MultiFab>,AMREX_SPACEDIM>> pi_upw_dir;
+    amrex::Vector<amrex::Array<std::unique_ptr<amrex::MultiFab>,AMREX_SPACEDIM>> pi_upw_dir_stage;
+
+    //! Define pi_upw_dir[lev] and pi_upw_dir_stage[lev] on the level's faces (zero) if needed
+    void define_pi_upw_dir (int lev);
+
+    // Pseudo-incompressible (non-EB) levels: the advective part of the (rho theta) RHS of the
+    // latest stage (pi_adv_rt), and the rest of that RHS (pi_src: diffusion, implicit diffusion
+    // and the sources in cc_src), the non-advective tendency Q of (rho theta).  The projection
+    // at the end of the stage imposes div(rho0 theta0 u) = Q + the drift correction, so that the
+    // next update keeps rho theta = rho0 theta0 (see project_momenta)
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> pi_adv_rt;
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> pi_src;
+
     // Used only for fast substepping
     amrex::Vector<amrex::MultiFab> lagged_delta_rt;
     amrex::Vector<amrex::MultiFab> avg_xmom;
@@ -1544,6 +1628,8 @@ private:
     amrex::Vector<std::unique_ptr<ERFPhysBCFunct_v>> physbcs_v;
     amrex::Vector<std::unique_ptr<ERFPhysBCFunct_w>> physbcs_w;
     amrex::Vector<std::unique_ptr<ERFPhysBCFunct_base>> physbcs_base;
+    // The same on the mesh at the end of the stage, z_phys_nd_new (MovingFittedMesh only)
+    amrex::Vector<std::unique_ptr<ERFPhysBCFunct_base>> physbcs_base_new;
 
     // Store primitive variable for MOST BC
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> Theta_prim;
@@ -1568,6 +1654,12 @@ private:
     // transport are destroyed before these register owners.
     amrex::Vector<std::unique_ptr<erf_sbm::SBMAMRFluxRegister>> sbm_amr_flux_regs;
     std::vector<amrex::Real> sbm_qualification_initial_inventory;
+    // Leaf inventory, cumulative outward boundary transfer and its gross scale
+    // at the previous erf.sbm_budget_check (or the start or restart).
+    std::vector<amrex::Real> sbm_budget_reference_inventory;
+    std::vector<double> sbm_budget_reference_outward;
+    std::vector<double> sbm_budget_reference_gross;
+    std::uint64_t sbm_budget_reference_terms{0};
     // Declared after the state manager so its non-owning layout reference is
     // destroyed before the authoritative SBM owner.
     std::unique_ptr<erf_sbm::SBMTransport> sbm_transport;
@@ -1680,6 +1772,10 @@ private:
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> z_phys_nd;
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> z_phys_cc;
 
+    // Height of the bottom of the domain at each node, like z_phys_nd at its bottom: on
+    // ba2d[lev] made nodal in x and y, with z_phys_nd's ghost cells in x and y; see update_zsfc_nd
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> z_sfc_nd;
+
     amrex::Vector<std::unique_ptr<amrex::MultiFab>>   detJ_cc;
     amrex::Vector<std::unique_ptr<amrex::MultiFab>>   ax;
     amrex::Vector<std::unique_ptr<amrex::MultiFab>>   ay;
@@ -1720,6 +1816,15 @@ private:
         amrex::MultiFab tgt_w;
     };
     amrex::Vector<CFFluxHistory> m_cf_flux_hist;
+
+    // Per level, the time integral of the pressure its x- and y-momenta have seen in each cell
+    // since the start of the coarse step of level 0 (ERF_MomentumReflux.cpp); whether it has been
+    // added to since, and whether the level's grids changed while it was
+    amrex::Vector<amrex::MultiFab> m_mom_reflux_p;
+    amrex::Vector<int> m_mom_reflux_used;
+    amrex::Vector<int> m_mom_reflux_stale;
+    // Per coarse level, the momentum impulse on its coarse/fine faces (x and y) still to be given
+    amrex::Vector<std::array<amrex::MultiFab,2>> m_mom_reflux_src;
     static bool cf_flux_history_enabled ();
     bool cf_flux_history_active (int crse_lev) const;
     CFFluxHistory& cf_flux_history (int lev);
@@ -2305,6 +2410,17 @@ private:
     amrex::Real m_fire_plot_per  = -1.0;
 #endif
 
+#ifdef ERF_USE_DUST
+    /// The dust model erf.dust.model selects (ERF_DustModel.H); nullptr unless erf.dust.enable = true
+    std::unique_ptr<DustModel> m_dust_model = nullptr;
+
+    /// Make and set up the dust model, once, in InitData_post; zero the dust scalars on a fresh start
+    void initialize_dust_model ();
+
+    /// Advance the dust model over the step of level 0 just taken (from step, at time, by dt[0])
+    void advance_dust_model (int step, double time);
+#endif
+
 #ifdef ERF_USE_MOVING_BODIES
     /// The structure model erf.structures.model selects (ERF_StructureModel.H); nullptr when the key is not set
     std::unique_ptr<StructureModel> m_structure_model = nullptr;
@@ -2313,7 +2429,7 @@ private:
     void initialize_structure_model ();
 
     /// Advance the structure model over this step of level lev, then check its support() against level lev+1
-    void advance_structure_model (int lev, double time, amrex::Real dt_lev,
+    void advance_structure_model (int lev, double time, double dt_lev,
                                   const amrex::MultiFab& U_old, const amrex::MultiFab& V_old,
                                   const amrex::MultiFab& W_old, const amrex::MultiFab& S_old);
 
@@ -2329,20 +2445,26 @@ private:
     /// The grids of the model's level at its last advance(): the source add_momentum_sources() returns lives there
     amrex::BoxArray            m_structure_src_ba;
     amrex::DistributionMapping m_structure_src_dm;
+
+    /// After a restart, until the model's first advance(): its source on its level when the checkpoint was written
+    std::array<amrex::MultiFab,AMREX_SPACEDIM> m_structure_chk_src;
+
+    /// Write the model's current source on its level under checkpointname/StructureCoarseSource (TwoWay, level() > 0)
+    void write_structure_coarse_source_checkpoint (const std::string& checkpointname) const;
+
+    /// Read what write_structure_coarse_source_checkpoint wrote, for the model on level L, into m_structure_chk_src
+    void read_structure_coarse_source_checkpoint (int L);
+
+    /// The node heights of the level above the model's, for the check of its support(): kept until that level's boxes change
+    erf_actuator::LevelHeights m_structure_fine_heights;
 #endif
 
     //
-    // Holds info for dynamically generated tagging criteria
+    // Tagging criteria read from erf.refinement_indicators. Not every indicator creates one
+    // (e.g. "storm_tracker" does not), so these do not correspond one-to-one with that list;
+    // each carries the name of the indicator that created it.
     //
-    static amrex::Vector<amrex::AMRErrorTag> ref_tags;
-
-    //
-    // Name of the refinement indicator that generated each entry of ref_tags.
-    // Not every indicator generates a ref_tag (e.g. "storm_tracker" does not),
-    // so this must be carried alongside ref_tags rather than re-deriving it
-    // from the positional index into erf.refinement_indicators.
-    //
-    static amrex::Vector<std::string> ref_tag_indicator_names;
+    static amrex::Vector<RefinementCriterion> ref_criteria;
 
     amrex::Vector<amrex::Vector<amrex::BoxArray>> subdomains;
 
@@ -2463,33 +2585,6 @@ private:
     }
 
 
-    AMREX_FORCE_INLINE
-    std::ostream&
-    SamplePointLog (int i)
-    {
-        return *sampleptlog[i];
-    }
-
-    AMREX_FORCE_INLINE
-    int
-    NumSamplePointLogs () noexcept
-    {
-        return static_cast<int>(sampleptlog.size());
-    }
-
-    amrex::IntVect&
-    SamplePoint (int i)
-    {
-        return samplepoint[i];
-    }
-
-    AMREX_FORCE_INLINE
-    int
-    NumSamplePoints () noexcept
-    {
-        return static_cast<int>(samplepoint.size());
-    }
-
     static double startCPUTime;
     static double previousCPUTimeUsed;
 
@@ -2547,23 +2642,6 @@ private:
         amrex::ParallelDescriptor::Barrier("ERF::setRecordEnergyDataInfo");
     }
 
-    void setRecordSamplePointInfo (int i, int lev, amrex::IntVect& cell, const std::string& filename) // NOLINT
-    {
-        amrex::MultiFab dummy(grids[lev],dmap[lev],1,0);
-        for (amrex::MFIter mfi(dummy); mfi.isValid(); ++mfi)
-        {
-            const amrex::Box& bx = mfi.validbox();
-            if (bx.contains(cell)) {
-                sampleptlog[i] = std::make_unique<std::fstream>();
-                sampleptlog[i]->open(filename.c_str(),std::ios::out|std::ios::app);
-                if (!sampleptlog[i]->good()) {
-                    amrex::FileOpenFailed(filename);
-                }
-            }
-        }
-        amrex::ParallelDescriptor::Barrier("ERF::setRecordSamplePointInfo");
-    }
-
     // Data sampler for line and plane output
     int line_sampling_interval = -1;
     int plane_sampling_interval = -1;
@@ -2573,6 +2651,8 @@ private:
     // erf.sample_line / erf.sample_line_real: full-depth columns on level 0, written to logs
     // at the cadence of the other logs (erf.sum_interval / erf.sum_per)
     std::unique_ptr<LineSampler> sample_line_sampler = nullptr;
+    // erf.sample_point / _real / _latlon: single cells, written to logs at the same cadence
+    std::unique_ptr<LineSampler> sample_point_sampler = nullptr;
     std::unique_ptr<PlaneSampler> plane_sampler = nullptr;
 
     std::unique_ptr<CeilometerSimulator>   m_ceilometer_sim;
@@ -2601,16 +2681,9 @@ private:
     amrex::Vector<std::string>   der_datalogname;
     amrex::Vector<std::string> tot_e_datalogname;
 
-    amrex::Vector<std::unique_ptr<std::fstream> > sampleptlog;
-    amrex::Vector<std::string> sampleptlogname;
-    amrex::Vector<amrex::IntVect> samplepoint;
-
     //! The filename of the ith datalog file.
     [[nodiscard]] std::string DataLogName (int i) const noexcept { return datalogname[i]; }
     [[nodiscard]] std::string DerDataLogName (int i) const noexcept { return der_datalogname[i]; }
-
-    //! The filename of the ith sampleptlog file.
-    [[nodiscard]] std::string SamplePointLogName (int i) const noexcept { return sampleptlogname[i]; }
 
     // array of EB objects
     amrex::Vector<std::unique_ptr<eb_>> eb;

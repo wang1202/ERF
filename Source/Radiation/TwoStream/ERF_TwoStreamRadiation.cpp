@@ -249,6 +249,7 @@ TwoStreamRadiation::resize (int nlevs_max)
     m_moisture.resize(nlevs_max);
     m_canopy.resize(nlevs_max);
     m_canopy_cosz.resize(nlevs_max);
+    m_canopy_alb.resize(nlevs_max);
     m_canopy_m.resize(nlevs_max, -1);
     m_canopy_step.resize(nlevs_max, -1);
     m_solid.resize(nlevs_max);
@@ -256,6 +257,12 @@ TwoStreamRadiation::resize (int nlevs_max)
     m_ground_shadow.resize(nlevs_max);
     m_sw_beam_sfc.resize(nlevs_max);
     m_shadow_step.resize(nlevs_max, -1);
+    m_ground_walls.resize(nlevs_max);
+    m_ground_keep.resize(nlevs_max);
+    m_walls_step.resize(nlevs_max, -1);
+    m_roof_k.resize(nlevs_max);
+    m_roof.resize(nlevs_max);
+    m_roof_step.resize(nlevs_max, -1);
     m_sweep_step.resize(nlevs_max, -1);
     m_shaded_step.resize(nlevs_max, -1);
     m_has_cover.resize(nlevs_max, 0);
@@ -363,6 +370,7 @@ TwoStreamRadiation::define_level (int lev,
     // must be asked for again on them (the faces do not regrid; ERF::init_ibseb()).
     m_canopy[lev].reset();
     m_canopy_cosz[lev].reset();
+    m_canopy_alb[lev].reset();
     m_canopy_m[lev] = -1;
     m_canopy_step[lev] = -1;
     // The building cover likewise (ERF::init_ibseb() sets it once; the balance refuses a regrid).
@@ -370,6 +378,12 @@ TwoStreamRadiation::define_level (int lev,
     m_footprint[lev].reset();
     m_ground_shadow[lev].reset();
     m_sw_beam_sfc[lev].reset();
+    m_ground_walls[lev].reset();
+    m_ground_keep[lev].reset();
+    m_roof_k[lev].reset();
+    m_roof[lev].reset();
+    m_roof_step[lev] = -1;
+    m_walls_step[lev] = -1;
     m_shadow_step[lev] = -1;
     m_sweep_step[lev] = -1;
     m_shaded_step[lev] = -1;
@@ -379,7 +393,7 @@ TwoStreamRadiation::define_level (int lev,
 }
 
 void
-TwoStreamRadiation::supply_canopy_forcing (int lev, int m_top)
+TwoStreamRadiation::supply_canopy_forcing (int lev, int m_top, bool ground_albedo)
 {
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(active(),
         "TwoStreamRadiation::supply_canopy_forcing: erf.radiation_model is not TwoStream");
@@ -396,6 +410,12 @@ TwoStreamRadiation::supply_canopy_forcing (int lev, int m_top)
     // cosine of the zenith are lost after the sweep.
     m_canopy[lev] = std::make_unique<MultiFab>(BoxArray(std::move(canopy_boxes)), m_alb_sw[lev]->DistributionMap(), 1, 0);
     m_canopy_cosz[lev] = std::make_unique<MultiFab>(m_alb_sw[lev]->boxArray(), m_alb_sw[lev]->DistributionMap(), 1, 0);
+    // The ground's direct-beam albedo only for the faces that read it (erf.ibseb.ground_view_shadow).
+    m_canopy_alb[lev].reset();
+    if (ground_albedo) {
+        m_canopy_alb[lev] = std::make_unique<MultiFab>(m_alb_sw[lev]->boxArray(), m_alb_sw[lev]->DistributionMap(), 2, 0);
+        m_canopy_alb[lev]->setVal(0.0);
+    }
     // Never read before a sweep has written them: canopy_forcing() returns null until then.
     m_canopy[lev]->setVal(0.0);
     m_canopy_cosz[lev]->setVal(0.0);
@@ -404,7 +424,8 @@ TwoStreamRadiation::supply_canopy_forcing (int lev, int m_top)
 }
 
 void
-TwoStreamRadiation::set_building_cover (int lev, const MultiFab& blanking, const Box& domain)
+TwoStreamRadiation::set_building_cover (int lev, const MultiFab& blanking, const Box& domain, bool take_ground_walls,
+                                        bool start_on_roofs)
 {
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(active(),
         "TwoStreamRadiation::set_building_cover: erf.radiation_model is not TwoStream");
@@ -482,8 +503,57 @@ TwoStreamRadiation::set_building_cover (int lev, const MultiFab& blanking, const
         m_ground_shadow[lev].reset();
         m_sw_beam_sfc[lev].reset();
     }
+    // What the walls send to the ground, only where the ground takes the shadow and the
+    // longwave is on: the shortwave and the longwave terms are taken together or not at all.
+    m_ground_walls[lev].reset();
+    m_ground_keep[lev].reset();
+    if (take_ground_walls && m_ground_shadow[lev] && m_rad->lw_enabled) {
+        m_ground_walls[lev] = std::make_unique<MultiFab>(ba2d, dm, 3, 0);
+        m_ground_keep[lev] = std::make_unique<MultiFab>(ba2d, dm, 3, 0);
+        m_ground_walls[lev]->setVal(0.0);
+        m_ground_keep[lev]->setVal(0.0);
+    }
+    m_walls_step[lev] = -1;
+    // The cell on each column's roof, on a level that sweeps its own columns: the first
+    // cell above the solid cells that stand on the ground (the bottom cell on open
+    // ground; one above the kept solid cells where they are solid to their top).
+    m_roof_k[lev].reset();
+    m_roof[lev].reset();
+    if (start_on_roofs && sweeps) {
+        m_roof_k[lev] = std::make_unique<iMultiFab>(ba2d, dm, 1, 0);
+        m_roof[lev] = std::make_unique<MultiFab>(ba2d, dm, ROOF_NCOMP, 0);
+        m_roof[lev]->setVal(0.0);
+        for (MFIter mfi(*m_roof_k[lev]); mfi.isValid(); ++mfi) {
+            const auto solid = m_solid[lev]->const_array(mfi);
+            const auto roof_k = m_roof_k[lev]->array(mfi);
+            const int k_hi = (*m_solid[lev])[mfi].box().bigEnd(2);
+            ParallelFor(makeSlab(mfi.validbox(), 2, 0), [=] AMREX_GPU_DEVICE (int i, int j, int) noexcept {
+                int k = k0;
+                while (k <= k_hi && solid(i, j, k) != 0) { ++k; }
+                roof_k(i, j, 0) = k;
+            });
+        }
+        Gpu::streamSynchronize();
+    }
+    m_roof_step[lev] = -1;
     m_shadow_step[lev] = -1;
     m_shaded_step[lev] = -1;
+}
+
+MultiFab*
+TwoStreamRadiation::roofs_for_step (int lev, int nstep)
+{
+    if (!has_building_cover(lev) || !starts_on_roofs(lev)) { return nullptr; }
+    m_roof_step[lev] = nstep;
+    return m_roof[lev].get();
+}
+
+MultiFab*
+TwoStreamRadiation::ground_walls_for_step (int lev, int nstep)
+{
+    if (!has_building_cover(lev) || !takes_ground_walls(lev)) { return nullptr; }
+    m_walls_step[lev] = nstep;
+    return m_ground_walls[lev].get();
 }
 
 MultiFab*
@@ -1156,7 +1226,9 @@ TwoStreamRadiation::advance (int lev,
             const bool supply_canopy = supplies_canopy_forcing(lev);
             const int  m_canopy_top = supply_canopy ? m_canopy_m[lev] : 0;
             const bool sw_on = rad_choice.sw_enabled;
-            Array4<amrex::Real> canopy_out, canopy_cosz_out;
+            Array4<amrex::Real> canopy_out, canopy_cosz_out, canopy_alb_out;
+            const bool supply_canopy_alb = supply_canopy && m_canopy_alb[lev];
+            if (supply_canopy_alb) { canopy_alb_out = m_canopy_alb[lev]->array(mfi); }
             if (supply_canopy) {
                 AMREX_ALWAYS_ASSERT_WITH_MESSAGE(write_fluxes,
                     "TwoStreamRadiation: the canopy forcing of the building faces needs the rad_fluxes array");
@@ -1180,6 +1252,29 @@ TwoStreamRadiation::advance (int lev,
                 k_solid_top = amrex::min(bx.bigEnd(2), (*m_solid[lev])[mfi].box().bigEnd(2));
             }
             if (keep_beam) { sw_beam_out = m_sw_beam_sfc[lev]->array(mfi); }
+            // For what the walls send to the ground (ground_walls_for_step()): the
+            // longwave down at the ground and the ground's diffuse absorptance and emissivity.
+            const bool keep_ground = keep_beam && takes_ground_walls(lev);
+            Array4<amrex::Real> ground_keep_out;
+            if (keep_ground) {
+                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(write_fluxes,
+                    "TwoStreamRadiation: the walls' longwave on the ground (erf.ibseb.ground_sky_view) needs the rad_fluxes array");
+                ground_keep_out = m_ground_keep[lev]->array(mfi);
+            }
+
+            // The roofs the columns under buildings start on (erf.ibseb.two_stream_roofs),
+            // which the immersed-boundary balance gave for this step.
+            const bool on_roofs = cover && starts_on_roofs(lev);
+            Array4<const int> roof_k_arr;
+            Array4<const amrex::Real> roof_arr;
+            if (on_roofs) {
+                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_roof_step[lev] == nstep,
+                    "TwoStreamRadiation: the roofs of level " + std::to_string(lev) + " are of step " +
+                    std::to_string(m_roof_step[lev]) + ", the sweep of step " + std::to_string(nstep) +
+                    "; the immersed-boundary balance must give them before the sweep (ERF::Advance())");
+                roof_k_arr = m_roof_k[lev]->const_array(mfi);
+                roof_arr = m_roof[lev]->const_array(mfi);
+            }
 
             // Create a 2D box for (i,j) iteration over the horizontal extent
             // One GPU thread per (i,j) column; k-loop is sequential within each thread
@@ -1243,6 +1338,23 @@ TwoStreamRadiation::advance (int lev,
                     amrex::Real sw_toa_clear = 0.0;
                     amrex::Real cos_zenith_col = 0.0;
                     amrex::Real sw_beam_clear = 0.0;
+                    // A column under a building starts on the roof face given for it; one
+                    // without such a face (none given, or open ground) starts on the ground.
+                    TwoStreamRoof roof_col;
+                    // On a roof: a roof face stands on the column and its cell is above the
+                    // box's bottom layer. The sweep takes the roof under the same condition
+                    // (two_stream_starts_on_roof()), so what the faces read of this column
+                    // below is what the sweep used.
+                    const bool col_on_roof = on_roofs && roof_arr(i, j, 0, ROOF_SET) > amrex::Real(0.5)
+                                          && two_stream_starts_on_roof(roof_k_arr(i, j, 0), bx.smallEnd(2));
+                    if (col_on_roof) {
+                        roof_col.k_lower = roof_k_arr(i, j, 0);
+                        roof_col.albedo = roof_arr(i, j, 0, ROOF_ALBEDO);
+                        roof_col.emissivity = roof_arr(i, j, 0, ROOF_EMISSIVITY);
+                        roof_col.temperature = roof_arr(i, j, 0, ROOF_TEMPERATURE);
+                        roof_col.lit = roof_arr(i, j, 0, ROOF_LIT);
+                    }
+                    const TwoStreamRoof* roof_ptr = col_on_roof ? &roof_col : nullptr;
                     vertical_two_stream_sweep(
                         i, j, bx, dz_uniform_lev, state_arr, ts_params, /*cloudy=*/false,
                         qheating_clear_arr,
@@ -1256,7 +1368,7 @@ TwoStreamRadiation::advance (int lev,
                         has_surface_layer, &surface_layer_theta_arr,
                         has_latlon, &lat_arr, &lon_arr,
                         write_fluxes ? &rad_flux_clear_arr : nullptr,
-                        &cos_zenith_col, keep_beam ? &sw_beam_clear : nullptr);
+                        &cos_zenith_col, keep_beam ? &sw_beam_clear : nullptr, roof_ptr);
 
                     // The scratch holds this evaluation's beam until the cloudy one overwrites it.
                     if (supply_canopy) {
@@ -1296,7 +1408,7 @@ TwoStreamRadiation::advance (int lev,
                             has_surface_layer, &surface_layer_theta_arr,
                             has_latlon, &lat_arr, &lon_arr,
                             write_fluxes ? &rad_flux_cloudy_arr : nullptr,
-                            nullptr, keep_beam ? &sw_beam_cloudy : nullptr);
+                            nullptr, keep_beam ? &sw_beam_cloudy : nullptr, roof_ptr);
 
                         // Blend clear-sky and cloudy-column results
                         sw_flux_col = (1.0 - cloud_fraction) * sw_flux_clear +
@@ -1378,9 +1490,34 @@ TwoStreamRadiation::advance (int lev,
                                                 lw_dn_out(i, j, 0), coszen_out(i, j, 0));
                     }
 
+                    // After the clear/cloudy blend: the longwave down at the ground, and the
+                    // diffuse absorptance and the emissivity the sweep gave this column's ground.
+                    if (keep_ground) {
+                        const amrex::Real alb_dir_g = resolve_surface_albedo_sw(i, j, &hetero_alb_sw_arr, ts_params,
+                                                                                has_hetero_alb_sw);
+                        const amrex::Real alb_dif_g = resolve_surface_albedo_sw_diffuse(alb_dir_g, ts_params.surface_albedo_sw_diffuse);
+                        ground_keep_out(i, j, 0, 0) = rad_flux_clear_arr(i, j, bx.smallEnd(2), 3);
+                        ground_keep_out(i, j, 0, 1) = amrex::Real(1.0) - alb_dif_g;
+                        ground_keep_out(i, j, 0, 2) = resolve_surface_emissivity_lw(i, j, &hetero_emiss_lw_arr, ts_params,
+                                                                                    has_hetero_emiss_lw);
+                    }
+
                     // The sun the building faces must share (their beam is in canopy_out).
                     if (supply_canopy) {
                         canopy_cosz_out(i, j, 0) = (cos_zenith_col > amrex::Real(0.0)) ? cos_zenith_col : amrex::Real(0.0);
+                    }
+                    // The direct-beam albedo the sweep gave this column's ground.
+                    if (supply_canopy_alb) {
+                        // On a roof: the roof's albedo for the beam that reaches it, and
+                        // the interface the roof is at, for the faces that read this column.
+                        if (col_on_roof) {
+                            canopy_alb_out(i, j, 0, 0) = roof_col.albedo * roof_col.lit;
+                            canopy_alb_out(i, j, 0, 1) = static_cast<amrex::Real>(roof_col.k_lower - bx.smallEnd(2));
+                        } else {
+                            canopy_alb_out(i, j, 0, 0) = resolve_surface_albedo_sw(i, j, &hetero_alb_sw_arr, ts_params,
+                                                                                   has_hetero_alb_sw);
+                            canopy_alb_out(i, j, 0, 1) = amrex::Real(0.0);
+                        }
                     }
 
                     // The incident TOA flux is the same for both evaluations.
@@ -1464,16 +1601,40 @@ TwoStreamRadiation::advance (int lev,
                     std::to_string(m_shadow_step[lev]) + ", its sweep of step " + std::to_string(m_sweep_step[lev]) +
                     "; the immersed-boundary balance must give it between the sweep and the update (ERF::Advance())");
             }
+            // What the walls send to the open ground (erf.ibseb.ground_sky_view), with the
+            // beam, once per sweep: the ground keeps its absorbed diffuse shortwave (the
+            // sweep's less the beam) and the sky's longwave through the part of its view
+            // the walls leave open, and takes the walls' through the rest.
+            // The shortwave and the longwave together: only when the balance takes both from the sweep.
+            const bool take_walls = take_beam && takes_ground_walls(lev) && lw_flux_from_rad;
+            if (take_walls) {
+                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_walls_step[lev] == m_sweep_step[lev],
+                    "TwoStreamRadiation: what the walls send to the ground on level " + std::to_string(lev) + " is of step " +
+                    std::to_string(m_walls_step[lev]) + ", its sweep of step " + std::to_string(m_sweep_step[lev]) +
+                    "; the immersed-boundary balance must give it between the sweep and the update (ERF::Advance())");
+            }
             for (MFIter mfi(*m_sw_flux_sfc[lev]); mfi.isValid(); ++mfi) {
                 const Box xy_box = makeSlab(mfi.validbox(), 2, 0);
                 const auto sw = m_sw_flux_sfc[lev]->array(mfi);
                 const auto foot = m_footprint[lev]->const_array(mfi);
                 const auto shadow = take_beam ? m_ground_shadow[lev]->const_array(mfi) : Array4<const Real>{};
                 const auto beam = take_beam ? m_sw_beam_sfc[lev]->const_array(mfi) : Array4<const Real>{};
+                const auto walls = take_walls ? m_ground_walls[lev]->const_array(mfi) : Array4<const Real>{};
+                const auto keep = take_walls ? m_ground_keep[lev]->const_array(mfi) : Array4<const Real>{};
+                const auto lw = take_walls ? m_lw_flux_sfc[lev]->array(mfi) : Array4<Real>{};
                 ParallelFor(xy_box, [=] AMREX_GPU_DEVICE (int i, int j, int) noexcept {
                     if (foot(i, j, 0) > Real(0.5)) {
                         sw(i, j, 0) = 0.0;
-                    } else if (take_beam && shadow(i, j, 0) > Real(0.5)) {
+                        return;
+                    }
+                    if (take_walls) {
+                        const GroundWallTerms t = two_stream_ground_wall_terms(
+                            sw(i, j, 0), beam(i, j, 0), walls(i, j, 0, 0), walls(i, j, 0, 1), walls(i, j, 0, 2),
+                            keep(i, j, 0, 0), keep(i, j, 0, 1), keep(i, j, 0, 2));
+                        sw(i, j, 0) += t.d_sw;
+                        lw(i, j, 0) += t.d_lw;
+                    }
+                    if (take_beam && shadow(i, j, 0) > Real(0.5)) {
                         sw(i, j, 0) -= beam(i, j, 0);
                     }
                 });
