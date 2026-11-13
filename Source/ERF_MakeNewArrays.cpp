@@ -224,6 +224,8 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
     // kind of domain decomposition in the vertical (at level 0 or above)
     lev_new[Vars::zvel].define(convert(ba, IntVect(0,0,1)), dm, 1, ngrow_vels);
     lev_old[Vars::zvel].define(convert(ba, IntVect(0,0,1)), dm, 1, ngrow_vels);
+    lev_new[Vars::zvel].setVal(bogus_large_value);
+    lev_old[Vars::zvel].setVal(bogus_large_value);
 
     gradp[lev][GpVars::gpx].define(convert(ba, IntVect(1,0,0)), dm, 1, 1); gradp[lev][GpVars::gpx].setVal(zero);
     gradp[lev][GpVars::gpy].define(convert(ba, IntVect(0,1,0)), dm, 1, 1); gradp[lev][GpVars::gpy].setVal(zero);
@@ -999,7 +1001,8 @@ ERF::init_zphys (int lev, double elapsed_time)
 
         make_terrain_fitted_coords(lev,geom[lev],*z_phys_nd[lev],zlevels_stag[lev],phys_bc_type,
                                    fine_terrain,
-                                   (fine_terrain == FineTerrain::Transform) ? &z_phys_interp : nullptr);
+                                   (fine_terrain == FineTerrain::Transform) ? &z_phys_interp : nullptr,
+                                   (solverChoice.terrain_type == TerrainType::MovingFittedMesh));
 
         z_phys_nd[lev]->FillBoundary(geom[lev].periodicity());
 
@@ -1145,7 +1148,8 @@ ERF::remake_zphys (int lev, Real time, std::unique_ptr<MultiFab>& temp_zphys_nd)
             //    and also fills values of z_phys_nd outside the domain
             make_terrain_fitted_coords(lev,geom[lev],*temp_zphys_nd,zlevels_stag[lev],phys_bc_type,
                                        fine_terrain,
-                                       (fine_terrain == FineTerrain::Transform) ? &z_phys_interp : nullptr);
+                                       (fine_terrain == FineTerrain::Transform) ? &z_phys_interp : nullptr,
+                                       (solverChoice.terrain_type == TerrainType::MovingFittedMesh));
 
         } // lev > 0
 
@@ -1314,6 +1318,32 @@ ERF::update_terrain_arrays (int lev)
             detJ_cc[lev] = std::make_unique<MultiFab>(volfrac, amrex::make_alias, 0, volfrac.nComp());
         }
     }
+    update_zsfc_nd(lev);
+}
+
+/**
+ * (Re)build z_sfc_nd[lev], the height of the bottom of the domain at each node, from
+ * z_phys_nd[lev]. A box that does not reach the bottom interpolates it from the coarser
+ * level, so z_sfc_nd[lev-1] must be current when this is called for lev > 0.
+ *
+ * @param[in] lev level of refinement
+ */
+void
+ERF::update_zsfc_nd (int lev)
+{
+    BoxArray ba2d_nd(ba2d[lev]);
+    ba2d_nd.surroundingNodes(0); ba2d_nd.surroundingNodes(1);
+    // As many ghost cells in x and y as z_phys_nd, since the PBL schemes work on grown boxes
+    const IntVect ng(z_phys_nd[lev]->nGrowVect()[0], z_phys_nd[lev]->nGrowVect()[1], 0);
+    if (!z_sfc_nd[lev] || z_sfc_nd[lev]->boxArray() != ba2d_nd ||
+        z_sfc_nd[lev]->DistributionMap() != dmap[lev] || z_sfc_nd[lev]->nGrowVect() != ng) {
+        z_sfc_nd[lev] = std::make_unique<MultiFab>(ba2d_nd, dmap[lev], 1, ng);
+    }
+    if (lev > 0) {
+        make_zsfc_nd(geom[lev], *z_phys_nd[lev], *z_sfc_nd[lev], z_sfc_nd[lev-1].get(), ref_ratio[lev-1]);
+    } else {
+        make_zsfc_nd(geom[lev], *z_phys_nd[lev], *z_sfc_nd[lev]);
+    }
 }
 
 void
@@ -1369,10 +1399,20 @@ ERF::make_physbcs (int lev)
                                                             m_bc_extdir_vals, m_bc_neumann_vals,
                                                             solverChoice.terrain_type, mapfac[lev], z_phys_nd[lev],
                                                             l_use_real_bcs, zvel_bc_data[lev].data());
-    physbcs_base[lev] = std::make_unique<ERFPhysBCFunct_base> (lev, geom[lev], domain_bcs_type, domain_bcs_type_d, z_phys_nd[lev],
-                                                               (solverChoice.terrain_type == TerrainType::MovingFittedMesh),
-                                                               (solverChoice.mesh_type != MeshType::ConstantDz),
-                                                               solverChoice.rdOcp, solverChoice.gravity);
+    // the terrain-following inflow profiles of the lateral faces (xlo.inflow_profile)
+    physbcs_cons[lev]->set_inflow_profiles(&m_inflow_profiles);
+    physbcs_u[lev]->set_inflow_profiles(&m_inflow_profiles);
+    physbcs_v[lev]->set_inflow_profiles(&m_inflow_profiles);
+    const bool moving_mesh = (solverChoice.terrain_type == TerrainType::MovingFittedMesh);
+    auto make_base_bcs = [&] (std::unique_ptr<MultiFab>& z_nd) {
+        return std::make_unique<ERFPhysBCFunct_base> (lev, geom[lev], domain_bcs_type, domain_bcs_type_d, z_nd,
+                                                      moving_mesh,
+                                                      (solverChoice.mesh_type != MeshType::ConstantDz),
+                                                      solverChoice.rdOcp, solverChoice.gravity);
+    };
+    physbcs_base[lev] = make_base_bcs(z_phys_nd[lev]);
+    // The base state a moving mesh advances is on the mesh at the end of the stage
+    physbcs_base_new[lev] = (moving_mesh) ? make_base_bcs(z_phys_nd_new[lev]) : nullptr;
 }
 
 /**

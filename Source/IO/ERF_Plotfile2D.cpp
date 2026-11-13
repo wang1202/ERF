@@ -490,6 +490,8 @@ ERF::FillPlot2DVars (int lev,
             wind10.sfuns            = surf_layer ? surf_layer->similarity_functions() : similarity_funs{};
             wind10.xvel = at_ground(&vars_new[lev][Vars::xvel]);
             wind10.yvel = at_ground(&vars_new[lev][Vars::yvel]);
+            wind10.current_x = surf_layer ? surf_layer->get_surface_current(lev, 0) : nullptr;
+            wind10.current_y = surf_layer ? surf_layer->get_surface_current(lev, 1) : nullptr;
             wind10.klo  = klo;
             // The grid orientation for the earth-relative components, as for the
             //    sampled u_east and v_north; without lat/lon the grid is aligned with east
@@ -596,6 +598,26 @@ ERF::FillPlot2DVars (int lev,
         mf_comp++;
     } // ibseb_ground_shadow
 
+    // The net longwave the balance used at its last update after the dycore (-999 before it).
+    if (containerHasElement(plot_var_names, "seb_lw_net")) {
+        plotfile2d::fill_component_from_klevel_or_value(
+            mf_dst, mf_comp,
+            (solverChoice.rad_type == RadiationType::TwoStream) ? two_stream_rad.seb_lw_net(lev)
+                                                                : nullptr,
+            0, -999);
+        mf_comp++;
+    } // seb_lw_net
+
+    // The walls' share of the ground's view (erf.ibseb.ground_sky_view; -999 otherwise).
+    if (containerHasElement(plot_var_names, "ibseb_ground_wall_view")) {
+        plotfile2d::fill_component_from_klevel_or_value(
+            mf_dst, mf_comp,
+            (solverChoice.rad_type == RadiationType::TwoStream) ? two_stream_rad.ground_walls(lev)
+                                                                : nullptr,
+            0, -999);
+        mf_comp++;
+    } // ibseb_ground_wall_view
+
     if (containerHasElement(plot_var_names, "sens_flux")) {
         plotfile2d::fill_component_from_klevel_or_value(
             mf_dst, mf_comp, sens_flux_source, klo, -999);
@@ -628,10 +650,12 @@ ERF::FillPlot2DVars (int lev,
             const auto& cons_arr = cons_ground->const_array(mfi);
             const auto& z_arr    = (z_ground) ? z_ground->const_array(mfi)
                                               : Array4<const Real>{};
+            const auto& zsfc_arr = (z_ground) ? z_sfc_nd[lev]->const_array(mfi)
+                                              : Array4<const Real>{};
             ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
                 const Real rho = cons_arr(i,j,klo,Rho_comp);
                 const Real qv  = (moist) ? cons_arr(i,j,klo,RhoQ1_comp)/rho : zero;
-                const Real z_cc_agl = (z_arr) ? Compute_Zrel_AtCellCenter(i,j,klo,z_arr)
+                const Real z_cc_agl = (z_arr) ? Compute_Zrel_AtCellCenter(i,j,klo,zsfc_arr,z_arr)
                                               : myhalf*dz;
                 derdat(i, j, k, mf_comp) = erf_surface_temperature::pressure_at_surface(
                     rho, cons_arr(i,j,klo,RhoTheta_comp), qv, z_cc_agl);
@@ -822,6 +846,7 @@ ERF::FillPlot2DVars (int lev,
             (lmask_lev[lev].empty()) ? nullptr : lmask_lev[lev][0].get();
         near_surface_sources.cons = at_ground(&vars_new[lev][Vars::cons]);
         near_surface_sources.z_phys_nd = at_ground(z_phys_nd[lev].get());
+        near_surface_sources.z_sfc_nd = z_sfc_nd[lev].get();
         near_surface_sources.dz = geom[lev].CellSize(2);
         near_surface_sources.klo = klo;
         near_surface_sources.moist = solverChoice.moisture_type != MoistureType::None;
@@ -884,6 +909,7 @@ ERF::FillPlot2DVars (int lev,
             vars_new[lev][Vars::cons],
             z_phys_cc[lev].get(),
             *z_phys_nd[lev],
+            *z_sfc_nd[lev],
             z_phys_cc[lev] != nullptr,
             solverChoice.moisture_indices,
             klo, khi,

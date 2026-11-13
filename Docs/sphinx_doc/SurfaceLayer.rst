@@ -315,6 +315,35 @@ boundary layer depth, ``erf.most.include_wstar`` requires ``erf.most.pblh_calc``
 name a PBL height scheme; leaving it at its default of ``none`` is an error, since no
 boundary layer depth would ever be diagnosed.
 
+.. _sec:MovingSurface:
+
+Moving surface
+~~~~~~~~~~~~~~
+Over an ocean the surface moves with the current, and the stress depends on the wind
+relative to it (e.g. Bye and Wolff 1999, JPO). With
+
+::
+
+   erf.most.surface_current = 0.5 0.2
+
+the water surface moves at :math:`(u_s, v_s)` = (0.5, 0.2) m/s along x and y, and the
+surface layer takes :math:`(u - u_s, v - v_s)` wherever it uses the near-surface wind: in the mean
+speed :math:`|\bar{\mathbf{u}}|` and mean components behind :math:`u_*`, the Obukhov length
+and the roughness, in the direction and magnitude of the stresses, and in the wind speed
+of the heat and moisture fluxes. The 10 m wind diagnostics ``u_10m`` and ``v_10m`` are the
+relative wind from the similarity profile plus the current, so they remain winds over the
+ground. PBL schemes that take the mean wind speed from the surface layer get the relative
+speed, while the winds they read from the grid themselves stay absolute: YSU, for example,
+forms its surface bulk Richardson number from the relative speed but those of the levels above
+from the absolute wind, and the countergradient momentum terms of the newer YSU use the absolute
+wind at the lowest level.
+
+Only water moves. A face of the lowest cells takes the current where the cells on both sides
+of it are water (land mask 0), and is at rest over land and buildings. A surface with no water
+is an error, since the current would do nothing; idealized cases are all land unless
+``erf.is_land = 0``. The current is applied at the z-low face on every level, and is not
+supported with EB terrain.
+
 Limits on the similarity solution
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In every flux kernel the log-law brackets :math:`C - \psi_m` and :math:`C - \psi_h`, with
@@ -447,7 +476,7 @@ it feeds (``most.include_wstar``) are likewise zlo-only.
 Lateral (x/y) surface-layer boundaries currently require every grid on that
 level to span its full vertical extent.  Grids decomposed in z and
 partial-height refined grids are not supported; configure
-``erf.max_grid_size_z`` accordingly.
+``amr.max_grid_size_z`` accordingly.
 Deardorff LES, RANS, and PBL models, including SHOC, support SurfaceLayer
 only at zlo; they cannot be combined with lateral or upper surface-layer
 boundaries.  Smagorinsky LES, including its 2-D variant, uses the generic
