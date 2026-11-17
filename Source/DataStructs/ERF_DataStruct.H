@@ -101,6 +101,18 @@ AMREX_ENUM(CompressibilityType,
 );
 
 /**
+ * @brief Horizontal pressure-gradient formulation with terrain-fitted coordinates.
+ *
+ * ChainRule:         dp/dx along the coordinate surface minus the terrain slope times dp/dz
+ * HydrostaticHybrid: as ChainRule, but the hydrostatic part of p' is carried to the height
+ *                    of the face along dp'/dz = -g rho' and only the remainder
+ *                    dp'/dz + g rho' is differenced
+ */
+AMREX_ENUM(GradpType,
+    ChainRule, HydrostaticHybrid
+);
+
+/**
  * @brief Values of the deprecated erf.anelastic_type; read only to map them onto
  *        TimesteppingType.
  */
@@ -759,10 +771,36 @@ struct SolverChoice {
         }
 
         // Which horizontal pressure gradient formulation to use with terrain fitted coords?
-        // 0: dp/dx with dp/dz correction (default)
-        // 1: gradient of vertically interpolated p, see Klemp 2011
-        pp.queryAdd("gradp_type", gradp_type);
-        AMREX_ALWAYS_ASSERT(gradp_type == 0 || gradp_type == 1);
+        //    (see GradpType).  HydrostaticHybrid always uses the perturbational pressure,
+        //    regardless of the setting of use_pert_pres_gradient.
+        //
+        // The integer values this used to take are still accepted, with a warning:
+        //    0 -> ChainRule, 2 -> HydrostaticHybrid; 1 (Klemp 2011) has been removed
+        if (pp.contains("gradp_type")) {
+            std::string gradp_str;
+            pp.get("gradp_type", gradp_str);
+            if (gradp_str == "0" || gradp_str == "1" || gradp_str == "2") {
+                if (gradp_str == "1") {
+                    amrex::Abort("erf.gradp_type = 1 has been removed; use erf.gradp_type = HydrostaticHybrid");
+                }
+                gradp_type = (gradp_str == "0") ? GradpType::ChainRule : GradpType::HydrostaticHybrid;
+                amrex::Print() << "WARNING: integer values of erf.gradp_type are deprecated; use erf.gradp_type = "
+                               << amrex::getEnumNameString(gradp_type) << std::endl;
+            } else {
+                // Case-insensitive and ignoring underscores, so that e.g. hydrostatic_hybrid
+                //    selects HydrostaticHybrid
+                try {
+                    pp.query_enum_sloppy("gradp_type", gradp_type, "_");
+                } catch (...) {
+                    amrex::Abort("erf.gradp_type must be ChainRule or HydrostaticHybrid, not '"
+                                 + gradp_str + "'");
+                }
+            }
+        }
+
+        // With ChainRule, whether dp/dz at the bottom and top of the domain is the second-order
+        //    one-sided difference through three cells rather than the first-order two-point one
+        pp.query("gradp_2nd_order_bndry", gradp_2nd_order_bndry);
 
         // For the lateral pressure gradient to be used in the momentum equation, should we
         // take the x- and y-derivatives of the perturbational pressure or the full pressure?
@@ -949,6 +987,11 @@ struct SolverChoice {
         // ThetaCalcType::SURFACE_TEMPERATURE, which is long before the first
         // ApplyOceanSurfaceState call.
         pp.queryAdd("use_coupled_sst", use_coupled_sst);
+
+        // Will an external ocean coupler supply the surface current? The surface layer
+        // allocates the current with each level, before the first ApplyOceanSurfaceState
+        // call, and takes the wind relative to it.
+        pp.queryAdd("use_coupled_currents", use_coupled_currents);
 
         read_int_string(max_level, "is_land", is_land, 1);
         for (int lev = 0; lev <= max_level; ++lev) {
@@ -1347,17 +1390,9 @@ struct SolverChoice {
         // velocity (0 = never)
         pp.query("face_sync_int", face_sync_int);
 
-        // Spatially varying beta_s on the w-faces (implicit substepping only):
-        //    beta_s = max(beta_s_min, min(beta_s_max, h_xi^2 + h_eta^2))
+        // Spatially varying beta_s on the w-faces (implicit substepping only), set from the
+        //    terrain slope and the vertical acoustic Courant number (see make_fast_coeffs)
         pp.queryAdd("use_variable_beta_s", use_variable_beta_s);
-        pp.queryAdd("beta_s_min", beta_s_min);
-        pp.queryAdd("beta_s_max", beta_s_max);
-        if (use_variable_beta_s) {
-            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(beta_s_min <= beta_s_max,
-                "erf.beta_s_min must be less than or equal to erf.beta_s_max");
-            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(beta_s_min >= -one && beta_s_max <= one,
-                "erf.beta_s_min and erf.beta_s_max must lie in [-1, 1]");
-        }
 
         // *******************************************************************************
         // Error check on deprecated input
@@ -1365,6 +1400,15 @@ struct SolverChoice {
         int nvals_old = pp.countval("no_substepping");
         if (nvals_old > 0) {
             amrex::Error("The no_substepping flag is deprecated -- set erf.timestepping_type instead");
+        }
+
+        nvals_old = pp.countval("beta_s_min");
+        if (nvals_old > 0) {
+            amrex::Error("The beta_s_min flag is deprecated -- remove it from the inputs file");
+        }
+        nvals_old = pp.countval("beta_s_max");
+        if (nvals_old > 0) {
+            amrex::Error("The beta_s_max flag is deprecated -- remove it from the inputs file");
         }
 
         pp.queryAdd("ncorr", ncorr);
@@ -2244,6 +2288,20 @@ struct SolverChoice {
 
         pp.queryAdd("hindcast_lateral_forcing", hindcast_lateral_forcing);
 
+        // The hindcast latitude comes with the lateral-forcing data; without it, Coriolis
+        // takes the variable or constant latitude instead, so say which
+        if (init_type == InitType::HindCast && use_coriolis && !hindcast_lateral_forcing) {
+            if (variable_coriolis) {
+                amrex::Print() << "WARNING: erf.init_type = hindcast without erf.hindcast_lateral_forcing:"
+                               << " Coriolis uses the variable latitude (erf.variable_coriolis)" << std::endl;
+            } else {
+                amrex::Print() << "WARNING: erf.init_type = hindcast without erf.hindcast_lateral_forcing:"
+                               << " Coriolis uses the constant erf.latitude"
+                               << (pp.contains("latitude") ? "" : ", which is not set (default 90 degrees)")
+                               << std::endl;
+            }
+        }
+
         if (hindcast_lateral_forcing) {
             pp.queryAdd("hindcast_boundary_data_dir", hindcast_boundary_data_dir);
 
@@ -2294,6 +2352,13 @@ struct SolverChoice {
                               " but have not provided the initial location of the eye of the hurricane to be tracked. There has to be two"
                               " options in the inputs - erf.hurricane_eye_latitude and erf.hurricane_eye_longitude that gives an approximate"
                               " location of the eye in the initial condition");
+            }
+            // With init_type = hindcast the tracker takes latitude and longitude from the
+            // forecast state, which exists only with lateral forcing
+            if (init_type == InitType::HindCast && !hindcast_lateral_forcing) {
+                amrex::Error("ERROR: 'erf.io_hurricane_eye_tracker' with erf.init_type = hindcast needs"
+                             " erf.hindcast_lateral_forcing = true: the tracker reads latitude and longitude"
+                             " from the forecast state, which only lateral forcing provides");
             }
         }
 
@@ -2745,7 +2810,8 @@ struct SolverChoice {
             amrex::Print() << "Radiation Model: None" << std::endl;
         }
 
-        amrex::Print() << "Gradp_type                  : " << gradp_type << std::endl;
+        amrex::Print() << "Gradp_type                  : " << amrex::getEnumNameString(gradp_type) << std::endl;
+        amrex::Print() << "Gradp_2nd_order_bndry       : " << gradp_2nd_order_bndry << std::endl;
 
         for (int lev = 0; lev <= max_level; lev++) {
             amrex::Print() << "Buoyancy_type at level " << lev << " : " << buoyancy_type[lev] << std::endl;
@@ -2900,11 +2966,9 @@ struct SolverChoice {
     amrex::Real beta_s = amrex::Real(0.1);
     int face_sync_int = 1;
 
-    // if true, beta_s varies on the w-faces as max(beta_s_min, min(beta_s_max, h_xi^2 + h_eta^2))
+    // if true, beta_s varies on the w-faces
     // and beta_s itself is not used (implicit substepping only)
     bool use_variable_beta_s = false;
-    amrex::Real beta_s_min = amrex::Real(0.1);
-    amrex::Real beta_s_max = amrex::Real(0.8);
 
     // divergence damping coefficient: how far (rho theta) is projected forward
     // in the horizontal momentum equations of the acoustic substepping
@@ -2944,7 +3008,9 @@ struct SolverChoice {
     bool        test_mapfactor         = false;
     amrex::Real test_mapfactor_amp     = amrex::Real(0);
 
-    int         gradp_type             = 0;
+    GradpType   gradp_type             = GradpType::ChainRule;
+
+    bool        gradp_2nd_order_bndry  = false;
 
     bool        use_pert_pres_gradient = true;
 
@@ -3305,6 +3371,8 @@ struct SolverChoice {
 
     // Does an external ocean coupler supply SST? See the query in init_params.
     bool use_coupled_sst = false;
+    // Does an external ocean coupler supply the surface current? See the query in init_params.
+    bool use_coupled_currents = false;
 
     ABLDriverType abl_driver_type;
     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> abl_pressure_grad;
@@ -3441,11 +3509,7 @@ struct SolverChoice {
  * @var SolverChoice::beta_s
  * @brief Time off-centering coefficient for forward weighting.
  * @var SolverChoice::use_variable_beta_s
- * @brief Whether beta_s varies on the w-faces with the terrain slope.
- * @var SolverChoice::beta_s_min
- * @brief Lower bound of the spatially varying beta_s.
- * @var SolverChoice::beta_s_max
- * @brief Upper bound of the spatially varying beta_s.
+ * @brief Whether beta_s varies on the w-faces with the terrain slope and acoustic Courant number.
  * @var SolverChoice::beta_d
  * @brief Divergence damping coefficient used in the acoustic substepping.
  * @var SolverChoice::vert_implicit_fac
@@ -3476,6 +3540,8 @@ struct SolverChoice {
  * @brief Amplitude of the spatially varying test map scale factors on level 0 (0: not used).
  * @var SolverChoice::gradp_type
  * @brief Terrain-fitted horizontal pressure-gradient formulation.
+ * @var SolverChoice::gradp_2nd_order_bndry
+ * @brief Whether ChainRule takes dp/dz at the bottom and top from a second-order one-sided difference.
  * @var SolverChoice::use_pert_pres_gradient
  * @brief Whether momentum equations use perturbational pressure gradients.
  * @var SolverChoice::use_gravity
