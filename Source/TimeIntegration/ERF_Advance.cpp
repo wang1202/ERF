@@ -205,7 +205,8 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
     if (solverChoice.windfarm_type != WindFarmType::None) {
         advance_windfarm(Geom(lev), dt_lev, S_old,
                          U_old, V_old, W_old, vars_windfarm[lev],
-                         Nturb[lev], SMark[lev], time);
+                         Nturb[lev], SMark[lev],
+                         z_phys_nd[lev].get(), z_phys_cc[lev].get(), time);
     }
 
 #endif
@@ -601,7 +602,8 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
                                lsm, radiation_inputs, noahmp_active,
                                qheating_rates[lev].get(), rad_fluxes[lev].get(),
                                t_surf, sfc_sens_flux, sfc_laten_flux, lat_ptr, lon_ptr,
-                               time + dt_lev + start_time, use_datetime);
+                               time + dt_lev + start_time, use_datetime,
+                               lmask_lev[lev].empty() ? nullptr : lmask_lev[lev][0].get());
     }
     if (solverChoice.compute_mean_vars) {
         // The interval window is shared by all AMR levels.  Reset it before

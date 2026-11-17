@@ -245,11 +245,6 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
         if (lev > 0) { bind_sbm_amr_flux_registers(lev - 1); }
     }
 
-    // define_level (inside init_stuff) filled the two-stream SEB state with the scalar
-    // defaults; a level that evolves it needs its parent's values instead, or it
-    // radiates at erf.rad_t_sfc for its first step.
-    fill_seb_from_coarse(lev);
-
     //********************************************************************************************
     // Land Surface Model
     // *******************************************************************************************
@@ -403,6 +398,16 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
             make_terrain_blanking(lev);
         }
     }
+
+    // define_level (inside init_stuff) filled the two-stream SEB state with the scalar
+    // defaults; a level that evolves it needs its parent's values instead, or it
+    // radiates at erf.rad_t_sfc for its first step. The fill reads this level's land mask,
+    // so it comes after init_only: with wrfinput the mask is read from the level's file or
+    // taken from the parent there (init_from_wrfinput, Interp2DArrays), and until then it
+    // holds erf.is_land of the level. Not on a restart: the parent holds the scalar
+    // defaults here and the mask is still erf.is_land, and the checkpoint read sets the
+    // state and the mask of every level afterwards.
+    if (restart_chkfile.empty()) { fill_seb_from_coarse(lev); }
 
     // Initialize the non-cons auxiliary tracer only after the host atmospheric
     // density has been initialized from the selected problem configuration.
@@ -658,11 +663,6 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
                               geom[lev-1], geom[lev], refRatio(lev-1));
     }
 
-    // define_level (inside init_stuff) filled the two-stream SEB state with the scalar
-    // defaults; a level that evolves it needs its parent's values instead, or it
-    // radiates at erf.rad_t_sfc for its first step.
-    fill_seb_from_coarse(lev);
-
     //
     // Note that t_new = time here is elapsed time
     //
@@ -671,6 +671,13 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
 
     init_zphys(lev, time);
     update_terrain_arrays(lev);
+
+#ifdef ERF_USE_WINDFARM
+    // Nturb, SMark and vars_windfarm were just allocated on the new grids by init_stuff (#5164)
+    if (solverChoice.windfarm_type != WindFarmType::None) {
+        fill_windfarm_markers(lev);
+    }
+#endif
 
     //
     // Make sure that detJ is the average of the data on a finer level if there is one
@@ -912,6 +919,11 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
     // so we must explicitly pass dm.
     Interp2DArrays(lev,ba2d[lev],dm);
 
+    // The wrfinput land and soil fields: a level without a file of its own takes those of
+    // level lev-1. A level that has just read its own file keeps what the file gave.
+    wrf_surface_fields.remake(lev, ba2d[lev], dm, geom[lev].periodicity(), refRatio(lev-1),
+                              !has_own_init_file(lev), verbose);
+
     // Populate dz_min for dynamically-created fine levels (non-terrain path).
     if (static_cast<int>(dz_min.size()) <= lev) { dz_min.resize(lev+1); }
     dz_min[lev] = geom[lev].CellSize(2);
@@ -921,6 +933,15 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
 #ifdef ERF_USE_NETCDF
     }
 #endif
+
+    // define_level (inside init_stuff) filled the two-stream SEB state with the scalar
+    // defaults; a level that evolves it needs its parent's values instead, or it
+    // radiates at erf.rad_t_sfc for its first step. The fill reads this level's land mask,
+    // so it comes after both branches above: a level with its own wrfinput or metgrid file
+    // has read its mask, and a wrfinput level with no file has taken its parent's
+    // (Interp2DArrays). Until then the mask holds erf.is_land of the level. RemakeLevel has
+    // the same order.
+    fill_seb_from_coarse(lev);
 
     // ********************************************************************************************
     // Initialize the integrator class
@@ -1291,6 +1312,13 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
     remake_zphys(lev, time, temp_zphys_nd);
     update_terrain_arrays(lev);
 
+#ifdef ERF_USE_WINDFARM
+    // Nturb, SMark and vars_windfarm were just allocated on the new grids by init_stuff (#5164)
+    if (solverChoice.windfarm_type != WindFarmType::None) {
+        fill_windfarm_markers(lev);
+    }
+#endif
+
     // ********************************************************************************************
     // Make sure that detJ is the average of the data on a finer level if there is one
     // Note that this shouldn't be necessary because the fine grid is created by interpolation
@@ -1559,6 +1587,12 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
     // those must not survive onto the new grids.
     for (auto& sst : sst_lev[lev]) { sst.reset(); }
     for (auto& tsk : tsk_lev[lev]) { tsk.reset(); }
+    // The wrfinput land and soil fields are data of the initial time that nothing rebuilds:
+    // they are carried onto the new grids, and the columns the old grids did not cover
+    // take the values of level lev-1, which regrid has already put on its new grids.
+    wrf_surface_fields.remake(lev, ba2d[lev], dm, geom[lev].periodicity(),
+                              (lev > 0) ? refRatio(lev-1) : IntVect(1),
+                              !has_own_init_file(lev), verbose);
     if (lat_m[lev]) {
         lat_m[lev].reset();
     }
@@ -1848,6 +1882,7 @@ ERF::ClearLevel (int lev)
     // those must not survive onto the new grids.
     for (auto& sst : sst_lev[lev]) { sst.reset(); }
     for (auto& tsk : tsk_lev[lev]) { tsk.reset(); }
+    wrf_surface_fields.clear(lev);
     if (lat_m[lev]) {
         lat_m[lev].reset();
     }
@@ -1992,6 +2027,40 @@ ERF::make_lsm_at_level (int lev, bool from_regrid,
     }
 }
 
+namespace {
+/**
+ * Set the thin-body flux mask to 0 on the listed faces.  The mask lives in the default
+ * arena, which is device memory on GPU builds, so the faces are copied to the device and
+ * set in a kernel; the diagnostic print loops over the host list and reads no device memory.
+ */
+void
+mask_thin_body_faces (iMultiFab& imask, const Vector<IntVect>& faces, int dir, const char* name)
+{
+    if (faces.empty()) { return; }
+    const int nf = static_cast<int>(faces.size());
+    Gpu::DeviceVector<IntVect> d_faces(nf);
+    Gpu::copy(Gpu::hostToDevice, faces.begin(), faces.end(), d_faces.begin());
+    const IntVect* f = d_faces.data();
+    for (MFIter mfi(imask, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        Array4<int> const& imask_arr = imask.array(mfi);
+        const Box fbx = mfi.nodaltilebox(dir);
+        ParallelFor(nf, [=] AMREX_GPU_DEVICE (int iv) noexcept
+        {
+            if (fbx.contains(f[iv])) { imask_arr(f[iv]) = 0; }
+        });
+        for (const auto& faceidx : faces) {
+            if (fbx.contains(faceidx)) {
+                amrex::AllPrint() << "  mask " << name << " at " << faceidx << std::endl;
+            }
+        }
+    }
+    // The MFIter may have launched on several streams; wait for all of them before d_faces
+    // goes out of scope (a one-time setup, so a device-wide sync costs nothing)
+    Gpu::synchronize();
+}
+} // namespace
+
 void
 ERF::init_thin_body (int lev, const BoxArray& ba, const DistributionMapping& dm)
 {
@@ -2017,24 +2086,7 @@ ERF::init_thin_body (int lev, const BoxArray& ba, const DistributionMapping& dm)
         thin_xforce[lev]->setVal(0.0);
         xflux_imask[lev] = std::make_unique<iMultiFab>(ba_xf,dm,1,0);
         xflux_imask[lev]->setVal(1);
-        for ( MFIter mfi(*xflux_imask[lev], TilingIfNotGPU()); mfi.isValid(); ++mfi )
-        {
-            Array4<int> const& imask_arr = xflux_imask[lev]->array(mfi);
-            //Array4<int> const& imask_cell_arr = overset_imask[lev]->array(mfi);
-            Box xbx = mfi.nodaltilebox(0);
-            for (int iv=0; iv < solverChoice.advChoice.zero_xflux.size(); ++iv) {
-                const auto& faceidx = solverChoice.advChoice.zero_xflux[iv];
-                if ((faceidx[0] >= xbx.smallEnd(0)) && (faceidx[0] <= xbx.bigEnd(0)) &&
-                    (faceidx[1] >= xbx.smallEnd(1)) && (faceidx[1] <= xbx.bigEnd(1)) &&
-                    (faceidx[2] >= xbx.smallEnd(2)) && (faceidx[2] <= xbx.bigEnd(2)))
-                {
-                    imask_arr(faceidx[0],faceidx[1],faceidx[2]) = 0;
-                    //imask_cell_arr(faceidx[0],faceidx[1],faceidx[2]) = 0;
-                    //imask_cell_arr(faceidx[0]-1,faceidx[1],faceidx[2]) = 0;
-                    amrex::AllPrint() << "  mask xface at " << faceidx << std::endl;
-                }
-            }
-        }
+        mask_thin_body_faces(*xflux_imask[lev], solverChoice.advChoice.zero_xflux, 0, "xface");
     } else {
         thin_xforce[lev] = nullptr;
         xflux_imask[lev] = nullptr;
@@ -2049,24 +2101,7 @@ ERF::init_thin_body (int lev, const BoxArray& ba, const DistributionMapping& dm)
         thin_yforce[lev]->setVal(0.0);
         yflux_imask[lev] = std::make_unique<iMultiFab>(ba_yf,dm,1,0);
         yflux_imask[lev]->setVal(1);
-        for ( MFIter mfi(*yflux_imask[lev], TilingIfNotGPU()); mfi.isValid(); ++mfi )
-        {
-            Array4<int> const& imask_arr = yflux_imask[lev]->array(mfi);
-            //Array4<int> const& imask_cell_arr = overset_imask[lev]->array(mfi);
-            Box ybx = mfi.nodaltilebox(1);
-            for (int iv=0; iv < solverChoice.advChoice.zero_yflux.size(); ++iv) {
-                const auto& faceidx = solverChoice.advChoice.zero_yflux[iv];
-                if ((faceidx[0] >= ybx.smallEnd(0)) && (faceidx[0] <= ybx.bigEnd(0)) &&
-                    (faceidx[1] >= ybx.smallEnd(1)) && (faceidx[1] <= ybx.bigEnd(1)) &&
-                    (faceidx[2] >= ybx.smallEnd(2)) && (faceidx[2] <= ybx.bigEnd(2)))
-                {
-                    imask_arr(faceidx[0],faceidx[1],faceidx[2]) = 0;
-                    //imask_cell_arr(faceidx[0],faceidx[1],faceidx[2]) = 0;
-                    //imask_cell_arr(faceidx[0],faceidx[1]-1,faceidx[2]) = 0;
-                    amrex::AllPrint() << "  mask yface at " << faceidx << std::endl;
-                }
-            }
-        }
+        mask_thin_body_faces(*yflux_imask[lev], solverChoice.advChoice.zero_yflux, 1, "yface");
     } else {
         thin_yforce[lev] = nullptr;
         yflux_imask[lev] = nullptr;
@@ -2081,24 +2116,7 @@ ERF::init_thin_body (int lev, const BoxArray& ba, const DistributionMapping& dm)
         thin_zforce[lev]->setVal(0.0);
         zflux_imask[lev] = std::make_unique<iMultiFab>(ba_zf,dm,1,0);
         zflux_imask[lev]->setVal(1);
-        for ( MFIter mfi(*zflux_imask[lev], TilingIfNotGPU()); mfi.isValid(); ++mfi )
-        {
-            Array4<int> const& imask_arr = zflux_imask[lev]->array(mfi);
-            //Array4<int> const& imask_cell_arr = overset_imask[lev]->array(mfi);
-            Box zbx = mfi.nodaltilebox(2);
-            for (int iv=0; iv < solverChoice.advChoice.zero_zflux.size(); ++iv) {
-                const auto& faceidx = solverChoice.advChoice.zero_zflux[iv];
-                if ((faceidx[0] >= zbx.smallEnd(0)) && (faceidx[0] <= zbx.bigEnd(0)) &&
-                    (faceidx[1] >= zbx.smallEnd(1)) && (faceidx[1] <= zbx.bigEnd(1)) &&
-                    (faceidx[2] >= zbx.smallEnd(2)) && (faceidx[2] <= zbx.bigEnd(2)))
-                {
-                    imask_arr(faceidx[0],faceidx[1],faceidx[2]) = 0;
-                    //imask_cell_arr(faceidx[0],faceidx[1],faceidx[2]) = 0;
-                    //imask_cell_arr(faceidx[0],faceidx[1],faceidx[2]-1) = 0;
-                    amrex::AllPrint() << "  mask zface at " << faceidx << std::endl;
-                }
-            }
-        }
+        mask_thin_body_faces(*zflux_imask[lev], solverChoice.advChoice.zero_zflux, 2, "zface");
     } else {
         thin_zforce[lev] = nullptr;
         zflux_imask[lev] = nullptr;
