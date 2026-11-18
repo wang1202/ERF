@@ -4,6 +4,8 @@
 //
 //   dry    <run_dir> <one_box_dir> <disabled_dir> <plotfile> <rows> <row_dt>
 //   satadj <run_dir> <plotfile> <rows> <row_dt> <dry_faces>
+//   vapor_closure <run_dir> <rows> <row_dt> <steps_per_row> <dry_faces>
+//   same_fields <plotfile_a> <plotfile_b> <relative_tolerance>
 //
 // <dry_faces> lists the dry walls of the SatAdj deck (e.g. "xhi,yhi").
 #include <AMReX.H>
@@ -383,6 +385,85 @@ int check_satadj (const std::string& run_dir, const std::string& plotfile_name,
     return 0;
 }
 
+// Total vapor mass integral(rho qv) dV of a plotfile.
+double vapor_mass (const std::string& path)
+{
+    PlotFileData plotfile(path);
+    MultiFab rho_qv = plotfile.get(0, "density");
+    const MultiFab qv = plotfile.get(0, "qv");
+    MultiFab::Multiply(rho_qv, qv, 0, 0, 1, 0);
+    const auto dx = plotfile.cellSize(0);
+    return static_cast<double>(rho_qv.sum(0)) * dx[0] * dx[1] * dx[2];
+}
+
+// With no condensation (SuperDroplets without droplets) there is no vapor
+// source, and the walls carry no advective flux, so over each window the
+// change of the vapor mass equals the inward wall flux: the sum over faces
+// of +E A dt (low walls) and -E A dt (high walls).  No cloud water may form.
+int check_vapor_closure (const std::string& run_dir, int rows, double row_dt,
+                         int steps_per_row, const std::string& dry_faces)
+{
+    std::string error;
+    WallFluxFile file;
+    if (!read_wallflux(run_dir + "/wallflux_lev0.txt", file, error) ||
+        !check_rows(file, rows, row_dt, error)) {
+        return fail(error);
+    }
+    const auto plotfile_name = [&] (int r) {
+        std::ostringstream name;
+        name << run_dir << "/plt" << std::setw(5) << std::setfill('0') << r * steps_per_row;
+        return name.str();
+    };
+    PlotFileData first(plotfile_name(0));
+    const auto area = face_areas(first);
+    for (int r = 0; r < rows; ++r) {
+        const auto& row = file.rows[r];
+        double inward = 0.0;
+        double scale = 0.0;
+        for (int f = 0; f < NumFaces; ++f) {
+            const double E = row[column(f, 2)];
+            if (dry_faces.find(face_names[f]) != std::string::npos && E != 0.0) {
+                return fail(std::string("dry wall ") + face_names[f] + " exchanges vapor");
+            }
+            const double transfer = E * area[f] * row_dt;
+            inward += (f % 2 == 0) ? transfer : -transfer;
+            scale += std::abs(transfer);
+        }
+        if (!(scale > 0.0)) { return fail("no wall exchanged vapor"); }
+        const double change = vapor_mass(plotfile_name(r + 1)) - vapor_mass(plotfile_name(r));
+        std::cout << "vapor_closure: t=" << row[0] << std::setprecision(10)
+                  << " vapor_mass_change=" << change << " inward_wall_vapor=" << inward
+                  << " relative_mismatch=" << std::abs(change - inward) / scale << "\n";
+        if (std::abs(change - inward) > 1.0e-7 * scale) {
+            return fail("vapor mass change does not match the inward wall vapor flux");
+        }
+    }
+    PlotFileData last(plotfile_name(rows));
+    if (last.get(0, "qc").norm0(0, 0, false) != 0.0) {
+        return fail("cloud water formed without droplets");
+    }
+    return 0;
+}
+
+// The fields two models share agree to a relative tolerance.
+int check_same_fields (const std::string& path_a, const std::string& path_b, double tolerance)
+{
+    PlotFileData a(path_a);
+    PlotFileData b(path_b);
+    double worst = 0.0;
+    for (const std::string name : {"density", "theta", "temp", "pressure", "qv", "qc",
+                                   "x_velocity", "y_velocity", "z_velocity"}) {
+        MultiFab difference = a.get(0, name);
+        const MultiFab other = b.get(0, name);
+        const double scale = std::max(static_cast<double>(other.norm0(0, 0, false)), 1.0e-300);
+        MultiFab::Subtract(difference, other, 0, 0, 1, 0);
+        const double relative = difference.norm0(0, 0, false) / scale;
+        std::cout << "same_fields: " << name << " max_relative_difference=" << relative << "\n";
+        worst = std::max(worst, relative);
+    }
+    return worst <= tolerance ? 0 : fail("fields differ beyond the tolerance");
+}
+
 } // namespace
 
 int main (int argc, char** argv)
@@ -396,9 +477,16 @@ int main (int argc, char** argv)
     } else if (mode == "satadj" && argc == 7) {
         status = check_satadj(argv[2], argv[3], std::stoi(argv[4]),
                               std::stod(argv[5]), argv[6]);
+    } else if (mode == "vapor_closure" && argc == 7) {
+        status = check_vapor_closure(argv[2], std::stoi(argv[3]), std::stod(argv[4]),
+                                     std::stoi(argv[5]), argv[6]);
+    } else if (mode == "same_fields" && argc == 5) {
+        status = check_same_fields(argv[2], argv[3], std::stod(argv[4]));
     } else {
         status = fail("usage: dry <run> <one_box> <disabled> <plotfile> <rows> <row_dt> | "
-                      "satadj <run> <plotfile> <rows> <row_dt> <dry_faces>");
+                      "satadj <run> <plotfile> <rows> <row_dt> <dry_faces> | "
+                      "vapor_closure <run> <rows> <row_dt> <steps_per_row> <dry_faces> | "
+                      "same_fields <plotfile_a> <plotfile_b> <relative_tolerance>");
     }
     amrex::Finalize();
     return status;

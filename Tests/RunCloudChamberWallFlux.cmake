@@ -9,6 +9,10 @@ include("${CMAKE_CURRENT_LIST_DIR}/MPILauncher.cmake")
 #   MODE=satadj  SatAdj with distinct wet and dry walls, wall-flux and budget
 #                at the same cadence, 25 steps (the short trailing window
 #                writes no row), under both anelastic integrators.
+#   MODE=sdm     SuperDroplets that never injects (the same walls): the wall
+#                vapor flux must close the vapor mass change under both
+#                integrators, no cloud may form, and the shared fields must
+#                match MoistNoCondensation run without the diagnostic.
 #   MODE=reject  an existing output file, a nonpositive interval and a restart
 #                must each stop the run before it starts.
 
@@ -101,6 +105,20 @@ elseif(MODE STREQUAL "satadj")
         run_checker(checker_${scheme}.log satadj
             "${WORKING_DIRECTORY}/${scheme}" plt00000 2 0.1 "xhi,yhi")
     endforeach()
+elseif(MODE STREQUAL "sdm")
+    foreach(scheme MidPoint RK2)
+        fresh_dir(${scheme})
+        run_erf(${scheme} MANY TRUE erf.timestepping_type=${scheme})
+        run_checker(checker_${scheme}.log vapor_closure
+            "${WORKING_DIRECTORY}/${scheme}" 2 0.1 10 "xhi,yhi")
+    endforeach()
+    # Without droplets SuperDroplets only transports vapor, like
+    # MoistNoCondensation (run here without the diagnostic).
+    fresh_dir(noncondensing)
+    run_erf(noncondensing MANY TRUE erf.timestepping_type=RK2
+        erf.moisture_model=MoistNoCondensation erf.wallflux_diagnostics=false)
+    run_checker(checker_same_fields.log same_fields
+        "${WORKING_DIRECTORY}/RK2/plt00020" "${WORKING_DIRECTORY}/noncondensing/plt00020" 1.0e-9)
 elseif(MODE STREQUAL "reject")
     fresh_dir(existing)
     set(unrelated "unrelated user data\n")

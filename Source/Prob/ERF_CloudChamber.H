@@ -158,9 +158,10 @@ initialization_contract_error (const InitializationContract& contract)
 /**
  * @brief Return whether a moisture type is supported by the Cloud Chamber.
  *
- * This is intentionally an allowlist.  In particular, particle-based
- * SuperDroplets and spectral SBM remain outside the chamber's supported
- * moisture configurations even though they are valid ERF moisture types.
+ * This is intentionally an allowlist.  Particle-based SuperDroplets is
+ * supported: its vapor is an Eulerian state that the chamber walls exchange
+ * like any other model's.  Spectral SBM remains outside the chamber's
+ * supported moisture configurations even though it is a valid ERF moisture type.
  */
 inline bool
 supports_moisture_model (const MoistureType moisture_type) noexcept
@@ -178,9 +179,9 @@ supports_moisture_model (const MoistureType moisture_type) noexcept
     case MoistureType::WDM6:
     case MoistureType::Morrison_NoIce:
     case MoistureType::Morrison:
+    case MoistureType::SuperDroplets:
         return true;
     case MoistureType::SBM:
-    case MoistureType::SuperDroplets:
         return false;
     }
     return false;
@@ -786,7 +787,7 @@ inline Config parse_config (const amrex::Real* problo,
     }
 
     if (!supports_moisture_model(selected_moisture_model)) {
-        amrex::Error("Cloud Chamber: selected moisture model is unsupported; use an Eulerian model from the supported moisture allowlist");
+        amrex::Error("Cloud Chamber: selected moisture model is unsupported; use a model from the supported moisture allowlist");
     }
     config.has_moisture = selected_moisture_model != MoistureType::None;
     if (!config.has_moisture && pp_erf.contains("moisture_model")) {

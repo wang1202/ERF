@@ -24,8 +24,9 @@ Overview
 The Cloud Chamber problem is a single-level, Cartesian, fixed-density
 anelastic configuration for studying buoyancy-driven thermal and moist flow in
 a closed rectangular chamber. It supports dry calculations, saturation
-adjustment (``SatAdj``), and ERF's existing Eulerian bulk microphysics
-schemes, together with prescribed-temperature walls and resolved or modeled
+adjustment (``SatAdj``), ERF's existing Eulerian bulk microphysics
+schemes, and the Lagrangian ``SuperDroplets`` model, together with
+prescribed-temperature walls and resolved or modeled
 momentum, heat, and water-vapor transfer.
 
 This configuration is intended for code-path verification, numerical and
@@ -70,6 +71,16 @@ Choose the thermodynamic mode
    * - Noncondensing moisture transport
      - ``MoistNoCondensation``
      - An ERF moisture-transport shell with no condensation source.
+   * - Lagrangian super-droplets
+     - ``SuperDroplets``
+     - Vapor is an Eulerian state exchanged with the walls as above.
+       Droplets come only from the ``super_droplets_moisture``
+       initialization and injection inputs; without them nothing
+       condenses. A super-droplet that reaches a wall is deactivated (and
+       removed unless recycled or kept for inactive-particle output); the
+       walls have no deposition law. The
+       conserved-scalar budget does not support this model. Requires a
+       build with particles enabled.
 
 For dry mode, omit ``erf.moisture_model`` rather than explicitly setting it
 to ``None``. An explicit ``None`` is rejected with a diagnostic naming this
@@ -1252,8 +1263,9 @@ Supported configurations
 
 The diagnostic supports the single-level Cartesian anelastic chamber with
 ``prob.thermodynamic_initialization = physical_temperature_rh``, the
-``RK2`` or ``MidPoint`` integrator, dry mode or ``SatAdj``, and no implicit
-vertical diffusion.  Any other configuration stops at startup with a message.
+``RK2`` or ``MidPoint`` integrator, dry mode, ``SatAdj`` or
+``SuperDroplets``, and no implicit vertical diffusion.  Any other
+configuration stops at startup with a message.
 Restarting with the diagnostic enabled is rejected, because the unfinished
 window is not checkpointed.  A fresh run also refuses to start if
 ``wallflux_lev0.txt`` already exists in the run directory; it never
@@ -1300,6 +1312,8 @@ contains no such substitutions.
      - ``Tests/test_files/CloudChamber_WallFlux_Dry/CloudChamber_WallFlux_Dry.i``
    * - SatAdj interval-mean wall fluxes with distinct wet and dry walls
      - ``Tests/test_files/CloudChamber_WallFlux_SatAdj/CloudChamber_WallFlux_SatAdj.i``
+   * - SuperDroplets without injection, interval-mean wall fluxes
+     - ``Tests/test_files/CloudChamber_WallFlux_SDM/CloudChamber_WallFlux_SDM.i``
    * - Physical-temperature bulk-microphysics startup and finite-state smoke input
      - ``Tests/test_files/CloudChamber_Bulk/CloudChamber_Bulk.i``
    * - Quick WDM6 physical chamber restart-parity smoke input

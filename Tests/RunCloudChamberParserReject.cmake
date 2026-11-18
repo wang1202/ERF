@@ -37,7 +37,7 @@ function(run_parser model case_dir log_path)
     set(${model}_result "${result}" PARENT_SCOPE)
 endfunction()
 
-foreach(model IN ITEMS Kessler_NoRain kEsSlEr_NoRaIn MoIsTnOcOnDeNsAtIoN dry)
+foreach(model IN ITEMS Kessler_NoRain kEsSlEr_NoRaIn MoIsTnOcOnDeNsAtIoN SuperDroplets dry)
     run_parser("${model}" "${WORKING_DIRECTORY}/positive"
                "${WORKING_DIRECTORY}/positive.log")
     if(NOT "${${model}_result}" STREQUAL "0")

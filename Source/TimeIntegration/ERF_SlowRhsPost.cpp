@@ -656,19 +656,22 @@ void erf_slow_rhs_post (int level, int finest_level,
                         // Only the physical chamber needs separate qv/qc calls:
                         // its wall correction must be applied to distinct flux
                         // components.  Generic moisture models retain the
-                        // established multi-component diffusion call.
+                        // established multi-component diffusion call.  The
+                        // per-component calls cover only this host-transported
+                        // run: a model with particle-owned components between
+                        // runs (SuperDroplets with appended species) would
+                        // otherwise diffuse every component once per run.
                         const bool componentwise_moisture =
                             use_physical_chamber_wall_flux && ivar == RhoQ1_comp;
-                        const int n_diff_calls = componentwise_moisture ? n_qstate_total : 1;
+                        const int n_diff_calls = componentwise_moisture ? num_comp : 1;
                         for (int qstate = 0; qstate < n_diff_calls; ++qstate) {
-                            const int state_comp = componentwise_moisture ?
-                                RhoQ1_comp + qstate : start_comp;
+                            const int state_comp = start_comp + (componentwise_moisture ? qstate : 0);
                             const int diffusion_start = state_comp;
                             const int diffusion_num = componentwise_moisture ? 1 : num_comp;
                             erf_sbm::require_host_write_range_allowed(
                                 sbm_active, diffusion_start, diffusion_num,
                                 erf_sbm::HostWritePath::Diffusion);
-                            const int flux_comp = componentwise_moisture ? qstate : 0;
+                            const int flux_comp = componentwise_moisture ? state_comp - RhoQ1_comp : 0;
                             AMREX_ALWAYS_ASSERT(state_comp >= 0 && state_comp < nvars);
                             AMREX_ALWAYS_ASSERT(flux_comp < dflux_x->nComp());
                             AMREX_ALWAYS_ASSERT(flux_comp < dflux_y->nComp());

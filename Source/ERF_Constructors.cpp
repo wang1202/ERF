@@ -684,9 +684,13 @@ ERF::ERF_shared ()
                     Error(prefix + "implicit vertical diffusion is unsupported (erf.vert_implicit = false)");
                 }
             }
+            // The vapor channel reads the retained qv wall flux, flux
+            // component 0, which SatAdj and SuperDroplets both carry first.
             if (solverChoice.moisture_type != MoistureType::None &&
-                solverChoice.moisture_type != MoistureType::SatAdj) {
-                Error(prefix + "supported only in dry mode or with erf.moisture_model = SatAdj");
+                solverChoice.moisture_type != MoistureType::SatAdj &&
+                solverChoice.moisture_type != MoistureType::SuperDroplets) {
+                Error(prefix + "supported only in dry mode or with erf.moisture_model = "
+                      "SatAdj or SuperDroplets");
             }
             if (!restart_chkfile.empty()) {
                 Error(prefix + "restart is unsupported: the unfinished averaging window is not "
@@ -697,7 +701,7 @@ ERF::ERF_shared ()
                 erf_wallflux_diag::StageWeighting::MidPoint;
             cloud_chamber_wallflux = std::make_unique<CloudChamberWallFluxDiag>(
                 wallflux_interval, weighting,
-                solverChoice.moisture_type == MoistureType::SatAdj, geom[0]);
+                solverChoice.moisture_type != MoistureType::None, geom[0]);
             cloud_chamber_wallflux->require_fresh_output();
         }
     }
