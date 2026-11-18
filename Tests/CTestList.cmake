@@ -1208,6 +1208,31 @@ function(add_test_cloud_chamber_budget TEST_NAME MODE SOURCE_NAME)
         ATTACHED_FILES_ON_FAIL "${CURRENT_TEST_BINARY_DIR}/simulation.log;${CURRENT_TEST_BINARY_DIR}/checker.log;${CURRENT_TEST_BINARY_DIR}/cloud_chamber_budget.dat")
 endfunction(add_test_cloud_chamber_budget)
 
+# Interval-mean wall fluxes (wallflux_lev0.txt, erf.wallflux_diagnostics); the
+# modes are described in Tests/RunCloudChamberWallFlux.cmake.
+function(add_test_cloud_chamber_wallflux TEST_NAME MODE SOURCE_NAME)
+    set(TEST_FILES_DIR "${SOURCE_NAME}")
+    setup_test()
+    resolve_test_exe("" "erf_exec" TEST_EXE)
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+        "-DMPIEXEC=${MPIEXEC_EXECUTABLE}"
+        "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+        "-DMPIEXEC_PREFLAGS=${MPIEXEC_PREFLAGS}"
+        "-DNRANKS=${NP}"
+        "-DTEST_EXE=${TEST_EXE}"
+        "-DINPUT=${CURRENT_TEST_BINARY_DIR}/${SOURCE_NAME}.i"
+        "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+        "-DCHECKER=${CLOUD_CHAMBER_WALLFLUX_CHECKER}"
+        "-DMODE=${MODE}"
+        -P ${PROJECT_SOURCE_DIR}/Tests/RunCloudChamberWallFlux.cmake)
+    set_tests_properties(${TEST_NAME}
+        PROPERTIES
+        TIMEOUT 600
+        PROCESSORS ${NP}
+        WORKING_DIRECTORY "${CURRENT_TEST_BINARY_DIR}/"
+        LABELS "regression;cloud-chamber;wallflux")
+endfunction(add_test_cloud_chamber_wallflux)
+
 # At-rest test: a hydrostatic atmosphere over terrain must stay at rest with lateral
 # outflow boundaries, where the mesh is extrapolated past the domain and the base state in
 # the ghost cells has to be built at the height the mesh puts them at rather than copied.
@@ -1675,6 +1700,9 @@ add_test_cloud_chamber_budget(CloudChamber_SatAdj_WetBudget wet_budget CloudCham
 add_test_cloud_chamber_budget(CloudChamber_SatAdj_BulkMixedWet bulk_wet CloudChamber_SatAdj_BulkMixedWet)
 add_test_cloud_chamber_budget(CloudChamber_SatAdj_NeutralWetBudget neutral_wet CloudChamber_SatAdj_NeutralWet)
 add_test_cloud_chamber_budget(CloudChamber_SatAdj_MOSTWetBudget most_wet CloudChamber_SatAdj_MOSTWetBudget)
+add_test_cloud_chamber_wallflux(CloudChamber_WallFlux_Dry dry CloudChamber_WallFlux_Dry)
+add_test_cloud_chamber_wallflux(CloudChamber_WallFlux_SatAdj satadj CloudChamber_WallFlux_SatAdj)
+add_test_cloud_chamber_wallflux(CloudChamber_WallFlux_Reject reject CloudChamber_WallFlux_Dry)
 add_test_cloud_chamber_most(CloudChamber_SatAdj_MOSTMixedWalls)
 if(ERF_ENABLE_OPENMP)
 add_test_cloud_chamber_openmp(CloudChamber_SatAdj_OpenMP)

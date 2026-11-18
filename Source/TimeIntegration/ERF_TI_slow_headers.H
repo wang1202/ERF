@@ -24,6 +24,11 @@
  */
 class CloudChamberBudget;
 
+/**
+ * @brief Interval-mean Cloud Chamber wall-flux diagnostic (wallflux_lev0.txt).
+ */
+class CloudChamberWallFluxDiag;
+
 namespace erf_auxiliary { class AuxiliaryInertTracer; }
 namespace erf_sbm {
 class SBMStateManager;
@@ -184,6 +189,7 @@ void erf_slow_rhs_pre (int level, int finest_level, int nrk,
                       const amrex::MultiFab* cloud_chamber_base_state,
                       const erf_cloud_chamber::Config* cloud_chamber_config,
                       CloudChamberBudget* cloud_budget,
+                      CloudChamberWallFluxDiag* wallflux_diag,
                       const amrex::MultiFab* ib_wall_face13 = nullptr,
                       const amrex::MultiFab* ib_wall_face23 = nullptr,
                       const amrex::MultiFab* ib_wall_face33 = nullptr,
@@ -254,6 +260,7 @@ void erf_slow_rhs_post (int level, int finest_level, int nrk,
                        const amrex::MultiFab* cloud_chamber_base_state,
                        const erf_cloud_chamber::Config* cloud_chamber_config,
                        CloudChamberBudget* cloud_budget,
+                       CloudChamberWallFluxDiag* wallflux_diag,
                        erf_auxiliary::AuxiliaryInertTracer* auxiliary_inert_tracer,
                        erf_sbm::SBMStateManager* sbm_state_manager,
                        erf_sbm::SBMTransport* sbm_transport,

@@ -648,6 +648,59 @@ ERF::ERF_shared ()
             cloud_chamber_budget = std::make_unique<CloudChamberBudget>(budget_interval);
         }
     }
+    {
+        // Interval-mean wall fluxes (wallflux_lev0.txt).  Output only, and
+        // independent of the budget above: it may run with
+        // erf.cloud_chamber_budget_interval = 0.
+        bool wallflux_diagnostics = false;
+        pp_erf.queryAdd("wallflux_diagnostics", wallflux_diagnostics);
+        if (wallflux_diagnostics) {
+            int wallflux_interval = 100;
+            pp_erf.queryAdd("wallflux_output_interval", wallflux_interval);
+            const std::string prefix = "erf.wallflux_diagnostics: ";
+            if (wallflux_interval <= 0) {
+                Error(prefix + "erf.wallflux_output_interval must be a positive number of steps");
+            }
+            if (!cloud_chamber_config.active || !cloud_chamber_config.physical_initialization) {
+                Error(prefix + "supported only for the Cloud Chamber with "
+                      "prob.thermodynamic_initialization = physical_temperature_rh");
+            }
+            if (max_level != 0) {
+                Error(prefix + "supported only on a single level (amr.max_level = 0)");
+            }
+            if (SolverChoice::mesh_type != MeshType::ConstantDz ||
+                solverChoice.terrain_type != TerrainType::None) {
+                Error(prefix + "supported only on a Cartesian ConstantDz mesh without terrain or EB");
+            }
+            if (solverChoice.compressibility_type[0] != CompressibilityType::Anelastic) {
+                Error(prefix + "supported only with erf.compressibility_type = Anelastic");
+            }
+            const TimesteppingType wallflux_ts = solverChoice.timestepping_type[0];
+            if (wallflux_ts != TimesteppingType::RK2 && wallflux_ts != TimesteppingType::MidPoint) {
+                Error(prefix + "supported only with the anelastic RK2 or MidPoint integrators");
+            }
+            for (const Real fac : solverChoice.vert_implicit_fac[0]) {
+                if (fac > zero) {
+                    Error(prefix + "implicit vertical diffusion is unsupported (erf.vert_implicit = false)");
+                }
+            }
+            if (solverChoice.moisture_type != MoistureType::None &&
+                solverChoice.moisture_type != MoistureType::SatAdj) {
+                Error(prefix + "supported only in dry mode or with erf.moisture_model = SatAdj");
+            }
+            if (!restart_chkfile.empty()) {
+                Error(prefix + "restart is unsupported: the unfinished averaging window is not "
+                      "checkpointed. Disable the diagnostic for restarted runs.");
+            }
+            const auto weighting = (wallflux_ts == TimesteppingType::RK2) ?
+                erf_wallflux_diag::StageWeighting::Trapezoidal :
+                erf_wallflux_diag::StageWeighting::MidPoint;
+            cloud_chamber_wallflux = std::make_unique<CloudChamberWallFluxDiag>(
+                wallflux_interval, weighting,
+                solverChoice.moisture_type == MoistureType::SatAdj, geom[0]);
+            cloud_chamber_wallflux->require_fresh_output();
+        }
+    }
 
     // Geometry on all levels has been defined already.
 

@@ -18,6 +18,7 @@
 #include "Diffusion/ERF_CloudChamberWallFlux.H"
 #include "Diffusion/ERF_CloudChamberWallStress.H"
 #include "Prob/ERF_CloudChamberBudget.H"
+#include "Diagnostics/ERF_CloudChamberWallFluxDiag.H"
 
 using namespace amrex;
 
@@ -130,6 +131,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
                        const MultiFab* cloud_chamber_base_state,
                        const erf_cloud_chamber::Config* cloud_chamber_config,
                        CloudChamberBudget* cloud_budget,
+                       CloudChamberWallFluxDiag* wallflux_diag,
                        const MultiFab* ib_wall_face13,
                        const MultiFab* ib_wall_face23,
                        const MultiFab* ib_wall_face33,
@@ -403,6 +405,19 @@ void erf_slow_rhs_pre (int level, int finest_level,
 
     // We need extra values of Omega in the vertical if grids are decomposed vertically
     Omega.FillBoundary(geom.periodicity());
+
+    // Interval-mean wall fluxes (erf.wallflux_diagnostics) capture every stage,
+    // whether or not the budget is enabled.  The stress sum is filled tile by
+    // tile below, between the stress finalization and its use; it is built
+    // here, outside the OpenMP region, so that its partial sums are per thread.
+    const bool wallflux_capture = (wallflux_diag != nullptr) && (level == 0) && l_use_diff;
+    const bool wallflux_weighted = wallflux_capture && (wallflux_diag->stage_weight(nrk) > zero);
+    std::unique_ptr<erf_wallflux_diag::FaceReducer> wallflux_stress;
+    if (wallflux_weighted) {
+        AMREX_ALWAYS_ASSERT(!l_use_eb && use_physical_chamber_wall_flux);
+        wallflux_stress = std::make_unique<erf_wallflux_diag::FaceReducer>();
+    }
+    const GpuArray<Real, AMREX_SPACEDIM> wallflux_dx = geom.CellSizeArray();
 
 #ifdef _OPENMP
 #pragma omp parallel if (Gpu::notInLaunchRegion())
@@ -810,6 +825,14 @@ void erf_slow_rhs_pre (int level, int finest_level,
                     solverChoice.rdOcp, cloud_chamber_config->has_moisture);
             }
 
+            // The cross stresses are final here (resolved closure plus any
+            // chamber traction override) and are next read, unchanged, by
+            // DiffusionSrcForMom: record this tile's wall-stress magnitudes.
+            if (wallflux_stress) {
+                erf_wallflux_diag::add_wall_stress(
+                    *wallflux_stress, bx, domain, tau12, tau13, tau23, wallflux_dx);
+            }
+
             // Note: tau** were calculated with calls to
             // ComputeStress[Cons|Var]Visc_[N|S|T] in which ConsVisc ("constant
             // viscosity") means that there is no contribution from a
@@ -1019,5 +1042,20 @@ void erf_slow_rhs_pre (int level, int finest_level,
         cloud_budget->capture_stage(CloudChamberBudget::RhoTheta, nrk,
                                     static_cast<Real>(dt), *dflux_x, *dflux_y,
                                     *dflux_z, geom, 0, use_trapezoidal);
+    }
+    // Same retained rho*theta wall fluxes as the budget above (after the
+    // chamber wall replacement), converted locally to W/m2.  A stage the
+    // integrator does not apply (MidPoint stage 0) is recorded with zero weight.
+    if (wallflux_capture) {
+        erf_wallflux_diag::FaceValues stress{};
+        erf_wallflux_diag::FaceValues heat{};
+        if (wallflux_weighted) {
+            stress = wallflux_stress->value();
+            heat = erf_wallflux_diag::scalar_face_integrals(
+                S_data[IntVars::cons], *dflux_x, *dflux_y, *dflux_z, 0,
+                cloud_chamber_base_state, solverChoice.rdOcp, geom);
+        }
+        wallflux_diag->capture_stage(erf_wallflux_diag::Stress, nrk, stress);
+        wallflux_diag->capture_stage(erf_wallflux_diag::Heat, nrk, heat);
     }
 }

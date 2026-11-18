@@ -603,6 +603,7 @@ function(build_erf_lib erf_lib_name)
        ${SRC_DIR}/IO/ERF_StationSampler.cpp
        ${SRC_DIR}/Diagnostics/ERF_NearSurfaceDiagnostics.cpp
        ${SRC_DIR}/Diagnostics/ERF_SeaLevelPressure.cpp
+       ${SRC_DIR}/Diagnostics/ERF_CloudChamberWallFluxDiag.cpp
        ${SRC_DIR}/IO/ERF_WriteSubvolume.cpp
        ${SRC_DIR}/IO/ERF_WriteJobInfo.cpp
        ${SRC_DIR}/IO/ERF_BuildDescription.cpp

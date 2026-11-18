@@ -149,6 +149,16 @@ if(ERF_ENABLE_TESTS)
   target_compile_features(erf_cloud_chamber_parser_check PRIVATE cxx_std_17)
   set(CLOUD_CHAMBER_PARSER_CHECKER "$<TARGET_FILE:erf_cloud_chamber_parser_check>")
 
+  # Motivation: wallflux_lev0.txt must keep the legacy layout, match the native
+  # budget's vapor and heat face integrals, and not depend on the decomposition.
+  add_executable(erf_cloud_chamber_wallflux_check
+    ${CMAKE_CURRENT_SOURCE_DIR}/CloudChamberWallFluxCheck.cpp)
+  target_link_libraries(erf_cloud_chamber_wallflux_check PRIVATE AMReX::amrex)
+  target_include_directories(erf_cloud_chamber_wallflux_check PRIVATE
+    $<TARGET_PROPERTY:erf_srclib,INTERFACE_INCLUDE_DIRECTORIES>)
+  target_compile_features(erf_cloud_chamber_wallflux_check PRIVATE cxx_std_17)
+  set(CLOUD_CHAMBER_WALLFLUX_CHECKER "$<TARGET_FILE:erf_cloud_chamber_wallflux_check>")
+
   # Motivation: the TwoStream column sweep must keep the surface at k = 0 and
   # cool to space from the top layer; this checker reads qsrc_sw / qsrc_lw
   # from a plotfile and verifies that vertical structure without gold files.
@@ -184,6 +194,7 @@ if(ERF_ENABLE_TESTS)
         erf_anelastic_wall_diffusion_check
         erf_cloud_chamber_check
         erf_cloud_chamber_parser_check
+        erf_cloud_chamber_wallflux_check
         erf_two_stream_radiation_check
         erf_cloud_chamber_wall_dt_guard_check
         erf_immersed_average_down_check

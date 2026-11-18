@@ -753,6 +753,14 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
         report_cloud_chamber_budget();
     }
 
+    // Interval-mean wall fluxes: the accepted coarse step commits its pending
+    // stage integrals with its actual duration (once), and a completed step
+    // divisible by erf.wallflux_output_interval closes and writes the window.
+    if (cloud_chamber_wallflux) {
+        cloud_chamber_wallflux->commit_step(static_cast<Real>(dt_lev0));
+        cloud_chamber_wallflux->report(nstep + 1, time);
+    }
+
 #ifdef ERF_USE_PARTICLES
     particleData.Redistribute(z_phys_nd);
     if (solverChoice.diffChoice.n_qstate_nonmoist > 0) {

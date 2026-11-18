@@ -7,6 +7,7 @@
 #include "Diffusion/ERF_CloudChamberWallFlux.H"
 #include "Diffusion/ERF_TurbKESources.H"
 #include "Prob/ERF_CloudChamberBudget.H"
+#include "Diagnostics/ERF_CloudChamberWallFluxDiag.H"
 #include "ERF_SBMOwnership.H"
 #include "ERF_SBMStageOwnership.H"
 #include "ERF_SBMStateManager.H"
@@ -139,6 +140,7 @@ void erf_slow_rhs_post (int level, int finest_level,
                         const MultiFab* cloud_chamber_base_state,
                         const erf_cloud_chamber::Config* cloud_chamber_config,
                         CloudChamberBudget* cloud_budget,
+                        CloudChamberWallFluxDiag* wallflux_diag,
                         erf_auxiliary::AuxiliaryInertTracer* auxiliary_inert_tracer,
                         erf_sbm::SBMStateManager* sbm_state_manager,
                         erf_sbm::SBMTransport* sbm_transport,
@@ -1022,5 +1024,17 @@ void erf_slow_rhs_post (int level, int finest_level,
                 nrk, static_cast<Real>(dt_d), qflux_x, qflux_y, qflux_z, geom,
                 0, use_trapezoidal);
         }
+    }
+    // The retained conservative vapor flux (component 0: qv), after the
+    // chamber wall replacement, as applied; it is already rho*qv per area and
+    // time.  Captured whether or not the budget is enabled.
+    if (wallflux_diag != nullptr && level == 0 && l_use_diff && n_qstate > 0) {
+        erf_wallflux_diag::FaceValues vapor{};
+        if (wallflux_diag->stage_weight(nrk) > zero) {
+            vapor = erf_wallflux_diag::scalar_face_integrals(
+                S_data[IntVars::cons], *dflux_x, *dflux_y, *dflux_z, 0,
+                nullptr, zero, geom);
+        }
+        wallflux_diag->capture_stage(erf_wallflux_diag::Vapor, nrk, vapor);
     }
 }

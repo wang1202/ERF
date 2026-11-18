@@ -207,6 +207,10 @@ target_sources(${erf_exe_name}
     ${CMAKE_CURRENT_SOURCE_DIR}/Diffusion/ERF_GTestSmag2DLimiters.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Diagnostics/ERF_GTestSurfaceFluxDiagnostics.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Diagnostics/ERF_GTestSeaLevelPressure.cpp
+    # Motivation: wallflux_lev0.txt rows must be interval means weighted by the actual
+    # step durations and the integrator's stage weights, with the legacy column layout,
+    # complete windows only, and per-patch stress magnitudes.
+    ${CMAKE_CURRENT_SOURCE_DIR}/Diagnostics/ERF_GTestCloudChamberWallFluxDiag.cpp
     # Motivation: a Noah-MP 2 m tile with zero weight must not reject the bundle, and a
     # station must leave -999 neighbours out of its interpolation rather than average them.
     ${CMAKE_CURRENT_SOURCE_DIR}/Diagnostics/ERF_GTestSurfaceMissingValues.cpp

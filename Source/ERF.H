@@ -32,6 +32,7 @@
 #include <ERF_EB.H>
 #include "Prob/ERF_CloudChamberBudget.H"
 #include "Prob/ERF_CloudChamber.H"
+#include "Diagnostics/ERF_CloudChamberWallFluxDiag.H"
 
 #ifdef ERF_USE_FFT
 #include <AMReX_FFT_Poisson.H>
@@ -1738,6 +1739,10 @@ private:
     std::unique_ptr<erf_sbm::SBMTransport> sbm_transport;
     std::unique_ptr<erf_auxiliary::AuxiliaryInertTracer> auxiliary_inert_tracer;
     std::unique_ptr<CloudChamberBudget> cloud_chamber_budget;
+    // Level-0 interval-mean wall fluxes (wallflux_lev0.txt): pending stage
+    // integrals, window integrals, elapsed accepted time and per-stage
+    // capture validity.  Allocated only with erf.wallflux_diagnostics = true.
+    std::unique_ptr<CloudChamberWallFluxDiag> cloud_chamber_wallflux;
     erf_cloud_chamber::Config cloud_chamber_config;
     amrex::Vector<amrex::Vector<amrex::MultiFab*>> qmoist; // (lev,ncomp) rain_accum, snow_accum, graupel_accum, precip_accum
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> precip; // SLM precipitation-rate scratch

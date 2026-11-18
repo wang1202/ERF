@@ -3892,7 +3892,9 @@ from a checkpoint while re-initializing the rest of the state (see
 ``erf.buildings_file_name`` supplies the building geometry
 used by the immersed-forcing path (see :ref:`Forcings`), and
 ``erf.cloud_chamber_budget_interval`` controls the budget output of the cloud
-chamber case (see :ref:`CloudChamber`).
+chamber case (see :ref:`CloudChamber`), and ``erf.wallflux_diagnostics`` with
+``erf.wallflux_output_interval`` controls its interval-mean wall-flux output
+``wallflux_lev0.txt`` (see :ref:`CloudChamberWallFlux`).
 
 In addition, there is a run-time option to project the initial velocity field to make it divergence-free.
 

@@ -6,6 +6,9 @@
 .. index:: neutral_roughness_log
 .. index:: Monin-Obukhov similarity theory
 .. index:: cloud_chamber_budget_interval
+.. index:: wallflux_diagnostics
+.. index:: wallflux_output_interval
+.. index:: wallflux_lev0.txt
 .. index:: qv
 .. index:: qc
 .. index:: rhoTheta
@@ -1131,6 +1134,131 @@ A model's native precipitation-accumulation field is not automatically a
 mass-per-area diagnostic; use the scheme's accumulation-unit conversion when
 constructing a kg m\ :sup:`-2` column-water budget.
 
+.. _CloudChamberWallFlux:
+
+Interval-mean wall fluxes (``wallflux_lev0.txt``)
+-------------------------------------------------
+
+Set
+
+.. code-block:: none
+
+   erf.wallflux_diagnostics     = true
+   erf.wallflux_output_interval = <positive number of steps>   # default 100
+
+to write ``wallflux_lev0.txt`` in the run directory.  The diagnostic is
+output only: it reads the stresses and face fluxes the right-hand side applies
+and never changes the simulated state.  It is independent of the budget above
+and works with ``erf.cloud_chamber_budget_interval = 0``.
+
+File layout
+~~~~~~~~~~~
+
+The file has one comment header beginning ``# time[s]`` followed, for the
+walls ``xlo xhi ylo yhi zlo zhi`` in that order, by the columns
+``FACE_tau[Pa] FACE_H[W/m2] FACE_E[kg/m2/s]``.  Every row holds 19
+whitespace-separated numbers in scientific notation with eight decimal places.
+This is the column layout of the earlier ``ERF_WriteWallFluxes.cpp`` writer
+(``wang1202/ERF_01272026``, branch ``CloudChamber_WL_SDMOpt``), so a reader of
+those files, for example ``numpy.loadtxt("wallflux_lev0.txt")``, loads these
+rows unchanged.  Two things differ in meaning:
+
+* ``time`` is the **end** of the averaging window, and
+* every value is the **mean over that window**, not a snapshot.
+
+For each wall :math:`f` with area :math:`A_f`, wall patches :math:`p` (the
+faces of the wall-adjacent cells) with areas :math:`A_p`, accepted steps
+:math:`n` of the window :math:`W` with their actual durations
+:math:`\Delta t_n`, and the RK stages :math:`s` of each step,
+
+.. math::
+
+   \overline{X}_f = \frac{\sum_{n\in W} \Delta t_n \sum_s w_s \sum_{p\in f} A_p X_{p,s}}
+                         {A_f \sum_{n\in W} \Delta t_n},
+
+where the stage weights :math:`w_s` are those the anelastic integrator applies:
+:math:`(1/2, 1/2)` for ``RK2`` and :math:`(0, 1)` for ``MidPoint``.  The
+quantities :math:`X` are
+
+``tau``
+   the magnitude :math:`|\boldsymbol{\tau}_t|` of the applied tangential wall
+   stress (Pa).  Both tangential components are reconstructed at the patch
+   center and their magnitude is taken per patch, before any spatial or
+   temporal average, so opposing tractions on one wall do not cancel.  The
+   stresses are the retained cross stresses after the resolved closure and any
+   Cloud Chamber traction override, at every stage, including resolved no-slip
+   walls.  A wall-edge node shared with a perpendicular wall is applied by no
+   momentum equation (both normal velocities are fixed there), so it is left
+   out; a patch next to such an edge takes that component from its single
+   interior node.  ``tau`` is nonnegative.
+
+``H``
+   the applied sensible heat flux :math:`c_{p,d}\,\Pi\,F_{\rho\theta}` (W
+   m\ :sup:`-2`), with :math:`F_{\rho\theta}` the retained :math:`\rho\theta`
+   wall face flux and :math:`\Pi=(p_\mathrm{hse}/p_0)^{R_d/c_p}` evaluated per
+   patch at the hydrostatic pressure of the wall-adjacent cell, the pressure
+   the wall thermodynamics uses.
+
+``E``
+   the applied conservative water-vapor flux :math:`F_{\rho q_v}` (kg
+   m\ :sup:`-2` s\ :sup:`-1`), read as retained; it already includes the
+   density.  Dry walls and dry runs report exactly zero.
+
+``H`` and ``E`` keep ERF's coordinate-flux sign on every wall: positive toward
+:math:`+x`, :math:`+y` or :math:`+z` on the low **and** the high wall.  Heat
+entering through ``zlo`` and heat leaving through ``zhi`` are both positive.
+
+For matching cadences, ``E`` times :math:`A_f` and the window duration equals
+the ``water_vapor`` face entry of ``cloud_chamber_budget.dat`` for the same
+window.  On ``zlo`` and ``zhi``, where :math:`\Pi` is uniform, ``H`` equals
+:math:`c_{p,d}\Pi` times the budget's ``rhoTheta`` face entry divided by
+:math:`A_f` and the duration; on the sidewalls :math:`\Pi` varies with height.
+
+Windows and rows
+~~~~~~~~~~~~~~~~
+
+A row is written when the number of completed steps is a multiple of
+``erf.wallflux_output_interval``; the window then restarts.  Only complete
+windows are written: there is no time-zero row, and a shorter trailing window
+at the end of a run is not written.  The duration of a row's window is its
+time minus the previous row's time (the start time, 0, for the first row).
+
+To form a mean over a longer period, weight each row by its own window
+duration,
+
+.. math::
+
+   \overline{X}_{[t_a,t_b]} = \frac{\sum_r \Delta t_r\,\overline{X}_r}{\sum_r \Delta t_r}.
+
+Do not treat rows as snapshots at their times, and do not integrate the row
+values with trapezoidal interpolation between row times: that mixes
+neighboring windows and misweights the first and last one.  For example,
+
+.. code-block:: python
+
+   import numpy as np
+   rows = np.loadtxt("wallflux_lev0.txt")
+   t_end = rows[:, 0]
+   edges = np.concatenate(([0.0], t_end))
+   duration = np.diff(edges)
+   faces = ["xlo", "xhi", "ylo", "yhi", "zlo", "zhi"]
+   zlo_H = rows[:, 1 + 3 * faces.index("zlo") + 1]
+   mean_zlo_H = np.sum(duration * zlo_H) / np.sum(duration)
+   # plot as a step over each window, not as points joined by lines:
+   # matplotlib.pyplot.stairs(zlo_H, edges)
+
+Supported configurations
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The diagnostic supports the single-level Cartesian anelastic chamber with
+``prob.thermodynamic_initialization = physical_temperature_rh``, the
+``RK2`` or ``MidPoint`` integrator, dry mode or ``SatAdj``, and no implicit
+vertical diffusion.  Any other configuration stops at startup with a message.
+Restarting with the diagnostic enabled is rejected, because the unfinished
+window is not checkpointed.  A fresh run also refuses to start if
+``wallflux_lev0.txt`` already exists in the run directory; it never
+overwrites or appends to an existing file.
+
 Tracked regression inputs
 -------------------------
 
@@ -1168,6 +1296,10 @@ contains no such substitutions.
      - ``Tests/test_files/CloudChamber_SatAdj_MOSTWetBudget/CloudChamber_SatAdj_MOSTWetBudget.i``
    * - Mixed neutral sidewalls and MOST horizontal walls
      - ``Tests/test_files/CloudChamber_SatAdj_MOSTMixedWalls/CloudChamber_SatAdj_MOSTMixedWalls.i``
+   * - Dry interval-mean wall fluxes, resolved and bulk momentum
+     - ``Tests/test_files/CloudChamber_WallFlux_Dry/CloudChamber_WallFlux_Dry.i``
+   * - SatAdj interval-mean wall fluxes with distinct wet and dry walls
+     - ``Tests/test_files/CloudChamber_WallFlux_SatAdj/CloudChamber_WallFlux_SatAdj.i``
    * - Physical-temperature bulk-microphysics startup and finite-state smoke input
      - ``Tests/test_files/CloudChamber_Bulk/CloudChamber_Bulk.i``
    * - Quick WDM6 physical chamber restart-parity smoke input

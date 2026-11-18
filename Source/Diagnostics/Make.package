@@ -1,2 +1,3 @@
 CEXE_sources += ERF_NearSurfaceDiagnostics.cpp
 CEXE_sources += ERF_SeaLevelPressure.cpp
+CEXE_sources += ERF_CloudChamberWallFluxDiag.cpp

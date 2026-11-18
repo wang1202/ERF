@@ -367,6 +367,7 @@
                          fr_as_crse, fr_as_fine, &base_to_use,
                          cloud_chamber_config.active ? &cloud_chamber_config : nullptr,
                          cloud_chamber_budget.get(),
+                         cloud_chamber_wallflux.get(),
                          ib_wall_face13[level].get(), ib_wall_face23[level].get(),
                          ib_wall_face33[level].get(), ib_wall_hfx[level].get());
 
