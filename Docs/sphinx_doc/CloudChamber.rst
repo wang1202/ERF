@@ -450,9 +450,9 @@ The three configurable channels are selected independently:
 
 .. code-block:: none
 
-   <face>.momentum_transfer_model = resolved_noslip|bulk_aero|neutral_roughness_log|law_of_wall_momentum
-   <face>.heat_transfer_model = resolved_molecular|bulk_aero|neutral_roughness_log
-   <face>.vapor_transfer_model = resolved_molecular|bulk_aero|neutral_roughness_log
+   <face>.momentum_transfer_model = resolved_noslip|bulk_aero|bulk_aero_plus_molecular|neutral_roughness_log|law_of_wall_momentum
+   <face>.heat_transfer_model = resolved_molecular|bulk_aero|bulk_aero_plus_molecular|neutral_roughness_log
+   <face>.vapor_transfer_model = resolved_molecular|bulk_aero|bulk_aero_plus_molecular|neutral_roughness_log
 
 ``law_of_wall_momentum`` is a compatibility alias for
 ``neutral_roughness_log``; it does not select a separate formulation.
@@ -474,9 +474,13 @@ The three configurable channels are selected independently:
      - ``coefficient_source = fixed`` plus the corresponding ``C_D``, ``C_H``, or ``C_E``
      - user-supplied dimensionless transfer coefficient multiplied by actual tangential speed
    * - ``neutral_roughness_log``
+       - momentum, heat, vapor
+       - ``z0_m`` and the required scalar roughness lengths
+       - neutral aerodynamic log-resistance closure
+    * - ``bulk_aero_plus_molecular``
      - momentum, heat, vapor
-     - ``z0_m`` and the required scalar roughness lengths
-     - neutral aerodynamic log-resistance closure
+       - same fixed bulk coefficients, plus the configured molecular transport coefficients
+       - sums molecular and bulk exchange at the wall; excludes SGS diffusivity
    * - MOST-provided ``bulk_aero``
      - momentum, heat, vapor
      - ``coefficient_source = most`` plus the required ``z0_*`` values
@@ -812,6 +816,26 @@ The physical transfer uses the actual :math:`U_t`; there is no hidden minimum
 speed, gustiness velocity, or free-convection augmentation.  Fixed bulk
 transfer is therefore a forced/shear-dependent closure, not a complete
 natural- or mixed-convection wall correlation.
+
+Molecular plus fixed bulk transfer
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Select ``bulk_aero_plus_molecular`` for each channel that should use the sum.
+Let :math:`d=\Delta n/2` be the distance to the first cell center. The
+combined closure replaces :math:`C_D U_t`, :math:`C_H U_t`, and :math:`C_E U_t`
+in the fixed-bulk equations above by :math:`C_D U_t + \nu/d`,
+:math:`C_H U_t + \alpha_T/d`, and :math:`C_E U_t + \alpha_C/d`, respectively.
+Here :math:`\nu` is ``erf.dynamic_viscosity / erf.rho0_trans`` for
+``ConstantAlpha``. This is a half-cell molecular wall-gradient model, not an
+addition of the full interior LES diffusive flux. At rest the molecular heat
+and wet-wall vapor terms remain if there is a wall-to-air contrast; tangential
+drag and dry-wall vapor flux are zero. The solver applies the sum once, and
+the existing ``tau``, ``H`` and ``E`` diagnostics report that applied total.
+
+``bulk_aero`` remains bulk-only. If the supplied bulk coefficients were fitted
+to *total* DNS wall exchange, adding molecular exchange without refitting can
+count part of that exchange twice. Use coefficients for the residual bulk
+contribution when calibrating this combined model.
 
 Neutral roughness-log transfer
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

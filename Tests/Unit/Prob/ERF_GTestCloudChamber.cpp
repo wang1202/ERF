@@ -1146,6 +1146,51 @@ TEST(CloudChamberWallFlux, FixedBulkMomentumTractionAndCalmGate)
     EXPECT_DOUBLE_EQ(calm.traction_on_fluid[2], Real(0.0));
 }
 
+TEST(CloudChamberWallFlux, AdditiveWallUsesMolecularPlusBulkExactlyOnce)
+{
+    using namespace erf_cloud_chamber_wall_flux;
+    using namespace erf_wall_thermodynamics;
+    erf_cloud_chamber::Config config;
+    auto& spec = config.walls[5]; // high z face of an anisotropic grid
+    spec.molecular_drag = spec.molecular_heat = spec.molecular_vapor = true;
+    spec.wall.momentum.model = MomentumModel::BulkAero;
+    spec.wall.heat.model = spec.wall.vapor.model = ScalarModel::BulkAero;
+    spec.wall.momentum.provider = spec.wall.heat.provider = spec.wall.vapor.provider = CoefficientProvider::Fixed;
+    spec.wall.thermal = {ThermalMode::FixedPhysicalTemperature, Real(300)};
+    spec.wall.moisture = MoistureMode::WetEquilibrium;
+    spec.wall.momentum.C_D = Real(.125);
+    spec.wall.heat.coefficient = Real(.25);
+    spec.wall.vapor.coefficient = Real(.375);
+    DiffChoice dc;
+    dc.rho0_trans = 2;
+    dc.dynamic_viscosity = Real(.03125);
+    dc.alpha_T = Real(.0625);
+    dc.alpha_C = Real(.125);
+    auto wall = config.transport_boundary(dc, {1, 2, 4})[5]; // distance = 1/8
+    auto bulk = spec.wall;
+    auto molecular = spec.wall;
+    molecular.heat.model = molecular.vapor.model = ScalarModel::ResolvedMolecular;
+    ScalarWallSample sample{Real(1.25), 290, p_0, 0, dc.alpha_T, dc.alpha_C, 4, R_d/Cp_d};
+    for (Real speed : {Real(0), Real(3)}) {
+        sample.U_t = speed;
+        sample.scalar_air = 290;
+        auto heat = [&](const FaceWall& w) { return evaluate_scalar_flux_in(w, ScalarChannel::Heat, sample).rhoTheta_in; };
+        EXPECT_DOUBLE_EQ(heat(wall), heat(molecular) + heat(bulk));
+        sample.scalar_air = Real(.01);
+        auto vapor = [&](const FaceWall& w) { return evaluate_scalar_flux_in(w, ScalarChannel::Vapor, sample).rhoQv_in; };
+        EXPECT_DOUBLE_EQ(vapor(wall), vapor(molecular) + vapor(bulk));
+        MomentumWallSample m{sample.rho, {speed, 0, 0}, speed};
+        EXPECT_DOUBLE_EQ(evaluate_momentum_traction(wall, m).traction_on_fluid[0],
+                         -sample.rho * (Real(.125)*speed + Real(.125)) * speed);
+        EXPECT_DOUBLE_EQ(momentum_rate_for_face(wall, speed, 4), momentum_rate_for_face(bulk, speed, 4) + Real(.5));
+        const auto rates = scalar_rates_for_face(wall, speed, 4, {});
+        EXPECT_DOUBLE_EQ(rates[0], (Real(.25)*speed + Real(.5))*4);
+        EXPECT_DOUBLE_EQ(rates[1], (Real(.375)*speed + 1)*4);
+    }
+    wall.moisture = MoistureMode::DryImpermeable;
+    EXPECT_EQ(evaluate_scalar_flux_in(wall, ScalarChannel::Vapor, sample).rhoQv_in, 0);
+}
+
 // MOST is shared by the production flux and timestep paths.  This test keeps
 // the pointwise state contract visible: wet-wall thermodynamics, orientation,
 // and the common coupled scalar roughness all affect the result.

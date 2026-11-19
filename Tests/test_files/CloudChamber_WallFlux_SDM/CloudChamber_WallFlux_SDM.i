@@ -1,6 +1,6 @@
 # SuperDroplets Cloud Chamber regression for the interval-mean wall-flux
-# output (wallflux_lev0.txt).  The walls are those of the SatAdj wall-flux
-# deck (xhi and yhi dry).  The one aerosol injection starts at t = 999999999 s,
+# output (wallflux_lev0.txt). The wet lower plate uses additive molecular
+# and bulk transfer; xhi and yhi are dry. Aerosol injection starts at t = 999999999 s,
 # so no droplet exists, nothing condenses, and the wall vapor flux alone must
 # change the vapor mass.  25 steps with interval 10: the trailing five-step
 # window writes no row.
@@ -12,7 +12,7 @@ erf.moisture_model = SuperDroplets
 erf.vert_implicit = false
 erf.project_initial_velocity = 0
 erf.molec_diff_type = ConstantAlpha
-erf.dynamic_viscosity = 0.0
+erf.dynamic_viscosity = 1.717e-5
 erf.alpha_T = 0.001
 erf.alpha_C = 0.001
 erf.les_type = Smagorinsky
@@ -91,7 +91,13 @@ yhi.moisture = dry
 yhi.wall_transfer_model = resolved_molecular
 zlo.temperature = 300.0
 zlo.moisture = wet
-zlo.wall_transfer_model = resolved_molecular
+zlo.momentum_transfer_model = bulk_aero_plus_molecular
+zlo.heat_transfer_model = bulk_aero_plus_molecular
+zlo.vapor_transfer_model = bulk_aero_plus_molecular
+zlo.coefficient_source = fixed
+zlo.C_D = 0.024
+zlo.C_H = 0.031
+zlo.C_E = 0.034
 zhi.temperature = 284.0
 zhi.moisture = wet
 zhi.wall_transfer_model = resolved_molecular
