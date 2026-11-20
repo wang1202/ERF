@@ -130,9 +130,6 @@ void erf_slow_rhs_post (int level, int finest_level,
                         Vector<std::unique_ptr<MultiFab>>& mapfac,
                         const eb_& ebfact,
                         const iMultiFab& physbnd_mask,
-#ifdef ERF_USE_EAMXX_SHOC
-                        SHOCInterface* eamxx_shoc_lev,
-#endif
                         ShocDriver* native_shoc_lev,
                         YAFluxRegister* fr_as_crse,
                         YAFluxRegister* fr_as_fine,
@@ -212,11 +209,6 @@ void erf_slow_rhs_post (int level, int finest_level,
     const Box& domain = geom.Domain();
 
     bool l_apply_surface_layer_fluxes_in_diffusion = any_SurfLayer();
-#ifdef ERF_USE_EAMXX_SHOC
-    if (tc.uses_eamxx_shoc()) {
-        l_apply_surface_layer_fluxes_in_diffusion = false;
-    }
-#endif
     if (tc.uses_native_shoc()) {
         AMREX_ALWAYS_ASSERT(native_shoc_lev != nullptr);
         l_apply_surface_layer_fluxes_in_diffusion = false;
@@ -245,7 +237,7 @@ void erf_slow_rhs_post (int level, int finest_level,
         cloud_chamber_config != nullptr && cloud_chamber_base_state != nullptr &&
         cloud_chamber_config->physical_initialization;
     const erf_wall_thermodynamics::Boundary chamber_walls =
-        use_physical_chamber_wall_flux ? cloud_chamber_config->transport_boundary(dc, dxInv) :
+        use_physical_chamber_wall_flux ? cloud_chamber_config->transport_boundary() :
                                          erf_wall_thermodynamics::Boundary{};
 
     std::unique_ptr<MultiFab> dflux_x;
@@ -782,11 +774,6 @@ void erf_slow_rhs_post (int level, int finest_level,
             }
         }
 
-#ifdef ERF_USE_EAMXX_SHOC
-        if (tc.uses_eamxx_shoc() && eamxx_shoc_lev) {
-            eamxx_shoc_lev->add_slow_tend(mfi,tbx,cell_rhs);
-        }
-#endif
         // This updates just the "slow" conserved variables
         {
         BL_PROFILE("rhs_post_8");

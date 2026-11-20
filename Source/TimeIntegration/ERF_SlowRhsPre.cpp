@@ -122,9 +122,6 @@ void erf_slow_rhs_pre (int level, int finest_level,
                        Vector<std::unique_ptr<MultiFab>>& mapfac,
                        const eb_& ebfact,
                        const Vector<iMultiFab>& physbnd_mask,
-#ifdef ERF_USE_EAMXX_SHOC
-                       SHOCInterface* eamxx_shoc_lev,
-#endif
                        ShocDriver* native_shoc_lev,
                        YAFluxRegister* fr_as_crse,
                        YAFluxRegister* fr_as_fine,
@@ -150,7 +147,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
         cloud_chamber_config != nullptr && cloud_chamber_base_state != nullptr &&
         cloud_chamber_config->physical_initialization;
     const erf_wall_thermodynamics::Boundary chamber_walls =
-        use_physical_chamber_wall_flux ? cloud_chamber_config->transport_boundary(dc, geom.InvCellSizeArray()) :
+        use_physical_chamber_wall_flux ? cloud_chamber_config->transport_boundary() :
                                          erf_wall_thermodynamics::Boundary{};
     int klo = domain.smallEnd(2);
     int khi = domain.bigEnd(2);
@@ -225,14 +222,6 @@ void erf_slow_rhs_pre (int level, int finest_level,
     std::unique_ptr<MultiFab> dflux_z;
 
     if (l_use_diff) {
-#ifdef ERF_USE_EAMXX_SHOC
-        if (tc.uses_eamxx_shoc()) {
-            AMREX_ALWAYS_ASSERT(eamxx_shoc_lev != nullptr);
-            // SHOC either supplies host-applied vertical SGS coefficients or
-            // clears them so the host does not re-apply SHOC transport.
-            eamxx_shoc_lev->set_eddy_diffs();
-        }
-#endif
         if (tc.uses_native_shoc()) {
             AMREX_ALWAYS_ASSERT(native_shoc_lev != nullptr);
             // Native SHOC owns the scalar fluxes and does not hand momentum
@@ -262,15 +251,6 @@ void erf_slow_rhs_pre (int level, int finest_level,
         }
 
         bool surface_layer_handled = false;
-#ifdef ERF_USE_EAMXX_SHOC
-        if (tc.uses_eamxx_shoc()) {
-            AMREX_ALWAYS_ASSERT(eamxx_shoc_lev != nullptr);
-            // EAMxx SHOC owns the overlapping lower-boundary fluxes here, so
-            // do not fall through to the generic SurfaceLayer path.
-            eamxx_shoc_lev->set_diff_stresses();
-            surface_layer_handled = true;
-        }
-#endif
         if (tc.uses_native_shoc()) {
             AMREX_ALWAYS_ASSERT(native_shoc_lev != nullptr);
             surface_layer_handled = true;

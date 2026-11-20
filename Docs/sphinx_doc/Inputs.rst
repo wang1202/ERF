@@ -262,8 +262,11 @@ List of Parameters
 |                             | (per-level).  See :ref:`sec:InflowTurbulenceGeneration`  | Direct, CPM, CPM_W |                  |
 +-----------------------------+----------------------------------------------------------+--------------------+------------------+
 | **<face>.density**          | density imposed at a ``slipwall`` or ``noslipwall``      | Real > 0           | not set          |
-|                             | face; may not be combined with ``<face>.density_grad``,  |                    |                  |
-|                             | and is rejected for anelastic runs                       |                    |                  |
+|                             | face, where it may not be combined with                  |                    |                  |
+|                             | ``<face>.density_grad``; or the inflow density of an     |                    |                  |
+|                             | ``inflow`` or ``inflow_outflow`` face (see               |                    |                  |
+|                             | :ref:`sec:LateralBoundaryConditions`).  Rejected on      |                    |                  |
+|                             | every face in anelastic and pseudo-incompressible runs   |                    |                  |
 +-----------------------------+----------------------------------------------------------+--------------------+------------------+
 | **<face>.density_grad**     | Neumann gradient of density imposed at a ``slipwall`` or | Real               | 0.0              |
 |                             | ``noslipwall`` face; may not be combined with            |                    |                  |
@@ -616,8 +619,9 @@ List of Parameters
 | **erf.<indicator>.value_less**                   | tag cells where the field falls below this value, one    | List of Reals      | None                 |
 |                                                  | value per level                                          |                    |                      |
 +--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
-| **erf.<indicator>.adjacent_difference_greater**  | tag cells where the difference between adjacent values   | List of Reals      | None                 |
-|                                                  | exceeds this, one value per level                        |                    |                      |
+| **erf.<indicator>.adjacent_difference_greater**  | tag cells where the largest difference from the six face | List of Reals      | None                 |
+|                                                  | neighbors is at least this, one value per level; which   |                    |                      |
+|                                                  | neighbors count is described in :ref:`MeshRefinement`    |                    |                      |
 +--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
 | **erf.<indicator>.conditions**                   | names of several conditions the indicator tests          | List of Strings    | None                 |
 |                                                  | together; each is given by **field_name** and one of the |                    |                      |
@@ -1528,7 +1532,7 @@ List of Parameters
 |                                     | the total mass rho_d (1 + q_t) [kg/m3] and the total     | (the first of up   |                  |
 |                                     | energy [J/m3], every erf.sum_interval steps or           | to four is         |                  |
 |                                     | erf.sum_period seconds when erf.v > 0. q_t sums the      | written)           |                  |
-|                                     | vapor, liquid (cloud, rain) and ice mixing ratios. The  |                    |                  |
+|                                     | vapor, liquid (cloud, rain) and ice mixing ratios. The   |                    |                  |
 |                                     | energy is a diagnostic definition (Romps 2008):          |                    |                  |
 |                                     | internal energy with constant heat capacities, from      |                    |                  |
 |                                     | liquid water at the triple point, plus kinetic and       |                    |                  |
@@ -1562,6 +1566,13 @@ List of Parameters
 |                                     | see :ref:`sec:RadiationDatalog`                          |                    |                  |
 +-------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.plot_lsm**                    | write the land-surface-model fields to the plotfile      | Boolean            | false            |
+|                                     | (``plt_lsm_*``). With NetCDF plotfiles the SLM fields go |                    |                  |
+|                                     | to one file per level, ``plt_lsm_lev<L>.nc``, each on    |                    |                  |
+|                                     | that level's whole domain (cells outside a refined       |                    |                  |
+|                                     | level's grids are left unset), with one time entry per   |                    |                  |
+|                                     | plotfile; a restarted run appends to these files. The 3D |                    |                  |
+|                                     | land plotfiles ``plt_lsm_<step>`` are always written in  |                    |                  |
+|                                     | the AMReX format                                         |                    |                  |
 +-------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.plot_surfmodel**              | write SurfaceModel fields to ``plt_surf_*`` files;       | Boolean            | both LSM+Urban   |
 |                                     | independent of ``erf.plot_lsm``                          |                    | active by default|
@@ -1574,6 +1585,12 @@ List of Parameters
 |                                     | plotfile                                                 |                    |                  |
 +-------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.write_eb_surface**            | write the embedded-boundary surface as a separate file   | Boolean            | false            |
+|                                     | (eb.pvtp) and, for erf.terrain_type = EB, its nodal      |                    |                  |
+|                                     | level set (eb_levelset.vtm, in the directory of          |                    |                  |
+|                                     | erf.plot_file_1), once at initialization. eb.pvtp holds  |                    |                  |
+|                                     | the finest level that exists then, and eb_levelset.vtm   |                    |                  |
+|                                     | every level that exists then (not levels made later by   |                    |                  |
+|                                     | regridding). The level set needs a mesh with constant dz |                    |                  |
 +-------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.rad.datalog**                 | name of the log file to which radiation profiles are     | String             | None             |
 |                                     | written; see :ref:`sec:RadiationDatalog`                 |                    |                  |
@@ -1824,7 +1841,16 @@ With immersed terrain (``erf.terrain_type = ImmersedForcing`` or ``EB``) the gro
 terrain surface, as for stations, rather than the bottom of the flat mesh. On these meshes the
 variable ``z``, the height of each sample, is always written with the line, since the z
 coordinates of a line plotfile assume equally spaced levels; it may be requested on any mesh.
-Plane sampling has not been implemented for terrain.
+
+A plane is placed, and its plotfile written, in the computational coordinates, in which the
+levels of cells are equally spaced. On a stretched or terrain-fitted mesh these are not the
+physical height. A horizontal plane (``sample_plane_dir = 2``) at z is interpolated between the two
+levels of cells whose nominal heights bracket z, so over terrain it follows the mesh rather than a
+constant physical height; the vertical axis of a vertical plane is the nominal height of each level
+of cells. On these meshes the variable ``z_phys``, the physical height of each sample, is always
+written with the planes; it may be requested on any mesh. Planes at a constant physical height are
+not supported. A horizontal line with ``erf.sample_line_interp = true`` gives a 1-D transect at a
+constant height.
 
 With ``erf.sample_line_interp = true``, lines given by ``sample_line_lo_real`` and
 ``sample_line_hi_real`` (or ``sample_line_lo_latlon`` and ``sample_line_hi_latlon``) are sampled
@@ -1887,11 +1913,14 @@ The sampled variables can be selected with the ``erf.line_sampling_vars`` and
 ``erf.plane_sampling_vars`` options and include a subset of the plotfile outputs:
 ``density``, ``x_velocity``, ``y_velocity``, ``z_velocity``, ``magvel``,
 ``theta``, ``qv``, ``qc``, and ``pressure``. Line sampling additionally supports
-``conserved``, ``z``, ``sgs_tke``, ``sgs_tau11``, ``sgs_tau12``, ``sgs_tau13``, ``sgs_tau22``,
-``sgs_tau23``, ``sgs_tau33``, and ``sgs_hfx3``. Both also support ``volfrac``, the volume
-fraction of each cell (1 without immersed terrain). ``conserved`` writes every component of the
-conserved state as stored, named ``cons_0``, ``cons_1``, ... in component order (density,
-rho theta, ...). The variables are written in a fixed order, not the order they are listed in.
+``conserved``, ``sgs_tke``, ``sgs_tau11``, ``sgs_tau12``, ``sgs_tau13``, ``sgs_tau22``,
+``sgs_tau23``, ``sgs_tau33``, and ``sgs_hfx3``. Both also support the physical height of each
+sample, written as ``z`` by line sampling and as ``z_phys`` (the name of the 3D plotfile variable)
+by plane sampling, which accepts either name, and ``volfrac``, the volume fraction of each cell
+(1 without immersed terrain).
+``conserved`` writes every component of the conserved state as stored, named ``cons_0``,
+``cons_1``, ... in component order (density, rho theta, ...). The variables are written in a
+fixed order, not the order they are listed in.
 The SGS stresses ``sgs_tau11``, ``sgs_tau22`` and ``sgs_tau33`` are stored at cell centers; the
 other stresses and the heat flux are averaged from their native edge/face locations to cell
 centers; if their diffusion storage is unavailable, ERF writes zero. Velocities
@@ -2573,9 +2602,9 @@ List of Parameters
 |                                        | (per-level)                                              |                    |                  |
 +----------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.rans_moist_buoyancy**            | k-equation RANS with a moisture model that carries water | Boolean            | false            |
-|                                        | vapor: TKE buoyancy production from the virtual         |                    |                  |
+|                                        | vapor: TKE buoyancy production from the virtual          |                    |                  |
 |                                        | potential temperature flux, g/theta_v0 [(1 + epsv qv)    |                    |                  |
-|                                        | <w'theta'> + epsv theta <w'qv'>] (water vapor only, no  |                    |                  |
+|                                        | <w'theta'> + epsv theta <w'qv'>] (water vapor only, no   |                    |                  |
 |                                        | cloud-water or saturated form; theta_v0 is               |                    |                  |
 |                                        | ``erf.theta_ref`` or the local theta_v); false keeps the |                    |                  |
 |                                        | dry g/theta_0 <w'theta'>; one value for the hierarchy is |                    |                  |
@@ -2713,14 +2742,16 @@ List of Parameters
 +==========================================+==========================================================+====================+==================+
 | **erf.pbl_type**                         | Name of PBL Scheme to be used                            | "None", "MYNN25",  | "None"           |
 |                                          |                                                          | "MYNNEDMF", "MYJ", |                  |
-|                                          |                                                          | "YSU", "YSUNew",   |                  |
-|                                          |                                                          | "MRF",             |                  |
-|                                          |                                                          | "NATIVE_SHOC",     |                  |
-|                                          |                                                          | "EAMXX_SHOC";      |                  |
-|                                          |                                                          | legacy "SHOC" is   |                  |
+|                                          |                                                          | "YSU", "MRF",      |                  |
+|                                          |                                                          | "NATIVE_SHOC";     |                  |
+|                                          |                                                          | "SHOC" selects     |                  |
+|                                          |                                                          | "NATIVE_SHOC" with |                  |
+|                                          |                                                          | a warning;         |                  |
+|                                          |                                                          | "EAMXX_SHOC" is no |                  |
+|                                          |                                                          | longer accepted;   |                  |
+|                                          |                                                          | legacy "YSUNew" is |                  |
 |                                          |                                                          | deprecated and     |                  |
-|                                          |                                                          | maps to            |                  |
-|                                          |                                                          | "EAMXX_SHOC"       |                  |
+|                                          |                                                          | maps to "YSU"      |                  |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.tke_min**                          | Minimum initial TKE used when a prognostic-TKE closure   | Real               | 1.e-6            |
 |                                          | is active                                                |                    |                  |
@@ -2760,29 +2791,36 @@ List of Parameters
 |                                          | built from, instead of the 1/l sum with l_T and l_B.     |                    |                  |
 |                                          | The first-cell TKE then approaches B1^(2/3) u*^2 / 2.    |                    |                  |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
-| **erf.pbl_ysu_force_over_water**         | Treat whole domain as over water for YSU PBL scheme      | Boolean            | false            |
-|                                          | regardless of LSM/other inputs                           |                    |                  |
-+------------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.pbl_ysu_land_Ribcr**               | Over land critical Richardson number for YSU PBL Scheme  | Real               | 0.25             |
-+------------------------------------------+----------------------------------------------------------+--------------------+------------------+
-| **erf.pbl_ysu_unst_Ribcr**               | Unstable critical Richardson number for YSU PBL Scheme   | Real               | 0.0              |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.pbl_ysu_coriolis_freq**            | Coriolis frq. used for YSU PBL Scheme (1e-4 in WRF)      | Real               | 1.0e-4           |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.pbl_ysu_use_consistent_coriolis**  | Ignore above param and use the value from ERF coriolis   | Boolean            | false            |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
-| **erf.enable_ysu_countergradient**       | YSUNew only: apply the nonlocal countergradient          | Boolean            | true             |
+| **erf.enable_ysu_countergradient**       | YSU only: apply the nonlocal countergradient             | Boolean            | true             |
 |                                          | corrections to heat, moisture and momentum (HGAMT,       |                    |                  |
 |                                          | HGAMQ, HGAMU, HGAMV); false gives strict HND06 mixing    |                    |                  |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
-| **erf.enable_ysu_entrainment**           | YSUNew only: add the entrainment diffusivity at the      | Boolean            | true             |
+| **erf.enable_ysu_entrainment**           | YSU only: add the entrainment diffusivity at the         | Boolean            | true             |
 |                                          | first cell above the PBL top (HND06 A9-A13)              |                    |                  |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
-| **erf.ysu_moistvars**                    | YSUNew only: give moisture its own diffusivity, from the | Boolean            | false            |
+| **erf.enable_ysu_cloud_pblh**            | YSU only, with a moisture model: raise the PBL-top cell  | Boolean            | true             |
+|                                          | index by one where the cloud water plus cloud ice in the |                    |                  |
+|                                          | PBL-top cell exceeds ``erf.ysu_qcloud_threshold``. The   |                    |                  |
+|                                          | PBL height in metres does not change. Applies whether    |                    |                  |
+|                                          | or not ``erf.enable_ysu_entrainment`` is set             |                    |                  |
++------------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.ysu_qcloud_threshold**             | YSU only: cloud water plus cloud ice [kg/kg] above which | Real               | 1.0e-4           |
+|                                          | a cell counts as cloudy, for                             |                    |                  |
+|                                          | ``erf.enable_ysu_cloud_pblh`` and for the cloud-top      |                    |                  |
+|                                          | search of ``erf.enable_ysu_topdown``; must not be        |                    |                  |
+|                                          | negative                                                 |                    |                  |
++------------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.ysu_moistvars**                    | YSU only: give moisture its own diffusivity, from the    | Boolean            | false            |
 |                                          | moisture Prandtl number, and add the entrainment term to |                    |                  |
 |                                          | it; false uses the heat diffusivity for moisture         |                    |                  |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
-| **erf.enable_ysu_rad_tend_limiter**      | YSUNew only: replace a non-finite radiative tendency at  | Boolean            | false            |
+| **erf.enable_ysu_rad_tend_limiter**      | YSU only: replace a non-finite radiative tendency at     | Boolean            | false            |
 |                                          | cloud top by zero and bound it before the top-down       |                    |                  |
 |                                          | mixing velocity is formed from it                        |                    |                  |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
@@ -2792,7 +2830,7 @@ List of Parameters
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.pbl_mrf_Ribcr**                    | Over land critical Richardson number for MRF PBL Scheme  | Real               | 0.5              |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
-| **erf.pbl_ib_aware**                     | MRF and YSUNew only: treat the first fluid cell above an | Boolean            | false            |
+| **erf.pbl_ib_aware**                     | MRF and YSU only: treat the first fluid cell above an    | Boolean            | false            |
 |                                          | immersed solid column (buildings or terrain by immersed  |                    |                  |
 |                                          | forcing) as that column's surface: heights, the bulk     |                    |                  |
 |                                          | Richardson depth and the K profile measured from it,     |                    |                  |
@@ -2855,8 +2893,8 @@ List of Parameters
    |                                          | when numerical diffusion is on (erf.num_diff_coeff > 0)  |                    |                  |
    +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
 
-Note that both PBL schemes must be used in conjunction with a MOST boundary condition
-at the surface (Zlo) boundary. The YSU scheme is work in progress currently.
+Note that the PBL schemes must be used in conjunction with a MOST boundary condition
+at the surface (Zlo) boundary.
 
 If the PBL scheme is activated, it determines the turbulent diffusivity in the vertical
 direction. If an LES model is also specified, it determines only the horizontal turbulent
@@ -3239,6 +3277,8 @@ coordinate at which its sponge ends or starts.
 | **erf.sponge_z_velocity**       | target z-velocity in the sponge zone                     | Real               | 0.0              |
 +---------------------------------+----------------------------------------------------------+--------------------+------------------+
 
+.. _inputs-nudging:
+
 Nudging from Input Soundings
 ----------------------------
 
@@ -3273,20 +3313,34 @@ Nudging from Input Soundings
 +--------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.nudging_q_z2**                 | height above which moisture is not nudged                | Real [m]           | 10000.0          |
 +--------------------------------------+----------------------------------------------------------+--------------------+------------------+
-| **erf.input_sounding_time**          | Time(s) of the input sounding file(s)                    | Real(s)            | 0.0              |
+| **erf.input_sounding_time**          | Time(s) of the input sounding file(s), one per file, in  | Real(s)            | 0.0              |
+|                                      | strictly increasing order                                |                    |                  |
 +--------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.tau_nudging**                  | Time scale for nudging                                   | Real               | 5.0              |
 +--------------------------------------+----------------------------------------------------------+--------------------+------------------+
 
 ``erf.input_sounding_file`` is documented under :ref:`Initialization <inputs-initialization>`;
-more than one file may be named there, paired with ``erf.input_sounding_time``.
+more than one file may be named there, paired with ``erf.input_sounding_time``.  In a run that
+reads the soundings (``erf.init_type = Input_Sounding``) the two lists must have the same length,
+and the times must increase strictly.
 
 If ``erf.nudging_from_input_sounding`` is true, it is expected that at least one input sounding
 file is available.  If there is only one, and no specification of time is made, it is assumed that
 the one file corresponds to time = 0.0.   If the final time supplied in
-``input_*_sounding_*_time``  is less than the final time in the calculation, the final sounding supplied
-in ``input_*_sounding_*_file`` will be used for all times later than the final value in
-in ``input_*_sounding_*_time``.
+``erf.input_sounding_time`` is less than the final time in the calculation, the final sounding supplied
+in ``erf.input_sounding_file`` will be used for all times later than the final value
+in ``erf.input_sounding_time``.
+
+With more than one sounding, only the first one sets the base state, the initial state and the
+surface temperature and moisture of a surface layer; the later ones are used only as nudging
+targets.  The base state does not change in time, so every sounding must have the surface pressure
+(the first value of its first line) of the first one, and the run stops if it does not.  The
+surface theta and moisture may differ between soundings: they are the bottom point of each
+sounding's profiles, and so shape its nudging target near the ground.  ``erf.most.pot_surf_temp``
+and ``erf.most.surf_moist``, if given, must match the first sounding only.  The surface layer
+does not follow the later soundings: its surface temperature and moisture stay at the first
+sounding's values, unless another source (such as an SST or skin temperature, or a land model)
+sets them.
 
 Every level samples the input sounding at its own cell centers, for the initial state and base
 state and for nudging, just as a single-level run at that resolution does; the large-scale forcing
@@ -3797,6 +3851,15 @@ Notes
   that writes ``temperature`` must therefore also write ``qv``, and a run that reads
   ``temperature`` from planes that include ``qv`` must also read ``qv``; otherwise ERF stops.
   ``theta`` planes need no qv.
+- The planes of ``theta``, ``scalar``, ``qv``, ``qc`` and ``ke`` are multiplied by density on
+  reading.  If ``density`` is read too, its planes are used; otherwise (for example when the writer
+  did not list ``density``) the constant ``<face>.density`` of each inflow face (``xlo.density``
+  and so on) is used, and ERF stops if it is not given.  That constant is used at every height, so
+  it suits a face over which density varies little; otherwise write and read ``density``.  An
+  anelastic run cannot give ``<face>.density``, so there these planes need ``density`` too.
+  ``temperature`` planes always need ``density``, since theta is recovered from temperature
+  through the pressure; without it ERF stops.  Planes of ``velocity`` alone need no density.
+  None of this applies with ``erf.use_real_bcs``, where the planes are used as they are read.
 - A plane holds the domain's cells along its face only.  The ghost cells beside the face in the
   other horizontal direction (the corner ghosts) take the plane's value at the periodic image
   when that direction is periodic, as the interior cells across the seam do, and the nearest
@@ -3919,7 +3982,9 @@ List of Parameters
 +-----------------------------------+----------------------------------------------------------+------------------------------+--------------------+
 | **erf.input_sounding_file**       | Path to the WRF-style input sounding file.  When nudging | String(s)                    | "input_sounding"   |
 |                                   | from input soundings, more than one file may be named,   |                              |                    |
-|                                   | paired with ``erf.input_sounding_time``                  |                              |                    |
+|                                   | paired with ``erf.input_sounding_time``; the first one   |                              |                    |
+|                                   | sets the initial and base states (see                    |                              |                    |
+|                                   | :ref:`inputs-nudging`)                                   |                              |                    |
 +-----------------------------------+----------------------------------------------------------+------------------------------+--------------------+
 | **erf.sounding_type**             | how the profiles in an input sounding file are           | ConstantDensity, Ideal,      | Ideal              |
 |                                   | interpreted; read only when ``init_type`` =              | Isentropic, DryIsentropic    |                    |
@@ -4163,7 +4228,7 @@ List of Parameters
 +----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.buildings_type**           | how buildings are represented; see :ref:`Forcings`;      | None,              | None             |
 |                                  | ImmersedForcing is not supported with                    | ImmersedForcing    |                  |
-|                                  | ``erf.terrain_type`` = EB                                |                    |                  |
+|                                  | ``erf.terrain_type`` = EB or ImmersedForcing             |                    |                  |
 +----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.buildings_fc_factories**   | use native face-centered EB factories for immersed       | Boolean            | false            |
 |                                  | buildings with ``StaticFittedMesh`` terrain; see         |                    |                  |
@@ -4309,7 +4374,7 @@ Immersed Forcing
 
 These inputs configure the immersed-forcing representation of solid bodies,
 selected with ``erf.terrain_type`` = ``ImmersedForcing`` or
-``erf.buildings_type`` = ``ImmersedForcing``.  At most one of
+``erf.buildings_type`` = ``ImmersedForcing``, but not both in the same run.  At most one of
 ``erf.if_surf_temp_flux``, ``erf.if_init_surf_temp`` and ``erf.if_Olen`` may be set.
 
 Building immersed forcing is applied only on levels where the nominal horizontal
@@ -4393,13 +4458,13 @@ building combinations.
 |                                   | temperature forcing from it                              |                    |                  |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.if_surf_moist_flux**        | fraction_stress with a moisture model that carries water | Real in            | 0 (none)         |
-|                                   | vapor: kinematic surface moisture flux [kg/kg m/s] of   | [-0.01, 0.01]      |                  |
+|                                   | vapor: kinematic surface moisture flux [kg/kg m/s] of    | [-0.01, 0.01]      |                  |
 |                                   | the immersed terrain (q* = -F_q/u*, as                   |                    |                  |
 |                                   | ``erf.most.surf_moist_flux`` on flat ground), applied in |                    |                  |
 |                                   | the wall cell; not with ``erf.if_surf_moist``            |                    |                  |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.if_surf_moist**             | fraction_stress with a moisture model that carries water | Real in [0, 0.1]   | -1 (none)        |
-|                                   | vapor: surface water vapor mixing ratio [kg/kg] of the |                    |                  |
+|                                   | vapor: surface water vapor mixing ratio [kg/kg] of the   |                    |                  |
 |                                   | immersed terrain (q* from the wall cell and the cell     |                    |                  |
 |                                   | above, mixed by the solid fraction as theta* is, as      |                    |                  |
 |                                   | ``erf.most.surf_moist`` on flat ground), applied in the  |                    |                  |
@@ -4797,8 +4862,10 @@ the ones marked **Required** abort the run if they are not given.
 |                                       | ``erf.most.pblh_calc`` to be set                         |                     |                  |
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
 | **erf.most.pblh_calc**                | which scheme diagnoses the PBL height used by the *w*\*  | none, MYNN25,       | none             |
-|                                       | correction                                               | MYNNEDMF, YSU,      |                  |
-|                                       |                                                          | YSUNew, MRF         |                  |
+|                                       | correction. YSU and MRF take the height from that PBL    | MYNNEDMF, YSU,      |                  |
+|                                       | scheme, so they require the same ``erf.pbl_type``        | MRF (YSUNew is a    |                  |
+|                                       |                                                          | deprecated name for |                  |
+|                                       |                                                          | YSU)                |                  |
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
 | **erf.most.pot_surf_temp**            | prescribed surface potential temperature [K]; a positive | Real > 0            | -1.0 (not set)   |
 |                                       | value selects the surface-temperature formulation.       |                     |                  |
@@ -4866,7 +4933,7 @@ the ones marked **Required** abort the run if they are not given.
 | **erf.most.qnse_am**,                 | QNSE coefficients a_m, b_m (momentum) and a_h, b_h       | Real, finite;       | 2.5, 0.2,        |
 | **erf.most.qnse_bm**,                 | (heat); read only with ``erf.most.stable_functions =     | b_m > 0, b_h > 0,   | 2.5, 0.2         |
 | **erf.most.qnse_ah**,                 | qnse`` (given otherwise, the run stops). The defaults    | a_m > b_m,          |                  |
-| **erf.most.qnse_bh**                  | are those of the MRF and YSUNew ``erf.qnse_*`` keys,     | a_h > b_h           |                  |
+| **erf.most.qnse_bh**                  | are those of the MRF and YSU ``erf.qnse_*`` keys,        | a_h > b_h           |                  |
 |                                       | which the surface layer does not read (a warning is      |                     |                  |
 |                                       | printed when the two disagree); equal heat and momentum  |                     |                  |
 |                                       | values give a turbulent Prandtl number of 1              |                     |                  |
@@ -5275,7 +5342,8 @@ execution restrictions.
      - Constant spectrum entering through an ``Inflow`` or ``inflow_outflow``
        face, one value per component per kilogram of dry air, in the order of
        ``erf.sbm_fixture_initial_state``. Required on every such face and
-       rejected on any other; ``<face>.density`` must also be given.
+       rejected on any other; ``<face>.density`` must also be given, except in
+       anelastic and pseudo-incompressible runs, where it must be omitted.
      - One value per spectral component
      - None
 
@@ -6123,22 +6191,18 @@ atmospheric cell), ``start_datetime`` and the
 SHOC
 ======================
 
-ERF provides two SHOC implementations. Select the ERF-native implementation with
-``erf.pbl_type = NATIVE_SHOC``. Select the optional EAMxx implementation with
-``erf.pbl_type = EAMXX_SHOC``. The legacy value ``SHOC`` is deprecated and is
-interpreted as ``EAMXX_SHOC``; it does not select native SHOC.
+ERF provides a native SHOC implementation, selected with
+``erf.pbl_type = NATIVE_SHOC``. The value ``SHOC`` is also accepted and selects
+native SHOC, with a warning that its meaning has changed: it used to select the
+EAMxx SHOC interface. That interface has been removed, and
+``erf.pbl_type = EAMXX_SHOC`` now stops the run with an error.
 
-Both SHOC implementations use the ``erf.shoc`` namespace for closure tuning.
-Native SHOC also has transport and native-only numerical controls. EAMxx SHOC
-has a small number of interface-only controls. See :ref:`SHOC` for the model
-description, coupling restrictions, transport behavior, and diagnostic output.
+SHOC uses the ``erf.shoc`` namespace for closure tuning, transport, and
+numerical controls. See :ref:`SHOC` for the model description, coupling
+restrictions, transport behavior, and diagnostic output.
 
-Shared SHOC closure inputs
---------------------------
-
-The following option names are read by both native SHOC and EAMxx SHOC. The two
-implementations are separate code paths, so identical input values do not imply
-bit-for-bit identical calculations.
+SHOC closure inputs
+-------------------
 
 .. list-table::
    :header-rows: 1
@@ -6337,34 +6401,12 @@ parsed internally but do not currently alter Native SHOC.
 Each threshold is validated on read, and a non-positive value aborts the run
 with a message naming the input.
 
-EAMxx SHOC interface inputs
----------------------------
-
-The following controls have a verified runtime effect in the optional
-``EAMXX_SHOC`` interface and are not native-SHOC controls.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 36 52 18 12
-
-   * - Parameter
-     - Definition
-     - Acceptable Values
-     - Default
-   * - **erf.shoc.apply_tms**
-     - Apply the turbulent mountain stress contribution in the EAMxx SHOC interface.
-       Not supported: it needs a subgrid-orography drag coefficient, which ERF does
-       not provide, so ``true`` aborts. Native SHOC reads it but does not use it.
-     - false
-     - false
-   * - **erf.shoc.check_flux_state**
-     - Run the EAMxx SHOC interface flux/state consistency check
-     - true / false
-     - false
-
 Only options documented above are part of the supported SHOC user-facing
 runtime contract. Some historical or development ``erf.shoc`` keys may still
 be parsed internally but are intentionally not documented as active features.
+The EAMxx-only inputs ``erf.shoc.apply_tms`` and ``erf.shoc.check_flux_state``
+were removed with the EAMxx SHOC interface; ERF stops if an inputs file sets
+either one.
 
 Minimal native SHOC setup
 -------------------------
@@ -6384,23 +6426,6 @@ The native transport defaults are:
    erf.shoc.momentum_transport = state_update
 
 These two transport lines may be omitted when the defaults are desired.
-
-Minimal EAMxx SHOC setup
-------------------------
-
-The EAMxx SHOC path requires an executable built with the CMake option
-``ERF_ENABLE_EAMXX_SHOC=ON``. For example:
-
-.. code-block:: bash
-
-   cmake -DERF_ENABLE_EAMXX_SHOC=ON ...
-
-The corresponding runtime selection is:
-
-.. code-block:: text
-
-   zlo.type = "surface_layer"
-   erf.pbl_type = EAMXX_SHOC
 
 .. _inputs-runtime-error-checking:
 
@@ -6660,10 +6685,10 @@ besides.
 +------------------------------------------------+------------------------------------------------------------+--------------------------------+------------------------+
 | **erf.fire.fire_atm_feedback**                 | Multiplier on the injected fluxes; 0 is one-way coupling   | Real >= 0                      | 1.0                    |
 +------------------------------------------------+------------------------------------------------------------+--------------------------------+------------------------+
-| **erf.fire.inject_latent**                     | Inject the latent flux into the vapor equation when       | Boolean                        | true                   |
+| **erf.fire.inject_latent**                     | Inject the latent flux into the vapor equation when        | Boolean                        | true                   |
 |                                                | moisture is active                                         |                                |                        |
 +------------------------------------------------+------------------------------------------------------------+--------------------------------+------------------------+
-| **erf.fire.source_mode**                       | Replace the theta and vapor source slots or add to the    | "overwrite", "add"             | "overwrite"            |
+| **erf.fire.source_mode**                       | Replace the theta and vapor source slots or add to the     | "overwrite", "add"             | "overwrite"            |
 |                                                | rebuilt stage source. Left at the default with another     |                                |                        |
 |                                                | theta source on the fire level (radiation, Rayleigh        |                                |                        |
 |                                                | damping of T, custom forcing or subsidence, slow-step      |                                |                        |

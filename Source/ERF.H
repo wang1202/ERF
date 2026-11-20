@@ -100,10 +100,6 @@
 
 #include <ERF_RadiationModels.H>
 
-#ifdef ERF_USE_EAMXX_SHOC
-#include "ERF_ShocInterface.H"
-#endif
-
 #include "ERF_ShocDriver.H"
 #include "AuxiliaryState/ERF_AuxiliaryInertTracer.H"
 
@@ -285,8 +281,9 @@ public:
     // Tag cells for refinement
     void ErrorEst (int lev, amrex::TagBoxArray& tags, amrex::Real time, int ngrow) override;
 
-    // Fill mf (one component, one ghost cell) at level levc with the refinement field named field
-    void compute_tag_field (int levc, const std::string& field, amrex::Real time,
+    // Fill mf (one component, one ghost cell) at level levc with the refinement field named
+    //    field; returns whether its ghost cells were filled too
+    bool compute_tag_field (int levc, const std::string& field, amrex::Real time,
                             amrex::MultiFab& mf, amrex::TagBoxArray& tags);
 
     // Tag cells in a given box
@@ -863,22 +860,6 @@ public:
                             amrex::MultiFab& cons_in,
                             const double& dt_advance);
 
-#ifdef ERF_USE_EAMXX_SHOC
-    void compute_shoc_tendencies (int lev,
-                                  amrex::MultiFab* cons,
-                                  amrex::MultiFab* xvel,
-                                  amrex::MultiFab* yvel,
-                                  amrex::MultiFab* zvel,
-                                  amrex::Real* w_subsid,
-                                  amrex::MultiFab* tau13,
-                                  amrex::MultiFab* tau23,
-                                  amrex::MultiFab* hfx3,
-                                  amrex::MultiFab* qfx3,
-                                  amrex::MultiFab* eddyDiffs,
-                                  amrex::MultiFab* z_phys_nd,
-                                  const double& dt_advance);
-#endif
-
     void compute_native_shoc_tendencies (int lev,
                                          amrex::MultiFab* cons,
                                          amrex::MultiFab* xvel,
@@ -901,6 +882,7 @@ public:
 
     // Write plotfile to disk
     bool Write3DPlotFile  (int which, PlotFileType plotfile_type, amrex::Vector<std::string> plot_var_names);
+    void WriteEBLevelSet ();
     void Write2DPlotFile  (int which, PlotFileType plotfile_type, amrex::Vector<std::string> plot_var_names);
     void ResetIntervalMeansAfter3DPlotfileBatch (int plotfiles_written,
                                                  bool interval_diagnostic_consumed);
@@ -1333,6 +1315,13 @@ private:
 
     [[nodiscard]] bool has_surface_layer_inputs (const std::string& prefix) const;
 
+    // 0 unless ori is a lateral inflow (1) or inflow_outflow (2) face that gives a primitive
+    // theta in a run with a pseudo-incompressible level (see set_pi_inflow_faces)
+    [[nodiscard]] int pi_theta_inflow_face (const amrex::Orientation& ori) const;
+
+    // Build and fill the custom rhotheta, moisture and subsidence forcing of one level
+    void init_custom_forcing (int lev, amrex::Real time);
+
     // set covered coarse cells/faces to be the average of overlying fine cells/faces
     void AverageDown ();
 
@@ -1496,6 +1485,7 @@ private:
 
     static double start_bdy_time;
     static double final_bdy_time;
+    static bool   use_theta_m_bdy;
 
     static double start_low_time;
     static double final_low_time;
@@ -1798,10 +1788,6 @@ private:
     TwoStreamRadiation two_stream_rad;
     TopographicShading topographic_radiation;
 
-#ifdef ERF_USE_EAMXX_SHOC
-    amrex::Vector<std::unique_ptr<SHOCInterface>> eamxx_shoc_interface; // EAMxx SHOC model at each level
-#endif
-
     amrex::Vector<std::unique_ptr<ShocDriver>> native_shoc_driver; // Native SHOC model at each level
 
     bool plot_rad = false;
@@ -2009,6 +1995,10 @@ private:
     // Per face: whether its Dirichlet theta comes from a dirichlet_file, and in which form
     // (0: not from a file, 1: the file holds rho*theta, 2: the file holds theta)
     amrex::Array<int, AMREX_SPACEDIM*2> m_th_file_face = {{0}};
+    // Per conserved BC component and face: 1 where an anelastic inflow or inflow_outflow face
+    // was given a primitive value (<face>.theta, scalar, qv, qc, KE).  m_bc_extdir_vals then
+    // holds that primitive value, made conserved with the interior density
+    amrex::Array<amrex::Array<int, AMREX_SPACEDIM*2>, NBCVAR_max> m_bc_prim_given{};
 
     // These are the "physical" boundary condition types (e.g. "inflow")
     amrex::GpuArray<ERF_BC, AMREX_SPACEDIM*2> phys_bc_type;
