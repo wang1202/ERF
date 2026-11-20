@@ -1116,6 +1116,13 @@ struct SolverChoice {
             amrex::Error("erf.buildings_type = ImmersedForcing is not supported with erf.terrain_type = EB");
         }
 
+        // Each surface builds its own EB index space, and the factories use only the last one
+        // (the buildings), so the terrain would be dropped without warning (#5188)
+        if (terrain_type == TerrainType::ImmersedForcing && buildings_type == BuildingsType::ImmersedForcing) {
+            amrex::Error("erf.terrain_type = ImmersedForcing and erf.buildings_type = ImmersedForcing "
+                         "cannot be used together");
+        }
+
         if ( (moisture_type == MoistureType::SAM                ||
               moisture_type == MoistureType::SAM_NoIce          ||
               moisture_type == MoistureType::SAM_NoPrecip_NoIce   ) &&
@@ -1732,10 +1739,6 @@ struct SolverChoice {
                 amrex::Abort("erf.if_implicit_projection needs erf.terrain_type = ImmersedForcing or "
                              "erf.buildings_type = ImmersedForcing");
             }
-            if (if_terrain && if_buildings) {
-                amrex::Abort("erf.if_implicit_projection is not implemented for erf.terrain_type = ImmersedForcing "
-                             "together with erf.buildings_type = ImmersedForcing");
-            }
             if (mesh_type != MeshType::ConstantDz) {
                 amrex::Abort("erf.if_implicit_projection needs a constant-dz mesh");
             }
@@ -2064,9 +2067,6 @@ struct SolverChoice {
         pp.queryAdd("transport_scalar",transport_scalar);
 
         for (int lev = 0; lev <= max_level; ++lev) {
-            if (turbChoice[lev].uses_eamxx_shoc()) {
-                use_eamxx_shoc = true;
-            }
             if (turbChoice[lev].uses_native_shoc()) {
                 use_native_shoc = true;
                 read_shoc_transport_modes(shoc_transport_mode, shoc_momentum_transport);
@@ -3119,7 +3119,6 @@ struct SolverChoice {
     bool use_rotate_surface_flux = false;
 
     // Should we use SHOC?
-    bool use_eamxx_shoc = false;
     bool use_native_shoc = false;
 
     // Native shoc transport mode
@@ -3237,11 +3236,11 @@ struct SolverChoice {
 
     /**
      * @brief Query whether any SHOC-family PBL scheme is active.
-     * @return True if native or EAMxx SHOC is active.
+     * @return True if native SHOC is active.
      */
     bool uses_shoc_family () const noexcept
     {
-        return (use_eamxx_shoc || use_native_shoc);
+        return use_native_shoc;
     }
 
     /**
@@ -3250,7 +3249,6 @@ struct SolverChoice {
      */
     bool host_owns_vertical_momentum_diffusion () const noexcept
     {
-        if (use_eamxx_shoc)   { return false; }
         if (!use_native_shoc) { return true;  }
         return shoc_disables_momentum_transport(shoc_momentum_transport);
     }
@@ -3261,7 +3259,6 @@ struct SolverChoice {
      */
     bool host_owns_vertical_scalar_diffusion () const noexcept
     {
-        if (use_eamxx_shoc)   { return false; }
         if (!use_native_shoc) { return true;  }
         return false;
     }
@@ -3685,8 +3682,6 @@ struct SolverChoice {
  * @brief Whether solution fields are nudged toward observations at stations.
  * @var SolverChoice::use_rotate_surface_flux
  * @brief Whether MOST surface fluxes are rotated with terrain.
- * @var SolverChoice::use_eamxx_shoc
- * @brief Whether any level uses the EAMxx SHOC PBL scheme.
  * @var SolverChoice::use_native_shoc
  * @brief Whether any level uses the native SHOC PBL scheme.
  * @var SolverChoice::transport_scalar

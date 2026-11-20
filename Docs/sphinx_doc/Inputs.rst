@@ -576,6 +576,15 @@ List of Parameters
 | **erf.cf_set_width**                             | width, in cells, of the region within ``erf.cf_width``   | Integer >= 0       | 0                    |
 |                                                  | in which the fine solution is set from the coarse one    |                    |                      |
 +--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
+| **erf.perturbational_interpolation**             | fill rho, rho theta and (with moisture) rho qv from the  | Boolean            | true                 |
+|                                                  | coarser level -- in the coarse/fine ghost cells and in   |                    |                      |
+|                                                  | the cells a regrid newly covers -- by interpolating      |                    |                      |
+|                                                  | their departures from the base state and adding the      |                    |                      |
+|                                                  | fine level's base state back, so that an atmosphere in   |                    |                      |
+|                                                  | its base state stays in it on the fine level whatever    |                    |                      |
+|                                                  | the two levels' heights; false interpolates rho,         |                    |                      |
+|                                                  | rho theta and rho qv themselves                          |                    |                      |
++--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
 | **erf.cf_loglaw_fill**                           | lateral coarse/fine faces next to a wall (the immersed   | Boolean            | false                |
 |                                                  | surface, or a ``surface_layer`` bottom; constant dz, not |                    |                      |
 |                                                  | EB terrain): share the flux of the first coarse face     |                    |                      |
@@ -1566,6 +1575,13 @@ List of Parameters
 |                                     | see :ref:`sec:RadiationDatalog`                          |                    |                  |
 +-------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.plot_lsm**                    | write the land-surface-model fields to the plotfile      | Boolean            | false            |
+|                                     | (``plt_lsm_*``). With NetCDF plotfiles the SLM fields go |                    |                  |
+|                                     | to one file per level, ``plt_lsm_lev<L>.nc``, each on    |                    |                  |
+|                                     | that level's whole domain (cells outside a refined       |                    |                  |
+|                                     | level's grids are left unset), with one time entry per   |                    |                  |
+|                                     | plotfile; a restarted run appends to these files. The 3D |                    |                  |
+|                                     | land plotfiles ``plt_lsm_<step>`` are always written in  |                    |                  |
+|                                     | the AMReX format                                         |                    |                  |
 +-------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.plot_surfmodel**              | write SurfaceModel fields to ``plt_surf_*`` files;       | Boolean            | both LSM+Urban   |
 |                                     | independent of ``erf.plot_lsm``                          |                    | active by default|
@@ -1578,6 +1594,12 @@ List of Parameters
 |                                     | plotfile                                                 |                    |                  |
 +-------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.write_eb_surface**            | write the embedded-boundary surface as a separate file   | Boolean            | false            |
+|                                     | (eb.pvtp) and, for erf.terrain_type = EB, its nodal      |                    |                  |
+|                                     | level set (eb_levelset.vtm, in the directory of          |                    |                  |
+|                                     | erf.plot_file_1), once at initialization. eb.pvtp holds  |                    |                  |
+|                                     | the finest level that exists then, and eb_levelset.vtm   |                    |                  |
+|                                     | every level that exists then (not levels made later by   |                    |                  |
+|                                     | regridding). The level set needs a mesh with constant dz |                    |                  |
 +-------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.rad.datalog**                 | name of the log file to which radiation profiles are     | String             | None             |
 |                                     | written; see :ref:`sec:RadiationDatalog`                 |                    |                  |
@@ -1828,7 +1850,16 @@ With immersed terrain (``erf.terrain_type = ImmersedForcing`` or ``EB``) the gro
 terrain surface, as for stations, rather than the bottom of the flat mesh. On these meshes the
 variable ``z``, the height of each sample, is always written with the line, since the z
 coordinates of a line plotfile assume equally spaced levels; it may be requested on any mesh.
-Plane sampling has not been implemented for terrain.
+
+A plane is placed, and its plotfile written, in the computational coordinates, in which the
+levels of cells are equally spaced. On a stretched or terrain-fitted mesh these are not the
+physical height. A horizontal plane (``sample_plane_dir = 2``) at z is interpolated between the two
+levels of cells whose nominal heights bracket z, so over terrain it follows the mesh rather than a
+constant physical height; the vertical axis of a vertical plane is the nominal height of each level
+of cells. On these meshes the variable ``z_phys``, the physical height of each sample, is always
+written with the planes; it may be requested on any mesh. Planes at a constant physical height are
+not supported. A horizontal line with ``erf.sample_line_interp = true`` gives a 1-D transect at a
+constant height.
 
 With ``erf.sample_line_interp = true``, lines given by ``sample_line_lo_real`` and
 ``sample_line_hi_real`` (or ``sample_line_lo_latlon`` and ``sample_line_hi_latlon``) are sampled
@@ -1891,11 +1922,14 @@ The sampled variables can be selected with the ``erf.line_sampling_vars`` and
 ``erf.plane_sampling_vars`` options and include a subset of the plotfile outputs:
 ``density``, ``x_velocity``, ``y_velocity``, ``z_velocity``, ``magvel``,
 ``theta``, ``qv``, ``qc``, and ``pressure``. Line sampling additionally supports
-``conserved``, ``z``, ``sgs_tke``, ``sgs_tau11``, ``sgs_tau12``, ``sgs_tau13``, ``sgs_tau22``,
-``sgs_tau23``, ``sgs_tau33``, and ``sgs_hfx3``. Both also support ``volfrac``, the volume
-fraction of each cell (1 without immersed terrain). ``conserved`` writes every component of the
-conserved state as stored, named ``cons_0``, ``cons_1``, ... in component order (density,
-rho theta, ...). The variables are written in a fixed order, not the order they are listed in.
+``conserved``, ``sgs_tke``, ``sgs_tau11``, ``sgs_tau12``, ``sgs_tau13``, ``sgs_tau22``,
+``sgs_tau23``, ``sgs_tau33``, and ``sgs_hfx3``. Both also support the physical height of each
+sample, written as ``z`` by line sampling and as ``z_phys`` (the name of the 3D plotfile variable)
+by plane sampling, which accepts either name, and ``volfrac``, the volume fraction of each cell
+(1 without immersed terrain).
+``conserved`` writes every component of the conserved state as stored, named ``cons_0``,
+``cons_1``, ... in component order (density, rho theta, ...). The variables are written in a
+fixed order, not the order they are listed in.
 The SGS stresses ``sgs_tau11``, ``sgs_tau22`` and ``sgs_tau33`` are stored at cell centers; the
 other stresses and the heat flux are averaged from their native edge/face locations to cell
 centers; if their diffusion storage is unavailable, ERF writes zero. Velocities
@@ -2718,12 +2752,12 @@ List of Parameters
 | **erf.pbl_type**                         | Name of PBL Scheme to be used                            | "None", "MYNN25",  | "None"           |
 |                                          |                                                          | "MYNNEDMF", "MYJ", |                  |
 |                                          |                                                          | "YSU", "MRF",      |                  |
-|                                          |                                                          | "NATIVE_SHOC",     |                  |
-|                                          |                                                          | "EAMXX_SHOC";      |                  |
-|                                          |                                                          | legacy "SHOC" is   |                  |
-|                                          |                                                          | deprecated and     |                  |
-|                                          |                                                          | maps to            |                  |
-|                                          |                                                          | "EAMXX_SHOC";      |                  |
+|                                          |                                                          | "NATIVE_SHOC";     |                  |
+|                                          |                                                          | "SHOC" selects     |                  |
+|                                          |                                                          | "NATIVE_SHOC" with |                  |
+|                                          |                                                          | a warning;         |                  |
+|                                          |                                                          | "EAMXX_SHOC" is no |                  |
+|                                          |                                                          | longer accepted;   |                  |
 |                                          |                                                          | legacy "YSUNew" is |                  |
 |                                          |                                                          | deprecated and     |                  |
 |                                          |                                                          | maps to "YSU"      |                  |
@@ -4201,7 +4235,7 @@ List of Parameters
 +----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.buildings_type**           | how buildings are represented; see :ref:`Forcings`;      | None,              | None             |
 |                                  | ImmersedForcing is not supported with                    | ImmersedForcing    |                  |
-|                                  | ``erf.terrain_type`` = EB                                |                    |                  |
+|                                  | ``erf.terrain_type`` = EB or ImmersedForcing             |                    |                  |
 +----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.buildings_fc_factories**   | use native face-centered EB factories for immersed       | Boolean            | false            |
 |                                  | buildings with ``StaticFittedMesh`` terrain; see         |                    |                  |
@@ -4347,7 +4381,7 @@ Immersed Forcing
 
 These inputs configure the immersed-forcing representation of solid bodies,
 selected with ``erf.terrain_type`` = ``ImmersedForcing`` or
-``erf.buildings_type`` = ``ImmersedForcing``.  At most one of
+``erf.buildings_type`` = ``ImmersedForcing``, but not both in the same run.  At most one of
 ``erf.if_surf_temp_flux``, ``erf.if_init_surf_temp`` and ``erf.if_Olen`` may be set.
 
 Building immersed forcing is applied only on levels where the nominal horizontal
@@ -6164,22 +6198,18 @@ atmospheric cell), ``start_datetime`` and the
 SHOC
 ======================
 
-ERF provides two SHOC implementations. Select the ERF-native implementation with
-``erf.pbl_type = NATIVE_SHOC``. Select the optional EAMxx implementation with
-``erf.pbl_type = EAMXX_SHOC``. The legacy value ``SHOC`` is deprecated and is
-interpreted as ``EAMXX_SHOC``; it does not select native SHOC.
+ERF provides a native SHOC implementation, selected with
+``erf.pbl_type = NATIVE_SHOC``. The value ``SHOC`` is also accepted and selects
+native SHOC, with a warning that its meaning has changed: it used to select the
+EAMxx SHOC interface. That interface has been removed, and
+``erf.pbl_type = EAMXX_SHOC`` now stops the run with an error.
 
-Both SHOC implementations use the ``erf.shoc`` namespace for closure tuning.
-Native SHOC also has transport and native-only numerical controls. EAMxx SHOC
-has a small number of interface-only controls. See :ref:`SHOC` for the model
-description, coupling restrictions, transport behavior, and diagnostic output.
+SHOC uses the ``erf.shoc`` namespace for closure tuning, transport, and
+numerical controls. See :ref:`SHOC` for the model description, coupling
+restrictions, transport behavior, and diagnostic output.
 
-Shared SHOC closure inputs
---------------------------
-
-The following option names are read by both native SHOC and EAMxx SHOC. The two
-implementations are separate code paths, so identical input values do not imply
-bit-for-bit identical calculations.
+SHOC closure inputs
+-------------------
 
 .. list-table::
    :header-rows: 1
@@ -6378,34 +6408,12 @@ parsed internally but do not currently alter Native SHOC.
 Each threshold is validated on read, and a non-positive value aborts the run
 with a message naming the input.
 
-EAMxx SHOC interface inputs
----------------------------
-
-The following controls have a verified runtime effect in the optional
-``EAMXX_SHOC`` interface and are not native-SHOC controls.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 36 52 18 12
-
-   * - Parameter
-     - Definition
-     - Acceptable Values
-     - Default
-   * - **erf.shoc.apply_tms**
-     - Apply the turbulent mountain stress contribution in the EAMxx SHOC interface.
-       Not supported: it needs a subgrid-orography drag coefficient, which ERF does
-       not provide, so ``true`` aborts. Native SHOC reads it but does not use it.
-     - false
-     - false
-   * - **erf.shoc.check_flux_state**
-     - Run the EAMxx SHOC interface flux/state consistency check
-     - true / false
-     - false
-
 Only options documented above are part of the supported SHOC user-facing
 runtime contract. Some historical or development ``erf.shoc`` keys may still
 be parsed internally but are intentionally not documented as active features.
+The EAMxx-only inputs ``erf.shoc.apply_tms`` and ``erf.shoc.check_flux_state``
+were removed with the EAMxx SHOC interface; ERF stops if an inputs file sets
+either one.
 
 Minimal native SHOC setup
 -------------------------
@@ -6425,23 +6433,6 @@ The native transport defaults are:
    erf.shoc.momentum_transport = state_update
 
 These two transport lines may be omitted when the defaults are desired.
-
-Minimal EAMxx SHOC setup
-------------------------
-
-The EAMxx SHOC path requires an executable built with the CMake option
-``ERF_ENABLE_EAMXX_SHOC=ON``. For example:
-
-.. code-block:: bash
-
-   cmake -DERF_ENABLE_EAMXX_SHOC=ON ...
-
-The corresponding runtime selection is:
-
-.. code-block:: text
-
-   zlo.type = "surface_layer"
-   erf.pbl_type = EAMXX_SHOC
 
 .. _inputs-runtime-error-checking:
 

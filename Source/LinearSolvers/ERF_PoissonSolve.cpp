@@ -236,6 +236,40 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
 {
     BL_PROFILE("ERF::project_momenta()");
     Real l_dt = static_cast<Real>(l_dt_d);
+    // Impose the velocity on the inflow faces and remake the momenta from it.  This comes before
+    // the coarse/fine fill below: VelocityToMomentum rewrites every valid face, including the
+    // faces on the coarse/fine boundary, and those must keep the coarse fluxes (#5267)
+    // Inflow on an x-face -- note only the normal velocity is used in the projection
+    if (domain_bc_type[0] == "Inflow" || domain_bc_type[3] == "Inflow") {
+        (*physbcs_u[lev])(vars_new[lev][Vars::xvel],vars_new[lev][Vars::xvel],vars_new[lev][Vars::yvel],
+                        IntVect{1,0,0},t_new[lev],BCVars::xvel_bc,false);
+    }
+
+    // Inflow on a  y-face -- note only the normal velocity is used in the projection
+    if (domain_bc_type[1] == "Inflow" || domain_bc_type[4] == "Inflow") {
+        (*physbcs_v[lev])(vars_new[lev][Vars::yvel],vars_new[lev][Vars::xvel],vars_new[lev][Vars::yvel],
+                          IntVect{0,1,0},t_new[lev],BCVars::yvel_bc,false);
+    }
+
+    if (domain_bc_type[0] == "Inflow" || domain_bc_type[3] == "Inflow" ||
+        domain_bc_type[1] == "Inflow" || domain_bc_type[4] == "Inflow") {
+
+        const MultiFab* c_vfrac = nullptr;
+        if (solverChoice.terrain_type == TerrainType::EB) {
+            c_vfrac = &((get_eb(lev).get_const_factory())->getVolFrac());
+        }
+
+        VelocityToMomentum(vars_new[lev][Vars::xvel], IntVect{0},
+                           vars_new[lev][Vars::yvel], IntVect{0},
+                           vars_new[lev][Vars::zvel], IntVect{0},
+                           vars_new[lev][Vars::cons],
+                           mom_mf[IntVars::xmom],
+                           mom_mf[IntVars::ymom],
+                           mom_mf[IntVars::zmom],
+                           Geom(lev).Domain(),
+                           domain_bcs_type, c_vfrac);
+    }
+
     //
     // If at lev > 0 we must first fill the momenta at the c/f interface with interpolated coarse values
     //
@@ -273,37 +307,6 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
 
     auto dx    = geom[lev].CellSizeArray();
     auto dxInv = geom[lev].InvCellSizeArray();
-
-    // Inflow on an x-face -- note only the normal velocity is used in the projection
-    if (domain_bc_type[0] == "Inflow" || domain_bc_type[3] == "Inflow") {
-        (*physbcs_u[lev])(vars_new[lev][Vars::xvel],vars_new[lev][Vars::xvel],vars_new[lev][Vars::yvel],
-                        IntVect{1,0,0},t_new[lev],BCVars::xvel_bc,false);
-    }
-
-    // Inflow on a  y-face -- note only the normal velocity is used in the projection
-    if (domain_bc_type[1] == "Inflow" || domain_bc_type[4] == "Inflow") {
-        (*physbcs_v[lev])(vars_new[lev][Vars::yvel],vars_new[lev][Vars::xvel],vars_new[lev][Vars::yvel],
-                          IntVect{0,1,0},t_new[lev],BCVars::yvel_bc,false);
-    }
-
-    if (domain_bc_type[0] == "Inflow" || domain_bc_type[3] == "Inflow" ||
-        domain_bc_type[1] == "Inflow" || domain_bc_type[4] == "Inflow") {
-
-        const MultiFab* c_vfrac = nullptr;
-        if (solverChoice.terrain_type == TerrainType::EB) {
-            c_vfrac = &((get_eb(lev).get_const_factory())->getVolFrac());
-        }
-
-        VelocityToMomentum(vars_new[lev][Vars::xvel], IntVect{0},
-                           vars_new[lev][Vars::yvel], IntVect{0},
-                           vars_new[lev][Vars::zvel], IntVect{0},
-                           vars_new[lev][Vars::cons],
-                           mom_mf[IntVars::xmom],
-                           mom_mf[IntVars::ymom],
-                           mom_mf[IntVars::zmom],
-                           Geom(lev).Domain(),
-                           domain_bcs_type, c_vfrac);
-    }
 
     // ****************************************************************************
     // A pseudo-incompressible level projects m = beta (rho u) with beta = (rho0 theta0) / rho on
@@ -436,10 +439,12 @@ void ERF::project_momenta (int lev, double l_time, double l_dt_d, Vector<MultiFa
                              RhoTheta_comp+1, ng_c);
             MultiFab::Copy(pi_cons, mom_mf[Vars::cons], Rho_comp, Rho_comp, 1, ng_c);
             MultiFab::Copy(pi_cons, rho0_theta0, 0, RhoTheta_comp, 1, ng_c);
-            if (lev > 0) {
+            if (lev > 0 && !perturbational_interp) {
                 // At a coarse/fine boundary theta comes from the coarse (rho theta) and rho,
                 // interpolated as the fill of the state interpolates them, so rho0 theta0 gets
-                // its ghost cells there from the coarse rho0 theta0 in the same way
+                // its ghost cells there from the coarse rho0 theta0 in the same way.  With
+                // erf.perturbational_interpolation the fill adds the perturbation to this level's
+                // own rho0 theta0, which its ghost cells already hold.
                 const IntVect ng_bc = base_state[lev-1].nGrowVect();
                 MultiFab crse_r0t0(base_state[lev-1].boxArray(), base_state[lev-1].DistributionMap(), 1, ng_bc);
                 MultiFab::Copy    (crse_r0t0, base_state[lev-1], BaseState::r0_comp , 0, 1, ng_bc);
