@@ -102,6 +102,7 @@ function(build_erf_lib erf_lib_name)
                    ${SRC_DIR}/Particles/ERFPCUtils.cpp
                    ${SRC_DIR}/Particles/ERFTracers.cpp
                    ${SRC_DIR}/Particles/ERF_SDInitialization.cpp
+                   ${SRC_DIR}/Particles/ERF_SDWallLossHistory.cpp
                    ${SRC_DIR}/Particles/ERF_SuperDropletPCAddParticles.cpp
                    ${SRC_DIR}/Particles/ERF_SuperDropletPCAdvection.cpp
                    ${SRC_DIR}/Particles/ERF_SuperDropletPCBoundaries.cpp
@@ -110,7 +111,8 @@ function(build_erf_lib erf_lib_name)
                    ${SRC_DIR}/Particles/ERF_SuperDropletPCInitializations.cpp
                    ${SRC_DIR}/Particles/ERF_SuperDropletPCMassChange.cpp
                    ${SRC_DIR}/Particles/ERF_SuperDropletPCRecycle.cpp
-                   ${SRC_DIR}/Particles/ERF_SuperDropletPCUtils.cpp)
+                   ${SRC_DIR}/Particles/ERF_SuperDropletPCUtils.cpp
+                   ${SRC_DIR}/Particles/ERF_SuperDropletPCWallLoss.cpp)
     target_include_directories(${erf_lib_name} PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/Source/Particles>)
     target_compile_definitions(${erf_lib_name} PUBLIC ERF_USE_PARTICLES)
   endif()

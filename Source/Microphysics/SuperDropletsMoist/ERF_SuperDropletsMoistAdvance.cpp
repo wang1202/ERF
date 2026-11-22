@@ -101,6 +101,9 @@ void SuperDropletsMoist::Advance ( const Real& a_dt,
                                             m_recycle_particles );
     }
 
+    // Independent of resolved impacts: also acts when advection is disabled.
+    m_super_droplets->WallLoss(current_lev, a_dt, a_time, a_iter, a_bc);
+
     // Coalescence of super-droplets
     if (m_flag_coalescence) {
         // Compute moist density

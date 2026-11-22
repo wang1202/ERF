@@ -78,9 +78,9 @@ Choose the thermodynamic mode
        initialization and injection inputs; without them nothing
        condenses. A super-droplet that reaches a wall is deactivated (and
        removed unless recycled or kept for inactive-particle output); the
-       walls have no deposition law. The
-       conserved-scalar budget does not support this model. Requires a
-       build with particles enabled.
+      optional :ref:`CloudChamberParticleLoss` acts separately on suspended
+      droplets. The conserved-scalar budget does not support this model.
+      Requires a build with particles enabled.
 
 For dry mode, omit ``erf.moisture_model`` rather than explicitly setting it
 to ``None``. An explicit ``None`` is rejected with a diagnostic naming this
@@ -92,7 +92,7 @@ water and of additional conserved moisture constituents to zero. These
 boundary rules do not make a precipitating simulation a closed total-water
 system: a selected bulk microphysics scheme can sediment rain, snow, or
 graupel through the lower boundary and update its native surface
-precipitation accumulator. The wall model does not add a droplet-impact,
+precipitation accumulator. The fluid wall closures do not add a droplet-impact,
 aerosol-deposition, or facility-specific collection law.
 
 A ``wet`` wall requires a supported active moisture model. It exchanges
@@ -109,6 +109,60 @@ For any active supported moisture model, physical initialization requires
 ``legacy_theta_qv`` mode also accepts the supported moisture models, using
 its legacy ``theta`` and ``qv`` profiles and wall keys rather than the
 generalized physical-temperature wall configuration.
+
+.. _CloudChamberParticleLoss:
+
+Particle wall loss in chamber runs
+----------------------------------
+
+With ``SuperDroplets``, choose between a deposition velocity in wall-adjacent
+cells and an empirical decay rate for the whole suspended population. Both
+are particle sinks, independent of whether the fluid walls are wet or dry.
+See :ref:`sec:SDWallLoss` for all inputs, defaults, and output columns.
+
+These are **alternative, synthetic examples**, not Pi-Chamber calibrations.
+To prescribe only a sidewall sink in an otherwise configured SDM chamber:
+
+.. code-block:: none
+
+   super_droplets_moisture.wall_loss.enable = true
+   super_droplets_moisture.wall_loss.deposition_velocity = 0
+   super_droplets_moisture.wall_loss.vd_side = 2e-5     # m/s
+
+Alternatively, prescribe a chamber-wide decay profile. The lookup diameter is
+twice the droplet's **current effective radius**, which changes with condensate;
+it is not the injected aerosol's dry diameter. Here a 1 µm wet particle has
+an initial rate of 0.2 per hour (5-hour e-folding time):
+
+.. code-block:: none
+
+   super_droplets_moisture.wall_loss.enable = true
+   super_droplets_moisture.wall_loss.deposition_velocity_model = measured_rate
+   super_droplets_moisture.wall_loss.profile_diameter_units = um
+   super_droplets_moisture.wall_loss.profile_diameters = 0.1 1 10
+   super_droplets_moisture.wall_loss.profile_rate_units = h^-1
+   super_droplets_moisture.wall_loss.profile_rates = 0.4 0.2 0.3
+
+In a closed 2 m × 2 m × 1 m box the measured model reports half the loss on
+the four sides, one quarter on the roof and one quarter on the floor, purely
+by area. These are not measured impact locations. Physical wall crossings
+during particle advection remain active and are **not** in the wall-loss log.
+Leave ``super_droplets_moisture.wall_loss.settling_correction = false`` when
+particle motion already represents settling; the measured model ignores that
+switch. Do not add a measured *total* decay to simulated impacts, settling or
+coalescence already present in those data. Use a rate for the remaining loss,
+or disable the overlapping processes. ``super_droplets_moisture.advect_with_gravity = false``
+turns off particle settling, not chamber gravity or flow-driven wall impacts.
+For a sink-only comparison, set ``super_droplets_moisture.include_advection = false``
+to exclude all crossings, use a seeded population without coalescence, phase
+change or further injection, and compare represented number, not super-droplet count.
+
+This sink neither returns deposited mass to vapor nor adds to precipitation
+or the chamber's Eulerian wall fluxes. Its separate particle log,
+``super_droplets_moisture_wall_loss.txt``, continues across native checkpoints.
+By contrast, :ref:`CloudChamberWallFlux` writes interval means to
+``wallflux_lev0.txt`` and does not support restart. Leave
+``erf.wallflux_diagnostics = false`` on a restarted particle run.
 
 Terminology
 -----------

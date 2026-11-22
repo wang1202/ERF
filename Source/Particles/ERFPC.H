@@ -142,6 +142,9 @@ class ERFPC : public amrex::ParticleContainer<  0,                              
             readInputs();
         }
 
+        //! Optional per-container sidecar, written after the native particle checkpoint.
+        virtual void checkpointExtra (const std::string&) const {}
+
         /*! Initialize particles in domain */
         virtual void InitializeParticles (const double time, const std::unique_ptr<amrex::MultiFab>& a_ptr = nullptr);
 

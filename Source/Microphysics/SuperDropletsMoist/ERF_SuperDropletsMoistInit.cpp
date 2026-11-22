@@ -27,6 +27,18 @@ void SuperDropletsMoist::Define (SolverChoice& a_sc)
     m_rdOcp = a_sc.rdOcp;
     m_compressibility_type = a_sc.compressibility_type;
     m_variable_dz = (a_sc.mesh_type != MeshType::ConstantDz);
+    bool wall_loss = false;
+    ParmParse(m_name).query("wall_loss.enable", wall_loss);
+    if (wall_loss) {
+        // SolverChoice sizes this array from the configured max_level, even before tagging.
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_compressibility_type.size() == 1,
+            "SD wall loss requires amr.max_level = 0");
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!m_variable_dz && a_sc.terrain_type == TerrainType::None &&
+            a_sc.buildings_type == BuildingsType::None && !a_sc.test_mapfactor && a_sc.test_mapfactor_amp == 0,
+            "SD wall loss requires a flat, uniform Cartesian mesh without map factors or embedded obstacles");
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!a_sc.moisture_tight_coupling,
+            "SD wall loss requires moisture_tight_coupling = false (one update per physical step)");
+    }
 }
 
 /*! \brief Read model configuration parameters from input file
@@ -279,6 +291,7 @@ void SuperDropletsMoist::RestartParticles ( ParGDBBase* /* a_gdb */, const std::
 
     m_super_droplets->Restart(a_fname, m_name);
     m_super_droplets->Redistribute();
+    m_super_droplets->restartWallLoss(a_fname);
     m_restarted_particles = true;
 
     amrex::Print() << "Restarted "

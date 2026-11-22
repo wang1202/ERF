@@ -84,6 +84,7 @@ class ParticleData
                 auto name( m_namelist[i] );
                 auto particles( m_particle_species.at(name) );
                 particles->Checkpoint( a_fname, name, true, particles->varNames() );
+                particles->checkpointExtra(a_fname);
             }
         }
 

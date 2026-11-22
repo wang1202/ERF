@@ -1696,6 +1696,40 @@ endfunction(add_test_shoc_mutation)
 # and expose stable diagnostic fields for automated CI forensics.
 add_test_cloud_chamber_fixed_dt_guard(CloudChamber_Bulk_FixedDtGuard)
 
+# A particle-filled, stationary box: compare the loss history to both a
+# closed-form cell-by-cell solution and native particle-to-mesh output.
+# No gold data, Python, ML diagnostics, or particle plotfile reader needed.
+if(ERF_ENABLE_PARTICLES AND NOT (ERF_ENABLE_CUDA OR ERF_ENABLE_HIP OR ERF_ENABLE_SYCL))
+    add_executable(erf_sd_wall_loss_check SDWallLossCheck.cpp)
+    target_link_libraries(erf_sd_wall_loss_check PRIVATE AMReX::amrex)
+    target_compile_features(erf_sd_wall_loss_check PRIVATE cxx_std_17)
+    function(add_sd_wall_loss_test suffix mode ranks)
+        set(TEST_NAME CloudChamber_SDM_WallLoss_${suffix})
+        set(TEST_FILES_DIR CloudChamber_SDM_WallLoss)
+        setup_test()
+        set(launcher "")
+        if(ERF_ENABLE_MPI)
+            set(launcher "${MPIEXEC_EXECUTABLE}")
+        endif()
+        string(JOIN " " preflags ${MPIEXEC_PREFLAGS})
+        add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_COMMAND}
+            "-DMPIEXEC=${launcher}" "-DMPIEXEC_NUMPROC_FLAG=${MPIEXEC_NUMPROC_FLAG}"
+            "-DMPIEXEC_PREFLAGS=${preflags}" "-DNRANKS=${ranks}" "-DMODE=${mode}"
+            "-DTEST_EXE=$<TARGET_FILE:erf_exec>" "-DCHECKER=$<TARGET_FILE:erf_sd_wall_loss_check>"
+            "-DWORKING_DIRECTORY=${CURRENT_TEST_BINARY_DIR}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/RunSDWallLoss.cmake")
+        set_tests_properties(${TEST_NAME} PROPERTIES TIMEOUT 600 PROCESSORS ${ranks}
+            ENVIRONMENT "OMP_NUM_THREADS=1" LABELS "regression;cloud-chamber;particles;sd-wall-loss")
+    endfunction()
+    foreach(mode Disabled Constant Measured Periodic Settling Threshold Diffusion Stochastic Restart Reject)
+        add_sd_wall_loss_test(${mode} ${mode} 1)
+    endforeach()
+    if(ERF_ENABLE_MPI AND ERF_TEST_NRANKS GREATER 1)
+        add_sd_wall_loss_test(Constant_MPI Constant ${ERF_TEST_NRANKS})
+        add_sd_wall_loss_test(Restart_MPI Restart ${ERF_TEST_NRANKS})
+    endif()
+endif()
+
 if(ERF_ENABLE_MPI)
 add_test_anelastic_wall_diffusion(AnelasticWallDiffusion_X 0)
 add_test_anelastic_wall_diffusion(AnelasticWallDiffusion_Y 1)

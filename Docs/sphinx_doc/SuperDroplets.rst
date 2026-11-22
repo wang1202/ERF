@@ -389,6 +389,132 @@ returned to the domain at a new position.
 | **recycle_zmin**, **recycle_zmax**              | z-bounds of that region                                  | Real                                             | domain bounds                       |
 +-------------------------------------------------+----------------------------------------------------------+--------------------------------------------------+-------------------------------------+
 
+.. _sec:SDWallLoss:
+
+Super-droplet wall loss
+-----------------------
+
+``super_droplets_moisture.wall_loss.enable = true`` removes represented droplets
+from suspension (default ``false``). All keys below use the prefix
+``super_droplets_moisture.wall_loss.``. Use a flat, uniform Cartesian grid with
+``amr.max_level = 0`` and ``erf.mesh_type = ConstantDz``; stretched grids,
+terrain, embedded boundaries and configured refinement are not supported.
+Use ``erf.moisture_tight_coupling = false``: the sink acts once per physical
+step, after optional advection and boundary crossings, before coalescence and
+recycling, not once per phase-change substep. It reduces active particles'
+multiplicity, not their radius or mass per real droplet. Condensate projection
+reflects that loss; it is not a vapor source, latent heat flux, precipitation
+accumulation or aerosol re-emission. For chamber setup and avoiding duplicate
+losses, see :ref:`CloudChamberParticleLoss`.
+
+Choosing the loss rate
+~~~~~~~~~~~~~~~~~~~~~~
+
+``deposition_velocity_model`` selects one of three models. Only nonperiodic
+no-slip, slip or surface-layer walls count; open and periodic faces never
+contribute. With no eligible wall there is no sink.
+
+``constant`` (default)
+   Only particles in wall-adjacent cells lose multiplicity. For each wall face
+   touching the cell, :math:`k_b=v_{d,b} A_b/V_{\rm cell}` in inverse seconds;
+   add **all** such rates, including at edges and corners. Interior cells have
+   zero rate. ``vd_side`` (all four lateral walls), ``vd_top`` and ``vd_bottom``
+   each default to ``1e-4`` m/s. Optional ``deposition_velocity`` sets all three
+   first; individual keys override it. Use nonnegative speeds. For one face the
+   local decay timescale is :math:`\Delta n/v_d`, where :math:`\Delta n` is the
+   cell width normal to the wall, not the chamber width. For example, a 0.0625 m
+   cell at the default speed gives 625 s. A *well-mixed chamber* instead has
+   rate :math:`\sum_b v_{d,b} A_{b,\rm chamber}/V_{\rm chamber}`.
+
+``diffusion`` (alias ``stokes_einstein``)
+   Uses the same wall cells and face-area factors, but replaces the constant
+   speeds by :math:`D_B(r)/\delta`, where the Brownian diffusivity is
+   :math:`D_B=k_B T C_c/(6\pi\mu r)` in m²/s. The prescribed gas temperature
+   ``diffusion_temperature`` is 293 K by default, dynamic viscosity
+   ``diffusion_viscosity`` is ``1.8e-5`` Pa s, and wall-layer thickness
+   ``diffusion_delta`` is ``1e-3`` m. This thickness is not the grid spacing.
+   ``diffusion_slip_correction = true`` uses the Cunningham factor :math:`C_c`
+   with ``diffusion_mean_free_path = 6.6e-8`` m; ``false`` sets :math:`C_c=1`.
+
+For **both face models**, ``vd_floor`` (default ``0`` m/s) is a lower bound
+on the base speed at *every* wall, not the bottom-wall speed. After applying
+that bound, ``settling_correction = true`` adds the magnitude of the particle's
+terminal speed at the bottom, subtracts it at the top (minimum zero), and
+leaves the sides unchanged. The correction is off by default. It uses the speed
+stored by particle advection, not a separate fall-speed calculation. To refresh
+that speed without moving the particles, use ``include_advection = true`` with
+``advect_with_flow = false`` and ``advect_with_gravity = false`` and no prescribed
+motion. If advection is skipped, a newly initialized particle has zero stored speed.
+
+``measured_rate`` (alias ``measured_profile``)
+   Applies a chamber-wide first-order rate :math:`k(D_p,t)` to **every**
+   suspended particle, including in the interior. There is no face-velocity
+   or cell-size factor. :math:`D_p=2r` is the current effective (wet) diameter,
+   not the dry aerosol injection diameter. Supply ``profile_diameters`` (1–64
+   positive, strictly increasing knots) and equally many nonnegative
+   ``profile_rates``. Rates interpolate linearly in *log diameter*, not log
+   rate; sizes outside the table use the nearest endpoint. A single knot gives
+   a size-independent rate. ``profile_diameter_units`` accepts ``m`` (default),
+   ``um`` (alias ``micron``) or ``nm``. ``profile_rate_units`` accepts ``s^-1``
+   (default; ``s-1`` or ``1/s``) or ``h^-1`` (``h-1`` or ``1/h``).
+
+   The profile is constant in time unless ``profile_rates_end`` supplies a
+   second set of rates on the same knots in the same units. Then specify
+   ``profile_time_start`` and ``profile_time_end`` in simulation seconds, end
+   greater than start. ERF blends the two rates linearly at the step midpoint,
+   holding the endpoint profiles outside the time range. ``settling_correction``
+   is ignored: the measured rate can already include settling.
+
+Multiplicity, output and restart
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+With loss probability :math:`P=1-\exp(-k\Delta t)`, ``method = deterministic``
+(default; alias ``exponential``) leaves :math:`\xi(1-P)` of the original
+multiplicity :math:`\xi`. ``stochastic`` (alias ``binomial``) approximates
+binomial thinning: a Poisson draw for :math:`\xi P<30`, otherwise a Gaussian
+with mean :math:`\xi P` and variance :math:`\xi P(1-P)`, bounded to
+:math:`[0,\xi]`. ``deactivate_on_depletion`` defaults to ``false``. If enabled
+and the remaining multiplicity falls below ``deactivate_threshold`` (default
+``1e-30`` real droplets), the residual is also counted as deposited and the
+super-droplet is removed, not recycled.
+
+``diag_interval`` sets the cadence for ``super_droplets_moisture_wall_loss.txt``.
+The default (100) samples steps 100, 200, and so on; ``0`` disables logging,
+not deposition. Each row reports domain-wide losses, not fluxes per unit area:
+
+#. **Columns 1–2:** start time and duration :math:`\Delta t` of the sampled step (s).
+#. **Columns 3–5:** represented droplet number lost on **that step** to sides,
+   top and bottom, respectively; not the number of computational particles.
+#. **Columns 6–8:** cumulative **total material mass** (kg) deposited on those
+   same wall groups through the end of the step. Every step contributes removed
+   multiplicity times the mass of one droplet, including aerosols and all
+   condensates, not just liquid water.
+#. **Columns 9 onward:** number lost on all walls in each **radius** bin divided
+   by the sampled step's :math:`\Delta t` (droplets/s), smallest radius first.
+   ``num_bins`` defaults to 16 (1–64); ``bin_rmin`` and ``bin_rmax`` default to
+   ``1e-8`` and ``1e-4`` m. Bins are log-spaced with outlying radii assigned to
+   the end bins. These are not the measured-profile diameter knots.
+
+Face models attribute loss by :math:`k_b/k`; the measured model uses each wall
+group's fraction of the **absorbing chamber area** for reporting only. The bin
+rates summed and multiplied by that row's :math:`\Delta t` recover its number
+loss. At cadence greater than one, neither number nor bin rates cover skipped
+steps. Difference the cumulative mass columns for an interval mass, or use
+``diag_interval = 1`` for a complete number history.
+
+Native checkpoints preserve cumulative masses even between log writes. Restart
+with compatible wall-loss settings: in the same run directory, the log must
+end at the checkpoint's last recorded row and is appended without duplicating
+it. In a fresh output directory the new log continues from checkpoint totals,
+not zero. A stale, ahead or incompatible log is rejected rather than overwritten.
+A checkpoint without valid wall-loss state cannot continue a loss history;
+older checkpoints remain usable with wall loss off. Continuity of the totals
+does not imply identical stochastic draws across restarts.
+
+If an interrupted write leaves a ``.lock`` directory, verify that no writer is
+active before inspecting or removing it. If the log is damaged or ahead of the
+checkpoint, restart in a fresh output directory instead of truncating the log.
+
 Diagnostics
 -----------
 

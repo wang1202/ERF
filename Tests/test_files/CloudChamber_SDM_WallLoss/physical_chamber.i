@@ -1,0 +1,34 @@
+# Same initialized particles, mesh, times and outputs in the actual named
+# chamber. Only the fluid has gravity (required by the chamber parser).
+FILE = CloudChamber_SDM_WallLoss.i
+erf.prob_name = "Cloud Chamber"
+erf.init_type = ConstantDensity
+erf.compressibility_type = Anelastic
+erf.use_gravity = true
+erf.project_initial_velocity = 0
+erf.timestepping_type = RK2
+erf.vert_implicit = false
+erf.molec_diff_type = ConstantAlpha
+erf.dynamic_viscosity = 1.717e-5
+erf.alpha_T = 0.001
+erf.alpha_C = 0.001
+erf.les_type = Smagorinsky
+erf.Cs = 0.1
+prob.thermodynamic_initialization = physical_temperature_rh
+prob.initial_temperature_bottom = 292
+prob.initial_temperature_top = 292
+prob.initial_relative_humidity = 0.5
+prob.temperature_perturbation_amplitude = 0
+prob.perturbation_mode = deterministic_sine
+xlo.temperature = 292
+xhi.temperature = 292
+ylo.temperature = 292
+yhi.temperature = 292
+zlo.temperature = 292
+zhi.temperature = 292
+xlo.moisture = dry
+xhi.moisture = dry
+ylo.moisture = dry
+yhi.moisture = dry
+zlo.moisture = dry
+zhi.moisture = dry

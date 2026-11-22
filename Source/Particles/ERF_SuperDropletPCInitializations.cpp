@@ -45,6 +45,8 @@ void SuperDropletPC::readInputs (const double a_dt)
 {
     BL_PROFILE("SuperDropletPC::readInputs");
     ParmParse pp(m_name);
+    sdwl::read_params(pp, m_wall_loss);
+    if (m_wall_loss.enable) { m_wall_loss_signature = sdwl::signature(m_wall_loss); }
 
     /* default values */
     m_density_scaling = false;

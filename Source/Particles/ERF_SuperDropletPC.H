@@ -6,6 +6,8 @@
 #include <random>
 #include "ERF_NumericalConstants.H"
 #include "ERF_MaterialProperties.H"
+#include "ERF_SDWallLoss.H"
+#include "ERF_SDWallLossHistory.H"
 #include "ERF_SuperDropletPCDefinitions.H"
 #include "ERF_SuperDropletPCProcess.H"
 #include <AMReX_StructOfArrays.H>
@@ -265,6 +267,18 @@ class SuperDropletPC : public ERFPC
                                     const amrex::MultiFab&,
                                     const amrex::Vector<MFPtr>& );
 
+        //! Optional multiplicity sink, once per physical timestep, after boundary crossings.
+        void WallLoss (int lev, amrex::Real dt, amrex::Real time, int iter, const BCTypeArr& bc);
+
+        void checkpointExtra (const std::string& dir) const override {
+            if (m_wall_loss.enable) { m_wall_loss_history.checkpoint(dir, m_name, m_wall_loss_signature); }
+        }
+        void restartWallLoss (const std::string& dir) {
+            if (m_wall_loss.enable) {
+                m_wall_loss_history.restart(dir, m_name, m_wall_loss_signature, m_wall_loss.diag_interval);
+            }
+        }
+
         /*! \brief Coalescence of super-droplets */
         virtual void Coalescence (  int,
                                     double,
@@ -442,6 +456,10 @@ class SuperDropletPC : public ERFPC
         bool splitMergeAMR () const { return m_split_merge_amr; }
 
     protected:
+
+        sdwl::Params m_wall_loss;
+        std::string m_wall_loss_signature;
+        sdwl::History m_wall_loss_history;
 
         SDCoalescenceKernelType m_coalescence_kernel; /*!< Coalescence kernel */
         amrex::Real m_ice_agg_eff; /*!< Ice-ice aggregation (collection) efficiency */
