@@ -576,6 +576,15 @@ List of Parameters
 | **erf.cf_set_width**                             | width, in cells, of the region within ``erf.cf_width``   | Integer >= 0       | 0                    |
 |                                                  | in which the fine solution is set from the coarse one    |                    |                      |
 +--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
+| **erf.perturbational_interpolation**             | fill rho, rho theta and (with moisture) rho qv from the  | Boolean            | true                 |
+|                                                  | coarser level -- in the coarse/fine ghost cells and in   |                    |                      |
+|                                                  | the cells a regrid newly covers -- by interpolating      |                    |                      |
+|                                                  | their departures from the base state and adding the      |                    |                      |
+|                                                  | fine level's base state back, so that an atmosphere in   |                    |                      |
+|                                                  | its base state stays in it on the fine level whatever    |                    |                      |
+|                                                  | the two levels' heights; false interpolates rho,         |                    |                      |
+|                                                  | rho theta and rho qv themselves                          |                    |                      |
++--------------------------------------------------+----------------------------------------------------------+--------------------+----------------------+
 | **erf.cf_loglaw_fill**                           | lateral coarse/fine faces next to a wall (the immersed   | Boolean            | false                |
 |                                                  | surface, or a ``surface_layer`` bottom; constant dz, not |                    |                      |
 |                                                  | EB terrain): share the flux of the first coarse face     |                    |                      |
@@ -1248,7 +1257,7 @@ Notes
      the horizontal and vertical eddy viscosities can differ (Smagorinsky2D, Smagorinsky or
      Deardorff with **erf.mix_isotropic** = false, or any PBL scheme), the largest slope factor
      :math:`\alpha = h \Delta x/\Delta z` of each level and the number of cells with
-     :math:`\alpha > 1` are printed whenever a level has a new set of grids (at initialisation,
+     :math:`\alpha > 1` are printed whenever a level has a new set of grids (at initialization,
      on the first step after a restart, and at the coarse step after a regrid), and with
      **erf.terrain_type** = MovingFittedMesh also whenever the largest :math:`\alpha` changes by
      more than 1 %.  Without those options nothing is computed or printed.
@@ -1511,6 +1520,11 @@ The number of output filenames specified through ``erf.data_log`` dictates the
 level of output. E.g., specifying 3 filenames will give outputs (1), (2), and (3);
 specifying 5 filenames will also include output (5). Data files are only written
 if ``erf.profile_int > 0``.
+
+With EB SurfaceLayer active (for any ``zlo.type``), the surface time history
+reports ``u_star``, ``t_star``, and ``olen`` as ``nan`` (unavailable). The EB
+fields use a 3D layout, and ``surface_sum`` samples the lowest grid plane rather
+than averaging over the embedded surface. These entries do not indicate zero surface fluxes.
 
 This output functionality has not been implemented for terrain.
 For **real simulation domains**, users should use 2-D and 3-D :ref:`sec:Plotfiles`.
@@ -2601,6 +2615,27 @@ List of Parameters
 |                                        | that switches it on at such a level stops the run        |                    |                  |
 |                                        | (per-level)                                              |                    |                  |
 +----------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.rans_shear_stencil**             | k-equation RANS: vertical gradients of u and v in the    | ``central`` or     | ``central``      |
+|                                        | strain invariant of the shear production of k and of the | ``log_law``        |                  |
+|                                        | realizability cap. ``central`` (default) averages the    |                    |                  |
+|                                        | strains of the faces below and above the cell;           |                    |                  |
+|                                        | ``log_law`` uses (u_k+1 - u_k-1) / [(d_k + z0) ln((d_k+1 |                    |                  |
+|                                        | + z0) / (d_k-1 + z0))] in the cells above the wall cell  |                    |                  |
+|                                        | and below the top cell (d wall distance, z0 roughness    |                    |                  |
+|                                        | length of the surface layer, ``erf.most.z0`` unless a    |                    |                  |
+|                                        | roughness file or model sets it). The form is exact for  |                    |                  |
+|                                        | a logarithmic profile over flat ground and less accurate |                    |                  |
+|                                        | than ``central`` for a profile that is linear in height. |                    |                  |
+|                                        | A cell whose d_k-1 + z0 would not be positive keeps the  |                    |                  |
+|                                        | ``central`` value. ``log_law`` needs ``erf.rans_type =   |                    |                  |
+|                                        | kEqn`` and ``zlo.type = surface_layer`` and stops the    |                    |                  |
+|                                        | run with EB or immersed-forcing terrain or buildings,    |                    |                  |
+|                                        | thin immersed bodies or ``erf.terrain_type =             |                    |                  |
+|                                        | MovingFittedMesh``; a single value is reset to           |                    |                  |
+|                                        | ``central`` on levels without the k-eqn closure, a       |                    |                  |
+|                                        | per-level list that names such a level stops the run     |                    |                  |
+|                                        | (per-level)                                              |                    |                  |
++----------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.rans_moist_buoyancy**            | k-equation RANS with a moisture model that carries water | Boolean            | false            |
 |                                        | vapor: TKE buoyancy production from the virtual          |                    |                  |
 |                                        | potential temperature flux, g/theta_v0 [(1 + epsv qv)    |                    |                  |
@@ -2807,7 +2842,7 @@ List of Parameters
 | **erf.enable_ysu_cloud_pblh**            | YSU only, with a moisture model: raise the PBL-top cell  | Boolean            | true             |
 |                                          | index by one where the cloud water plus cloud ice in the |                    |                  |
 |                                          | PBL-top cell exceeds ``erf.ysu_qcloud_threshold``. The   |                    |                  |
-|                                          | PBL height in metres does not change. Applies whether    |                    |                  |
+|                                          | PBL height in meters does not change. Applies whether    |                    |                  |
 |                                          | or not ``erf.enable_ysu_entrainment`` is set             |                    |                  |
 +------------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.ysu_qcloud_threshold**             | YSU only: cloud water plus cloud ice [kg/kg] above which | Real               | 1.0e-4           |
@@ -3890,10 +3925,13 @@ List of Parameters
 |                             | substepping; positive values weight the update towards   |                    |                  |
 |                             | the new time                                             |                    |                  |
 +-----------------------------+----------------------------------------------------------+--------------------+------------------+
-| **erf.use_variable_beta_s** | with implicit substepping, use a beta_s that varies      | Boolean            | false            |
+| **erf.use_variable_beta_s** | with implicit substepping, use a beta_s that varies      | Boolean            | unset            |
 |                             | on the w-faces with the terrain slope and the vertical   |                    |                  |
 |                             | acoustic Courant number, in place of ``erf.beta_s``      |                    |                  |
-|                             | (see :ref:`TimeAdvance`)                                 |                    |                  |
+|                             | (see :ref:`TimeAdvance`).  If not given, turned on       |                    |                  |
+|                             | automatically on a terrain-fitted mesh where             |                    |                  |
+|                             | ``erf.beta_s`` is below min(h_xi^2 + h_eta^2, 1) on any  |                    |                  |
+|                             | w-face; an explicit false keeps ``erf.beta_s``           |                    |                  |
 +-----------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.beta_d**              | divergence damping coefficient used in the acoustic      | Real in [0, 1]     | 0.1              |
 |                             | substepping; how far (rho theta) is projected forward    |                    |                  |
@@ -4992,6 +5030,8 @@ the ones marked **Required** abort the run if they are not given.
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
 | **erf.most.roughness_file_name**      | text file of (x, y, z0) giving a spatially varying       | String, or list of  | None             |
 |                                       | roughness length; may be given once or once per level.   | Strings             |                  |
+|                                       | Supported for EB by vertical extension of the map;       |                     |                  |
+|                                       | see :ref:`sec:surface_layer` for the file format.        |                     |                  |
 |                                       | Read only when ``flux_type`` is ``moeng`` or when        |                     |                  |
 |                                       | surface-flux rotation is active                          |                     |                  |
 +---------------------------------------+----------------------------------------------------------+---------------------+------------------+
@@ -5791,7 +5831,8 @@ and ``erf.rad_cons_lon`` or at the grid's own latitude and longitude fields),
 distance factor of the date, or the unscaled 1360.9 W/m² when the zenith angle is fixed and no
 start date is known), ``erf.rad_t_sfc`` (required; with a land-surface model or a surface layer
 present it is the initial value of the prognostic surface temperature when the surface energy
-balance evolves one and unused otherwise, and the surface layer's potential temperature is
+balance evolves one and unused otherwise; with ``erf.radiation.seb_init_skin_from_file`` the land
+columns begin at the initial file's skin temperature instead, and the surface layer's potential temperature is
 converted with the Exner function at the physical surface pressure diagnosed from the lowest
 atmospheric cell), ``start_datetime`` and the
 ``erf.rad_orbital_*`` overrides. A deck that still sets one of the former two-stream-only keys
@@ -5958,6 +5999,26 @@ atmospheric cell), ``start_datetime`` and the
 |                                                    | no surf_heating_rate), not on EB terrain, without          |                    |                  |
 |                                                    | erf.use_rotate_surface_flux, with no land or surface       |                    |                  |
 |                                                    | model; each is checked at start-up                         |                    |                  |
++----------------------------------------------------+------------------------------------------------------------+--------------------+------------------+
+| **erf.radiation.seb_init_skin_from_file**          | At a fresh start the skin T_s of a land column begins      | Boolean            | false            |
+|                                                    | at the skin temperature of the initial file [K]: TSK of    |                    |                  |
+|                                                    | a wrfinput file, SKINTEMP of a metgrid file. A water       |                    |                  |
+|                                                    | column keeps erf.rad_t_sfc. A level without a file of      |                    |                  |
+|                                                    | its own takes T_s from its parent, as before; so does      |                    |                  |
+|                                                    | one made later in the run, one that takes its radiation    |                    |                  |
+|                                                    | from its parent, and one under erf.nc_low_file without     |                    |                  |
+|                                                    | erf.nc_low_file_<lev>. Needs the TwoStream model,          |                    |                  |
+|                                                    | seb_prognostic_enable, no land-surface, urban or           |                    |                  |
+|                                                    | surface model, and the field in the file of level 0 and    |                    |                  |
+|                                                    | of each finer level that takes its file's value at the     |                    |                  |
+|                                                    | start; the run stops otherwise. It also stops when a       |                    |                  |
+|                                                    | land value is not finite or lies outside                   |                    |                  |
+|                                                    | [seb_prognostic_t_min_k, seb_prognostic_t_max_k]. Not      |                    |                  |
+|                                                    | used on a restart (a NOTE says so): T_s comes from the     |                    |                  |
+|                                                    | checkpoint. The restoring temperature stays the one        |                    |                  |
+|                                                    | value seb_t_deep_default: a start far from it relaxes      |                    |                  |
+|                                                    | toward it (the log prints the largest difference).         |                    |                  |
+|                                                    | false: every column begins at erf.rad_t_sfc                |                    |                  |
 +----------------------------------------------------+------------------------------------------------------------+--------------------+------------------+
 | **erf.radiation.seb_surface_layer_uses_moisture**  | Two-way coupling of moisture as well: the zlo surface      | Boolean            | false            |
 |                                                    | layer takes its land surface mixing ratio from the         |                    |                  |

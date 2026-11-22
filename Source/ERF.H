@@ -199,7 +199,7 @@ public:
     // needs this to know whether the SWrad/LWrad lanes it would hand an ocean
     // model carry real values or just zeros: passing zeros is worse than passing
     // nothing, because the ocean model then suppresses its own radiative forcing
-    // in favour of them.
+    // in favor of them.
     //
     // Note this is a configuration predicate, not a data-validity one. rad_fluxes
     // is allocated and zero-filled as soon as solverChoice.rad_type != None, so
@@ -242,12 +242,12 @@ public:
     void GetFillableAtmosToOceanLanes (bool state_contract,
                                        amrex::Vector<int>& can_fill) const;
 
-    // Every lane is remapped from ERF's level-0 cell centres to REMORA's rho points with
+    // Every lane is remapped from ERF's level-0 cell centers to REMORA's rho points with
     // the one set of weights weight_mf/index_mf the driver builds for that pair of grids.
     // The vectors (Uwind/Vwind and tau_x/tau_y) are sent as their eastward and northward
     // components, turned from the grid axes with the grid orientation from lat_m/lon_m,
     // so that the ocean can turn them to its own axes; the stress is averaged from the
-    // faces to the cell centres first.
+    // faces to the cell centers first.
     // dst_mskr is REMORA's wet/dry mask (1 = wet, 0 = land) on the rho layout, applied
     // to the scalar lanes (Patm, Tair, cloud) and to the flux lanes, tau_x/tau_y
     // included, but deliberately NOT to Uwind/Vwind, so the wind lanes carry live
@@ -490,9 +490,12 @@ public:
     void set_cf_zface_omega (int lev, amrex::MultiFab& omega, const amrex::MultiFab& omega_t,
                              const amrex::Vector<int>& slab_box);
     bool cf_interp_mass_flux (int lev) const;
+    bool cf_flat_mapfac (int lev) const;
     void RegisterCoarseMomentumCF (int levc, const amrex::MultiFab& xold, const amrex::MultiFab& xnew,
                                    const amrex::MultiFab& yold, const amrex::MultiFab& ynew,
                                    const amrex::Vector<double>& times);
+    void RegisterCoarseZMomentumCF (int levc, const amrex::MultiFab& wold, const amrex::MultiFab& wnew,
+                                    const amrex::Vector<double>& times);
     // Anelastic coarse/fine faces in time (ERF_CoarseFineFaces.cpp)
     bool cf_anelastic_flux_match (int lev) const;
     void cf_anelastic_record (int levc, int nrk);
@@ -506,6 +509,7 @@ public:
     // ... and its vertical flux, as Omega
     amrex::Vector<amrex::MultiFab> m_cf_step_zflux;
     void FillSetHorizontalMomentaCF (int lev, double time, amrex::MultiFab& xmom, amrex::MultiFab& ymom);
+    void FillSetZMomentumCF (int lev, double time, amrex::MultiFab& zmom);
     // Give the face fills of level lev the log-law share of the wall coarse face's flux
     // (erf.cf_loglaw_fill) for the set fills that follow, or clear it (on = false)
     void set_cf_fill_options (int lev, bool on);
@@ -547,6 +551,14 @@ public:
                                   amrex::MultiFab& az_sub,
                                   amrex::MultiFab& dJ_sub, amrex::MultiFab& znd_sub,
                                   bool use_gmres);
+    //! The equation solve_with_terrain_mlmg solves, on a region of a flat mesh whose boxes
+    //! need not make a rectangle
+    void solve_with_flat_mlmg (int lev, const amrex::Box& subdomain,
+                               amrex::MultiFab& rhs, amrex::MultiFab& phi,
+                               amrex::Array<amrex::MultiFab,AMREX_SPACEDIM>& fluxes,
+                               const amrex::MultiFab& ax_sub, const amrex::MultiFab& ay_sub,
+                               const amrex::MultiFab& az_sub,
+                               const amrex::MultiFab& dJ_sub, const amrex::MultiFab& znd_sub);
     //! FFT-preconditioned GMRES solve of div(sigma grad phi) = rhs (erf.if_implicit_projection);
     //! fluxes = -grad phi, without sigma
     void solve_with_if_gmres (int lev, const amrex::Box& subdomain,
@@ -599,6 +611,10 @@ public:
 
     //! Fill a newly built level's two-stream SEB state from its parent
     void fill_seb_from_coarse (int lev);
+
+    //! With erf.radiation.seb_init_skin_from_file, start the two-stream SEB skin
+    //! temperature of the land columns of level lev from the initial file's TSK or SKINTEMP
+    void init_seb_skin_from_file (int lev);
 
     //! With erf.radiation.seb_surface_layer_uses_skin, hand the two-stream surface energy
     //! balance's skin temperature of level lev to the zlo surface layer before it
@@ -803,6 +819,14 @@ public:
     // true (new grids), otherwise only if it changed by more than 1 % since the last report
     void ReportTerrainSlopeFactor (int lev, bool force);
 
+    // with implicit substepping on a terrain-fitted mesh, turn on erf.use_variable_beta_s (unless
+    // the inputs set it) if erf.beta_s is below min(sigma^2, 1) on a w-face of level lev; called by
+    // ComputeDt and after a regrid for every new set of grids, and every step on a moving terrain
+    void CheckVariableBetaS (int lev);
+
+    // return the largest terrain slope sigma^2 = h_xi^2 + h_eta^2 over the w-faces of level lev
+    amrex::Real ComputeMaxTerrainSlope (int lev);
+
     // on a terrain-fitted mesh, warn when the terrain next to an inflow or outflow face of
     // level lev is steeper than erf_terrain_file::open_face_slope_warn and no steep-terrain
     // option is on; called by ComputeDt for every new set of grids
@@ -979,7 +1003,51 @@ public:
     void init_from_input_sounding (int lev);
 
     /**
-     * The input sounding sampled at the cell centres of level lev. Level 0 is
+     * Build the hydrostatic base state of level lev from the input sounding, as a fresh
+     * start does: the profile sampled at this level's heights, rebalanced column by
+     * column, with p_0 and pi_0 recomputed.  The lateral ghost cells are built the same
+     * way as the valid cells, so each holds the column it would hold were it valid, and
+     * the base state is one field in balance everywhere, whichever box a cell is a
+     * ghost cell of.  Not for SoundingType::ConstantDensity, whose base state comes from
+     * initHSE.
+     */
+    void build_base_state_from_input_sounding (int lev, amrex::MultiFab& base_state_mf);
+
+    /**
+     * Rebuild level lev's base state from the input sounding after a regrid made or
+     * remade the level, replacing the interpolation from the coarser level that the
+     * regrid filled it with.  The state is not touched.  Next to the bottom and top
+     * walls that interpolation has no vertical slope, which puts p_0 out of hydrostatic
+     * balance by about rho_0 g dz there (erf-model/ERF#5236).
+     */
+    void rebuild_base_state_from_input_sounding (int lev, amrex::MultiFab& base_state_mf);
+
+    // Rebuild base_state[lev] after a regrid made or remade level lev, by the construction
+    // the run was initialized with where it can be repeated and from the coarser level
+    // otherwise, then check it (erf-model/ERF#5228, #5236)
+    void rebuild_base_state (int lev);
+
+    // Rebuild base_state[lev] in hydrostatic balance from the coarser level alone
+    void rebuild_base_state_from_coarse (int lev);
+
+    // A copy of bs, a base state of level lev, on the boxes of bs's BoxArray grown laterally
+    //    by grow, with ng ghost cells, and level lev's heights on the same boxes (z_nd_g nodal,
+    //    z_cc_g cell-centered, both with ng ghost cells).  Building a base state there builds
+    //    bs's ghost cells as valid cells: grow + ng must not exceed bs's lateral ghost cells.
+    void make_base_state_on_grown_boxes (int lev, const amrex::MultiFab& bs, int grow,
+                                         const amrex::IntVect& ng, amrex::MultiFab& bs_g,
+                                         std::unique_ptr<amrex::MultiFab>& z_nd_g,
+                                         std::unique_ptr<amrex::MultiFab>& z_cc_g);
+
+    // Copy a base state built on the grown boxes of make_base_state_on_grown_boxes back into bs
+    void copy_base_state_from_grown_boxes (int lev, amrex::MultiFab& bs, const amrex::MultiFab& bs_g);
+
+    // Abort (or, with abort_if_fail false, warn) if base_state[lev] is out of discrete
+    // hydrostatic balance in the valid region
+    void check_base_state_hse (int lev, const std::string& when, bool abort_if_fail = true);
+
+    /**
+     * The input sounding sampled at the cell centers of level lev. Level 0 is
      * input_sounding_data itself; a finer level gets its own copy, resampled at
      * geom[lev] / zlevels_stag[lev], so that its profile index k is its own cell k
      * and no fine cell blends in the surface line of the sounding.
@@ -987,7 +1055,7 @@ public:
     const InputSoundingData& sounding_at_level (int lev);
 
     /**
-     * The large-scale forcing profiles interpolated to the cell centres of level lev.
+     * The large-scale forcing profiles interpolated to the cell centers of level lev.
      * Level 0 is lsf itself; a finer level gets its own copy, interpolated at
      * geom[lev] / zlevels_stag[lev] against sounding_at_level(lev), so that its profile
      * index k is its own cell k.
@@ -1203,6 +1271,16 @@ public:
      *  AverageDownTo with the full-state component checks and the momentum average-down disabled. */
     void AverageDownMoistStateTo (int crse_lev);
 
+    /*! \brief Set detJ_cc of level crse_lev under level crse_lev+1 so that each covered coarse
+     *  cell's volume detJ/(m_x m_y) is the mean of the fine volumes over it. */
+    void average_down_detJ (int crse_lev);
+    bool fine_volume_average (int crse_lev) const;
+
+    /*! \brief Average-down of the cell-centered state used by AverageDownTo when
+     *  erf.perturbational_average_down is set: averages the perturbation from the base state in
+     *  Rho_comp, RhoTheta_comp and RhoQ1_comp and adds back the coarse base state. */
+    void AverageDownConsPerturbational (int crse_lev, int scomp, int ncomp);
+
     // Write checkpoint file to disk
     void WriteCheckpointFile () const;
 
@@ -1315,6 +1393,8 @@ private:
 
     [[nodiscard]] bool has_surface_layer_inputs (const std::string& prefix) const;
 
+    [[nodiscard]] bool use_eb_surface_layer () const;
+
     // 0 unless ori is a lateral inflow (1) or inflow_outflow (2) face that gives a primitive
     // theta in a run with a pseudo-incompressible level (see set_pi_inflow_faces)
     [[nodiscard]] int pi_theta_inflow_face (const amrex::Orientation& ori) const;
@@ -1399,10 +1479,32 @@ private:
                              bool cons_only=false);
 
     // This one works only at level > 0 (base state does change)
+    //
+    // allow_perturbational = false keeps the fill of the conserved state from coarse
+    //    full-state even with erf.perturbational_interpolation: for a destination that is not
+    //    on the layout of base_state[lev], as when RemakeLevel fills the new grids
     void FillPatchFineLevel (int lev, double time,
                              const amrex::Vector<amrex::MultiFab*>& mfs_vel,
                              const amrex::Vector<amrex::MultiFab*>& mfs_mom,
-                             bool fillset=true, bool cons_only=false);
+                             bool fillset=true, bool cons_only=false,
+                             bool allow_perturbational=true);
+
+    // FillPatchTwoLevels for the cell-centered conserved state, perturbational in
+    //    Rho_comp, RhoTheta_comp and RhoQ1_comp when perturbational_interp and perturbational
+    void FillPatchTwoLevelsCons (int lev, amrex::MultiFab& mf, const amrex::IntVect& nghost,
+                                 amrex::Real time,
+                                 const amrex::Vector<amrex::MultiFab*>& cmf,
+                                 const amrex::Vector<amrex::Real>& ctime,
+                                 const amrex::Vector<amrex::MultiFab*>& fmf,
+                                 const amrex::Vector<amrex::Real>& ftime,
+                                 int scomp, int dcomp, int ncomp, int bccomp,
+                                 bool perturbational = true);
+
+    // InterpFromCoarseLevel for the whole cell-centered conserved state of a level made from
+    //    the coarser one, perturbational in Rho_comp, RhoTheta_comp and RhoQ1_comp when perturbational_interp
+    void InterpFromCoarseLevelCons (int lev, amrex::MultiFab& mf, const amrex::IntVect& nghost,
+                                    const amrex::MultiFab& cmf);
+
 
     // Compute new multifabs by copying data from valid region and filling ghost cells.
     // Unlike FillPatch, FillIntermediatePatch will use the supplied multifabs instead of fine level data.
@@ -1553,10 +1655,10 @@ private:
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> sinPhi_m, cosPhi_m; // Coriolis factors on the grid
 
     // Struct for working with the sounding data we take as an input. Its profiles are
-    // sampled at the level-0 cell centres; use sounding_at_level for any other level.
+    // sampled at the level-0 cell centers; use sounding_at_level for any other level.
     InputSoundingData input_sounding_data;
 
-    // The sounding sampled at the cell centres of each level > 0, built on first use
+    // The sounding sampled at the cell centers of each level > 0, built on first use
     // from input_sounding_data (index 0 is unused)
     amrex::Vector<std::unique_ptr<InputSoundingData>> input_sounding_data_fine;
 
@@ -1796,6 +1898,18 @@ private:
     // Fillpatcher classes for coarse-fine boundaries
     int cf_width{0};
     int cf_set_width{0};
+
+    // erf.perturbational_interpolation: fill rho, rho theta and (with moisture) rho qv from the
+    //    coarser level (the c/f ghost cells, and the cells a regrid newly covers) by interpolating
+    //    rho - rho0, rho theta - rho0 theta0 and rho qv - rho0 qv0 and adding back the fine base
+    //    state.  On by default; false interpolates rho, rho theta and rho qv themselves.
+    bool perturbational_interp{true};
+
+    // erf.perturbational_average_down: average down rho - rho0, rho theta - rho0 theta0 and (with
+    //    moisture) rho qv - rho0 qv0 and add back the coarse base state, so that a fine level in
+    //    its base state averages to the coarse base state whatever the two levels' heights.
+    //    Off by default.
+    bool perturbational_avgdown{false};
     amrex::Vector<ERFFillPatcher> FPr_c;
     amrex::Vector<ERFFillPatcher> FPr_u;
     amrex::Vector<ERFFillPatcher> FPr_v;
@@ -1932,8 +2046,8 @@ private:
     // written by the immersed scalar forcing, read as the TKE buoyancy flux on the wall face
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> ib_wall_hfx;
     // kinematic wall moisture flux -u* q* of the fraction-stress law in the wall cell (zero elsewhere;
-    // allocated with a moisture model that carries water vapour), written by the immersed scalar
-    // forcing, read as the water vapour flux on the wall face (qfx1_z: the moist TKE buoyancy, the output)
+    // allocated with a moisture model that carries water vapor), written by the immersed scalar
+    // forcing, read as the water vapor flux on the wall face (qfx1_z: the moist TKE buoyancy, the output)
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> ib_wall_qfx;
     // wall value of the k-eqn TKE in the wall cell (erf.if_wall_tke; -1 elsewhere), written by the
     // immersed scalar forcing; with erf.if_wall_tke_time_factor = 1 the cell is held at it after
@@ -2087,6 +2201,9 @@ private:
     // reported, per level (WarnSteepTerrainAtOpenFaces)
     amrex::Vector<amrex::BoxArray> openface_grids;
     amrex::Vector<amrex::Array<bool,4>> openface_warned;
+    // grids on which the stability of the constant beta_s was last checked, per level
+    // (CheckVariableBetaS)
+    amrex::Vector<amrex::BoxArray> beta_s_check_grids;
     amrex::Vector<amrex::Real> slope_report_alpha;
 
     // Fixed dt at each level (only used if positive)
@@ -2367,7 +2484,7 @@ private:
     amrex::Vector<std::unique_ptr<amrex::iMultiFab>> column_kextent;
 
     // Masks of the coarse/fine ghost cells (1 there, 0 elsewhere) used by
-    // FillCoarseFineGhostsForImplicit: entry 0 is cell-centred with two ghost cells, entries
+    // FillCoarseFineGhostsForImplicit: entry 0 is cell-centered with two ghost cells, entries
     // 1-3 are on the x-, y- and z-faces with one ghost cell.  Built on first use
     // and rebuilt whenever the grids they were built on change.
     amrex::Vector<amrex::Array<std::unique_ptr<amrex::iMultiFab>,AMREX_SPACEDIM+1>> cf_implicit_mask;

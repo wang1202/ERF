@@ -491,6 +491,7 @@ function(build_erf_lib erf_lib_name)
        ${SRC_DIR}/Initialization/ERF_InitFromInputSounding.cpp
        ${SRC_DIR}/Initialization/ERF_InitGeowind.cpp
        ${SRC_DIR}/Initialization/ERF_InitRayleigh.cpp
+       ${SRC_DIR}/Initialization/ERF_RebuildBaseState.cpp
        ${SRC_DIR}/Initialization/ERF_InitSponge.cpp
        ${SRC_DIR}/Initialization/ERF_Init1D.cpp
        ${SRC_DIR}/Initialization/ERF_InitTurbPert.cpp
@@ -585,6 +586,7 @@ function(build_erf_lib erf_lib_name)
        ${SRC_DIR}/Microphysics/SBM/ERF_SBMPhysicalBoundary.cpp
        ${SRC_DIR}/Microphysics/SBM/ERF_SBMParticleMixing.cpp
        ${SRC_DIR}/Microphysics/SuperDropletsMoist/ERF_SuperDropletsMoistAdvance.cpp
+      ${SRC_DIR}/Microphysics/SuperDropletsMoist/ERF_SuperDropletsMoistProbes.cpp
        ${SRC_DIR}/Microphysics/SuperDropletsMoist/ERF_SuperDropletsMoistInit.cpp
        ${SRC_DIR}/Microphysics/SuperDropletsMoist/ERF_SuperDropletsMoistPhaseChange.cpp
        ${SRC_DIR}/Microphysics/SuperDropletsMoist/ERF_SuperDropletsMoistUtils.cpp
@@ -598,6 +600,7 @@ function(build_erf_lib erf_lib_name)
        ${SRC_DIR}/Radiation/TwoStream/ERF_RadiationDiagnostics.cpp
        ${SRC_DIR}/Radiation/TwoStream/ERF_TwoStreamRadiation.cpp
        ${SRC_DIR}/Radiation/TwoStream/ERF_SEBTurbulentFlux.cpp
+       ${SRC_DIR}/Radiation/TwoStream/ERF_SEBSkinInit.cpp
        ${SRC_DIR}/Radiation/TwoStream/ERF_ForceRestoreHydrologyState.cpp
        ${SRC_DIR}/Radiation/TwoStream/ERF_ForceRestorePrecipRate.cpp
        ${SRC_DIR}/Radiation/TwoStream/ERF_ForceRestoreSnowState.cpp

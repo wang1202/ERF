@@ -184,6 +184,10 @@ target_sources(${erf_exe_name}
     # Motivation: the k-eqn RANS closure (AL01) must keep its stability
     # functions finite and its length-scale limits exact for any Rt.
     ${CMAKE_CURRENT_SOURCE_DIR}/Diffusion/ERF_GTestRANSClosure.cpp
+    # Motivation: erf.rans_shear_stencil = log_law must return the closed-form vertical shear of a
+    # logarithmic profile in S_mn S_mn on uniform and stretched layers, keep the other strain
+    # terms, and leave a cell without a positive lower wall distance as it is (erf-model/ERF#5261).
+    ${CMAKE_CURRENT_SOURCE_DIR}/Diffusion/ERF_GTestLogShear.cpp
     # Motivation: terrain-fitted momentum diffusion must apply K_h to the projected horizontal
     # stresses of the zeta-face flux and take the cell-centered du/dz from the cell's own faces
     # (erf-model/ERF#4214), so the operator is exact for bilinear fields and dissipates energy.
@@ -208,6 +212,13 @@ target_sources(${erf_exe_name}
     # documented formulas, with the vertical part dropped only where every implicit stage is
     # shown to stay bounded.
     ${CMAKE_CURRENT_SOURCE_DIR}/Diffusion/ERF_GTestSmag2DLimiters.cpp
+    # Motivation: with erf.use_variable_beta_s unset, the constant beta_s must be replaced
+    # exactly when it is below the acoustic stability limit min(sigma^2, 1) of the terrain
+    # (erf-model/ERF#5082).
+    ${CMAKE_CURRENT_SOURCE_DIR}/TimeIntegration/ERF_GTestVariableBetaSSwitch.cpp
+    # Motivation: on an x-z slice or a single column the cell size in the one-cell direction is
+    # arbitrary, so it must not set the anelastic or diffusive time step.
+    ${CMAKE_CURRENT_SOURCE_DIR}/TimeIntegration/ERF_GTestOneCellDirections.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Diagnostics/ERF_GTestSurfaceFluxDiagnostics.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Diagnostics/ERF_GTestSeaLevelPressure.cpp
     # Motivation: wallflux_lev0.txt rows must be interval means weighted by the actual
@@ -311,6 +322,11 @@ target_sources(${erf_exe_name}
     # column keeps its state and the sweep's longwave boundary there is the surface
     # layer's sea surface temperature (sigma T_sea^4), not the balance's skin.
     ${CMAKE_CURRENT_SOURCE_DIR}/Radiation/ERF_GTestTwoStreamLandMask.cpp
+    # Motivation: with erf.radiation.seb_init_skin_from_file the balance's skin of a land
+    # column starts at the initial file's TSK or SKINTEMP and a water column keeps
+    # erf.rad_t_sfc; a land value that is not finite or lies outside the range the balance
+    # holds the skin in is counted (ERF then stops) and not copied.
+    ${CMAKE_CURRENT_SOURCE_DIR}/Radiation/ERF_GTestSEBSkinInit.cpp
     # Motivation: with erf.ibseb.sun_mode = two_stream the building faces must
     # see the two-stream columns' sun: the same zenith, a morning sun in the
     # east, and the start date read the same way.
