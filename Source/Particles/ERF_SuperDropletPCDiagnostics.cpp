@@ -50,6 +50,7 @@ Vector<std::string> SuperDropletPC::meshPlotVarNames () const
                                                        "mass_flux_y",
                                                        "mass_flux_z"),
                                           "number_density",
+                                          "cloud_number_density",
                                           "sd_number_density",
                                           "mass_density",
                                           "radius",

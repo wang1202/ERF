@@ -6,6 +6,7 @@
 #include <AMReX_GpuAtomic.H>
 #include <AMReX_Particles.H>
 #include <AMReX_ParticleUtil.H>
+#include <AMReX_ParmParse.H>
 
 #ifdef ERF_USE_PARTICLES
 
@@ -101,6 +102,27 @@ void SuperDropletPC::computeMeshVar ( const std::string& a_var_name,
     // Check basic variables
     if (a_var_name == "number_density") {
         numberDensity(a_mf, a_z_phys_nd, a_lev); return;
+    }
+    if (a_var_name == "cloud_number_density") {
+        // A size-selected cloud count, not the total number of hydrated aerosol.
+        // Use the liquid-equivalent radius and half-open bounds of the local DSD.
+        ParmParse pp(m_name);
+        double lo = 1.e-6, hi = 40.e-6;
+        pp.query("cloud_number_rmin", lo);
+        pp.query("radius_raindrop", hi);
+        pp.query("cloud_number_rmax", hi);
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(std::isfinite(lo) && std::isfinite(hi) && lo >= 0. && hi > lo,
+                                         "SDM cloud number: require 0 <= cloud_number_rmin < cloud_number_rmax");
+        const int water = ridx_s(m_idx_w, m_num_aerosols, m_num_species);
+        const double rho_w = m_species_mat[m_idx_w]->m_density;
+        ERFPCParticleToMesh(a_mf, a_z_phys_nd, a_lev, 0,
+            [=] AMREX_GPU_DEVICE (const SDTDType& ptd, int i) -> ParticleReal {
+                const double mw = ptd.m_runtime_rdata[water][i];
+                if (ptd.m_runtime_idata[SuperDropletsIntIdxSoA_RT::active][i] <= 0 || !(mw > 0.)) { return 0; }
+                const double r = std::cbrt(mw/(four_thirds_pi*rho_w));
+                return (r >= lo && r < hi) ? ptd.m_runtime_rdata[SuperDropletsRealIdxSoA_RT::multiplicity][i] : 0;
+            });
+        return;
     }
     if (a_var_name == "sd_number_density") {
         SDNumberDensity(a_mf, a_z_phys_nd, a_lev); return;
