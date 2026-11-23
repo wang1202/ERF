@@ -298,7 +298,7 @@ void sdm_cv_injection_test (bool a_perbox)
     pc.setVariableDz(true);
 
     if (a_perbox) {
-        pc.InjectParticles(0.0, z_nd[0], 1.0);
+        pc.InjectParticles(0.0, z_nd[0], 1.0, 0);
         auto totals = sdm_cv_totals(pc);
         Vector<Real> layer(4, 0);
         for (const auto& [cell, t] : totals) {
@@ -312,8 +312,9 @@ void sdm_cv_injection_test (bool a_perbox)
         }
     } else {
         Real time = 0;
+        int step = 0;
         for (Real dt : {Real(1), Real(0.5), Real(1.5), Real(1)}) {
-            pc.InjectParticles(time, z_nd[0], dt);
+            pc.InjectParticles(time, z_nd[0], dt, step++);
             time += dt;
         }
         // 4 m^-3 after 4 s in every cell, on whole super-droplets of unit multiplicity

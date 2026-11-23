@@ -2,6 +2,7 @@
 #include "ERF_SuperDropletPC.H"
 #include "ERF_TerrainConversion.H"
 #include <AMReX_MultiFabUtil.H>
+#include <AMReX_Reduce.H>
 
 #ifdef ERF_USE_PARTICLES
 
@@ -311,6 +312,8 @@ void SuperDropletPC::addParticles ( int a_lev,
     // super-droplets at a fixed multiplicity; the legacy path injects a fixed
     // count per cell.
     const bool perbox = a_init.perBoxInjection();
+    const auto pulse = a_init.cellPulse();
+    Long births[2] = {0,0}; // count and represented number, before evolution or wall losses
     // On a stretched or terrain-fitted mesh each cell's counts follow its physical volume
     const bool per_cell_counts = variable_dz && !perbox;
     const SDCellCounts cell_counts = a_init.cellCounts();
@@ -321,7 +324,10 @@ void SuperDropletPC::addParticles ( int a_lev,
     Real num_par_per_cell;
     Real inject_mult = one;
     int inject_count = 0;
-    if (perbox) {
+    if (pulse.cells) {
+        num_sd_per_cell = 1;
+        num_par_per_cell = one;  // replaced by individual pulse weights below
+    } else if (perbox) {
         inject_count = a_init.injectBoxCount();
         inject_mult  = a_init.injectMultiplicity();
         if (inject_count == 0) { return; }
@@ -354,7 +360,9 @@ void SuperDropletPC::addParticles ( int a_lev,
                                  ParticleDistributionMap(a_lev),
                                  1, 0 );
 
-    if (a_init.m_type == SDInitShape::uniform) {
+    if (pulse.cells) {
+        num_superdroplets.setVal(1); // validated full domain, no center/box inclusion test
+    } else if (a_init.m_type == SDInitShape::uniform) {
         if (perbox) {
             Print() << "    Scattering super-droplets in box with volume " << a_init.volume() << ".\n";
             setNumSDPerBox( a_lev, num_superdroplets,
@@ -422,7 +430,10 @@ void SuperDropletPC::addParticles ( int a_lev,
         const Box& tile_box  = mfi.tilebox();
 
         int np = 0;
-        {
+        if (pulse.cells) {
+            // Exactly one entry per cell; index the tile, not the enclosing FAB.
+            np = static_cast<int>(tile_box.numPts());
+        } else {
             int ncell = static_cast<int>(num_superdroplets[mfi].numPts());
             const int* in = num_superdroplets[mfi].dataPtr();
             int* out = offsets[mfi].dataPtr();
@@ -575,7 +586,7 @@ void SuperDropletPC::addParticles ( int a_lev,
                 sampled_cell = SD_sampled_scale(mult_sum, par_this_cell, mult_scale);
             }
 
-            int start = offset_arr(i,j,k);
+            int start = pulse.cells ? static_cast<int>(tile_box.index(IntVect(i,j,k))) : offset_arr(i,j,k);
             for (int n = start; n < start+num_sd_this_cell; n++) {
 
                 auto& p = aos[n+size_old];
@@ -635,7 +646,9 @@ void SuperDropletPC::addParticles ( int a_lev,
                 active_ptr[n] = native_tag;
                 vx_ptr[n] = vy_ptr[n] = vz_ptr[n] = zero;
 
-                if (perbox) {
+                if (pulse.cells) {
+                    mult_ptr[n] = static_cast<ParticleReal>(pulse.weight(dom.index(IntVect(i,j,k))));
+                } else if (perbox) {
                     // Each scattered super-droplet carries the fixed per-box multiplicity.
                     mult_ptr[n] = inject_mult;
                 } else {
@@ -673,6 +686,13 @@ void SuperDropletPC::addParticles ( int a_lev,
         });
 
         Gpu::synchronize();
+
+        if (pulse.cells) {
+            births[0] += np;
+            births[1] += Reduce::Sum<Long>(np, [=] AMREX_GPU_DEVICE (int n) noexcept -> Long {
+                return static_cast<Long>(mult_ptr[n]);
+            });
+        }
 
         /* Initialize ice attributes
          *
@@ -739,6 +759,11 @@ void SuperDropletPC::addParticles ( int a_lev,
         }
     }
 
+    if (pulse.cells) {
+        ParallelDescriptor::ReduceLongSum(births, 2);
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(births[0] == pulse.cells && births[1] == pulse.dose,
+                                         "Cell pulse: native births or represented dose mismatch");
+    }
     return;
 }
 

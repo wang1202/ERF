@@ -328,6 +328,20 @@ amrex::Real SD_init_multiplicity (const SDCellCounts* a_counts, const int a_num,
     return (num_sd > 0) ? num_par / num_sd : amrex::Real(0);
 }
 
+// Immutable, device-copyable apportionment for one level-zero birth event.
+struct SDCellPulse {
+    amrex::Long cells = 0, dose = 0, offset = 0, stride = 1;
+
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    amrex::Long weight (amrex::Long index) const noexcept {
+        // Permute cells with a coprime stride. Each successive remainder starts
+        // where the last one ended, including after restart. Thus cumulative
+        // allocations of any two cells differ by at most one particle.
+        const auto rank = (index * stride) % cells;
+        return dose / cells + ((rank + cells - offset) % cells < dose % cells);
+    }
+};
+
 /*! \brief Super-droplets initial properties */
 class SDInitProperties
 {
@@ -730,6 +744,7 @@ class SDInitProperties
         /*! \brief Per-box high-multiplicity injection (false for initialization
          *  and legacy per-cell injection). */
         [[nodiscard]] virtual bool perBoxInjection () const { return false; }
+        [[nodiscard]] virtual SDCellPulse cellPulse () const { return {}; }
         /*! \brief Number of super-droplets to inject in the whole box this step. */
         [[nodiscard]] virtual int injectBoxCount () const { return 0; }
         /*! \brief Multiplicity of each super-droplet injected this step. */
@@ -808,6 +823,15 @@ class SDInjection : public SDInitProperties
         /*!< Physical-particle number density [m^-3] injected up to and before this step */
         double m_numdens_total = 0;
         double m_numdens_total_old = 0;
+
+        // Schedule in absolute coarse step-start indices (same on restart).
+        bool m_periodic = false;
+        double m_period = 0, m_fixed_dt = 0;
+        int m_first_tick = 0, m_stop_tick = 0, m_period_ticks = 0;
+        long double m_domain_dose = 0;
+        SDCellPulse m_pulse;
+        [[nodiscard]] SDCellPulse cellPulse () const override { return m_pulse; }
+        bool preparePulse (int step, double time, double dt);
 
         /*! \brief Update time-dependent quantities for particle injection
          *

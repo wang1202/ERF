@@ -42,8 +42,8 @@ def read_inputs(path):
     return values
 
 
-def particles(plotfile, fields, name="super_droplets_moisture"):
-    """The named real attributes of every super-droplet in a plotfile."""
+def particle_records(plotfile, fields, name="super_droplets_moisture"):
+    """Yield (level, (id, cpu), active, position, named real values) from a native SD plotfile."""
     directory = Path(plotfile) / name
     with (directory / "Header").open() as stream:
         version = stream.readline().strip()
@@ -51,31 +51,38 @@ def particles(plotfile, fields, name="super_droplets_moisture"):
         nr = int(stream.readline())
         names = [stream.readline().strip() for _ in range(nr)]
         ni = int(stream.readline())
-        for _ in range(ni):
-            stream.readline()
+        int_names = [stream.readline().strip() for _ in range(ni)]
+        active = 2 + int_names.index("int_comp0")  # SuperDropletsIntIdxSoA_RT::active
         assert int(stream.readline()) == 1
         total = int(stream.readline())
         stream.readline()
         finest = int(stream.readline())
         grids = [int(stream.readline()) for _ in range(finest + 1)]
         chunks = [[tuple(map(int, stream.readline().split())) for _ in range(n)] for n in grids]
-    code = "d" if version.endswith("_double") else "f"
-    width = struct.calcsize(code)
+    code = {"double": "d", "single": "f"}[version.rsplit("_", 1)[-1]]
+    irecord = struct.Struct(f"={2 + ni}i")
+    rrecord = struct.Struct(f"={3 + nr}{code}")
     index = [3 + names.index(f) for f in fields]
-    result = []
+    seen = 0
     for level, entries in enumerate(chunks):
         for which, count, offset in entries:
             if count == 0:
                 continue
             with (directory / ("Level_%d" % level) / ("DATA_%05d" % which)).open("rb") as stream:
-                stream.seek(offset + 4 * count * (2 + ni))
-                data = struct.unpack("=" + code * count * (3 + nr),
-                                     stream.read(width * count * (3 + nr)))
-            for p in range(count):
-                values = data[p * (3 + nr):(p + 1) * (3 + nr)]
-                result.append(tuple(values[i] for i in index))
-    assert len(result) == total, (plotfile, len(result), total)
-    return result
+                stream.seek(offset)
+                integers = stream.read(count * irecord.size)
+                reals = stream.read(count * rrecord.size)
+            assert len(integers) == count * irecord.size and len(reals) == count * rrecord.size, (
+                "truncated particle chunk", plotfile, level, which, offset)
+            for ints, values in zip(irecord.iter_unpack(integers), rrecord.iter_unpack(reals)):
+                yield level, ints[:2], ints[active], values[:3], tuple(values[i] for i in index)
+                seen += 1
+    assert seen == total, (plotfile, seen, total)
+
+
+def particles(plotfile, fields, name="super_droplets_moisture"):
+    """The named real attributes of every super-droplet in a plotfile."""
+    return [values for _, _, _, _, values in particle_records(plotfile, fields, name)]
 
 
 def moments(density, lo, hi, n=20000):

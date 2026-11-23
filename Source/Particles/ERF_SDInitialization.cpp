@@ -1,4 +1,5 @@
 #include <cmath>
+#include <numeric>
 #include "ERF_SDInitialization.H"
 
 using MatVec = std::vector<std::unique_ptr<MaterialProperties>>;
@@ -246,9 +247,10 @@ void SDInjection::readInputs ( SDInputs& a_in,
     using namespace amrex;
 
     m_prefix = a_in.m_block_name;
+    m_periodic = a_in.query("period_s", m_period, false);
     a_in.query("rate", m_inj_rate);
-    m_sd_specified = a_in.query("sd_rate", m_sd_inj_rate);
-    m_mm_specified = a_in.query("min_multiplicity", m_min_multiplicity);
+    m_sd_specified = a_in.query("sd_rate", m_sd_inj_rate, !m_periodic);
+    m_mm_specified = a_in.query("min_multiplicity", m_min_multiplicity, !m_periodic);
     a_in.query("t_start", m_tstart);
     a_in.query("t_stop", m_tstop);
     a_in.queryarr("domain_velocity", m_domain_vel);
@@ -268,6 +270,57 @@ void SDInjection::readInputs ( SDInputs& a_in,
     // read recorded and report it as user-specified.
     m_ppc_specified = m_ppc_from_inputs;
     m_perbox = !m_ppc_specified;
+    if (m_periodic) {
+        if (!std::isfinite(m_period) || m_period <= 0) { Abort("Cell pulse: period_s must be finite and positive"); }
+        if (!std::isfinite(m_inj_rate) || m_inj_rate <= 0) { Abort("Cell pulse: rate must be finite and positive"); }
+        if (m_sd_specified || m_mm_specified) { Abort("Cell pulse: omit sd_rate and min_multiplicity"); }
+        if (!m_ppc_specified || m_ppc != 1) { Abort("Cell pulse: explicitly set particles_per_cell=1"); }
+        if (sampledMultiplicity()) { Abort("Cell pulse: set multiplicity_type=constant"); }
+        if (m_type != SDInitShape::uniform) { Abort("Cell pulse: requires a uniform full-domain box"); }
+        if (m_domain_vel.size() != AMREX_SPACEDIM) { Abort("Cell pulse: invalid domain_velocity"); }
+        for (int d=0; d<AMREX_SPACEDIM; ++d) {
+            if (m_domain_vel[d] != 0) { Abort("Cell pulse: domain_velocity must be zero"); }
+            if (m_particle_domain.lo(d) != a_geom.ProbLo(d) || m_particle_domain.hi(d) != a_geom.ProbHi(d)) {
+                Abort("Cell pulse: particle box must span the full domain");
+            }
+        }
+        int max_level = 0;
+        ParmParse("amr").query("max_level", max_level);
+        if (max_level != 0) { Abort("Cell pulse: requires amr.max_level=0"); }
+        ParmParse erf_pp("erf");
+        bool tight = false;
+        erf_pp.query("moisture_tight_coupling", tight);
+        if (tight) { Abort("Cell pulse: requires one microphysics advance per coarse step"); }
+        if (!erf_pp.query("fixed_dt", m_fixed_dt) || !std::isfinite(m_fixed_dt) || m_fixed_dt <= 0) {
+            Abort("Cell pulse: requires a positive erf.fixed_dt");
+        }
+        const auto tick = [this](double value) -> int {
+            const double q = value / m_fixed_dt, nearest = std::round(q);
+            if (!std::isfinite(q) || q < 0 || nearest > std::numeric_limits<int>::max() ||
+                std::abs(q-nearest) > 16*std::numeric_limits<double>::epsilon()*std::max(q,1.0)) {
+                amrex::Abort("Cell pulse: period_s, t_start and t_stop must align with fixed_dt and fit a coarse step index");
+            }
+            return static_cast<int>(nearest);
+        };
+        m_period_ticks = tick(m_period);
+        m_first_tick = tick(m_tstart);
+        m_stop_tick = tick(m_tstop);
+        if (!m_period_ticks || m_first_tick >= m_stop_tick) { Abort("Cell pulse: empty time window or unresolved period_s"); }
+        m_pulse.cells = a_geom.Domain().numPts();
+        if (m_pulse.cells <= 0 || m_pulse.cells > std::numeric_limits<int>::max()) {
+            Abort("Cell pulse: cell permutation requires at most INT_MAX cells");
+        }
+        m_domain_dose = static_cast<long double>(m_inj_rate) * m_period * m_box_volume;
+        const long double nevents = 1 + (m_stop_tick-1-m_first_tick)/m_period_ticks;
+        if (!std::isfinite(m_domain_dose) || m_domain_dose < m_pulse.cells ||
+            m_domain_dose*nevents >= std::ldexp(1.L, std::numeric_limits<Long>::digits)-1 ||
+            std::ceil(m_domain_dose/m_pulse.cells) > std::ldexp(1.L, std::numeric_limits<ParticleReal>::digits)) {
+            Abort("Cell pulse: dose must allow a positive exact integer weight per cell and fit cumulative integer range");
+        }
+        m_pulse.stride = std::max(Long(1), Long(0.6180339887498948 * static_cast<double>(m_pulse.cells)));
+        while (std::gcd(m_pulse.stride, m_pulse.cells) != 1) { --m_pulse.stride; }
+        return;
+    }
     if (m_perbox) {
         if (m_sd_specified && m_mm_specified) {
             m_eff_sd_rate    = std::min(m_sd_inj_rate, m_inj_rate / m_min_multiplicity);
@@ -280,6 +333,23 @@ void SDInjection::readInputs ( SDInputs& a_in,
             m_both_specified = false;
         }
     }
+}
+
+bool SDInjection::preparePulse (int step, double time, double dt)
+{
+    // istep[0] is restored by ERF, and incremented only AFTER advance. Time
+    // is a sanity check, never the trigger (repeated additions of .025 drift).
+    if (!std::isfinite(time) || !std::isfinite(dt) || std::abs(time-step*m_fixed_dt) > 0.125*m_fixed_dt ||
+        std::abs(dt-m_fixed_dt) > 1.e-6*m_fixed_dt) {
+        amrex::Abort("Cell pulse: requires a zero-origin clock and fixed_dt throughout the run");
+    }
+    if (step < m_first_tick || step >= m_stop_tick || (step-m_first_tick)%m_period_ticks != 0) { return false; }
+    const int event = (step-m_first_tick)/m_period_ticks;
+    const auto previous = static_cast<amrex::Long>(std::round(event*m_domain_dose));
+    const auto total = static_cast<amrex::Long>(std::round((event+1.L)*m_domain_dose));
+    m_pulse.dose = total-previous;
+    m_pulse.offset = previous % m_pulse.cells;
+    return true;
 }
 
 void SDInitProperties::printParameters ( const MatVec& a_species_mat,
@@ -395,7 +465,9 @@ void SDInjection::printParameters ( const MatVec& a_species_mat,
             << m_domain_vel[1] << ","
             << m_domain_vel[2] << "\n"
             << "    Time (start, stop) [s]: " << m_tstart << ", " << m_tstop << "\n";
-    if (m_perbox) {
+    if (m_periodic) {
+        Print() << "    Injection mode: one SD in every cell every " << m_period << " s (step start)\n";
+    } else if (m_perbox) {
         if (m_both_specified) {
             Print() << "    Warning: sd_rate and min_multiplicity both specified for "
                     << m_prefix << "\n";

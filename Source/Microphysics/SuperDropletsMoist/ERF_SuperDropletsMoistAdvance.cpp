@@ -40,7 +40,7 @@ void SuperDropletsMoist::Advance ( const Real& a_dt,
 
     // Inject particles on level 0 only
     if (current_lev == 0) {
-        m_super_droplets->InjectParticles(a_time, a_z[0], m_dt);
+        m_super_droplets->InjectParticles(a_time, a_z[0], m_dt, a_iter);
     }
 
     // Print diagnostics once per iteration (level 0)

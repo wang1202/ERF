@@ -169,7 +169,7 @@ class SuperDropletPC : public ERFPC
         using ERFPC::InitializeParticles;
 
         /*! \brief Inject super-droplets in domain */
-        virtual void InjectParticles (const double, const MFPtr& a_ptr, const double);
+        virtual void InjectParticles (const double, const MFPtr& a_ptr, const double, int step);
 
         /*! \brief add particles for a given set of initialization parameters */
         void addParticles ( int a_lev, const MFPtr&, const SDInitProperties&,
@@ -321,7 +321,10 @@ class SuperDropletPC : public ERFPC
         void setVariableDz ( const bool a_variable_dz )
         {
             m_variable_dz = a_variable_dz;
-            for (auto& inj : m_injections) { inj->m_variable_dz = a_variable_dz; }
+            for (auto& inj : m_injections) {
+                if (inj->m_periodic && a_variable_dz) { amrex::Abort("Cell pulse: requires a flat constant-volume mesh"); }
+                inj->m_variable_dz = a_variable_dz;
+            }
         }
 
         /*! \brief Return the number of super-droplets

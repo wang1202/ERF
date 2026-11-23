@@ -2431,6 +2431,41 @@ if(ERF_ENABLE_PARTICLES AND Python3_Interpreter_FOUND)
         "--mpi-preflags=${_species_mpi_preflags}" "--ranks=${_species_ranks}")
     set_tests_properties(SDM_DSDProbes PROPERTIES WORKING_DIRECTORY "${_probe_dir}"
         TIMEOUT 600 PROCESSORS ${_species_ranks} LABELS "regression;restart;particles")
+
+    # A global SD count cannot distinguish one birth in every cell from a box scatter.
+    # Use native records both sides of pulse boundaries and compare decompositions.
+    set(_pulse_src "${CMAKE_CURRENT_SOURCE_DIR}/test_files/SDM_CellPulse")
+    set(_pulse_tests SDM_CellPulse_1Rank SDM_CellPulse_Reject)
+    if(ERF_ENABLE_MPI)
+        list(APPEND _pulse_tests SDM_CellPulse_2Ranks)
+    endif()
+    erf_mpi_launcher_command(_pulse_one LAUNCHER "${_species_mpi_exec}"
+        NUMPROC_FLAG "${MPIEXEC_NUMPROC_FLAG}" NRANKS 1 PREFLAGS "${_species_mpi_preflags}"
+        CONTEXT "SDM_CellPulse_1Rank" OPTIONAL)
+    foreach(_test IN LISTS _pulse_tests)
+        set(_ranks 1)
+        set(_launch ${_pulse_one})
+        set(_options "")
+        if(_test STREQUAL "SDM_CellPulse_2Ranks")
+            set(_ranks 2)
+            erf_mpi_launcher_command(_launch LAUNCHER "${_species_mpi_exec}"
+                NUMPROC_FLAG "${MPIEXEC_NUMPROC_FLAG}" NRANKS 2 PREFLAGS "${_species_mpi_preflags}"
+                CONTEXT "${_test}" OPTIONAL)
+            foreach(_token IN LISTS _pulse_one)
+                list(APPEND _options "--reference-token=${_token}")
+            endforeach()
+        elseif(_test STREQUAL "SDM_CellPulse_Reject")
+            set(_options --reject)
+        endif()
+        set(_dir "${CMAKE_CURRENT_BINARY_DIR}/test_files/${_test}")
+        file(MAKE_DIRECTORY "${_dir}")
+        add_test(NAME ${_test} COMMAND "${Python3_EXECUTABLE}" -B "${_pulse_src}/check_cell_pulse.py"
+            "--input=${_pulse_src}/SDM_CellPulse.i" "--ranks=${_ranks}" ${_options}
+            -- ${_launch} "$<TARGET_FILE:erf_exec>")
+        set_tests_properties(${_test} PROPERTIES WORKING_DIRECTORY "${_dir}" TIMEOUT 600
+            PROCESSORS ${_ranks} LABELS "regression;restart;particles")
+    endforeach()
+
     set(_anelastic_options "erf.input_sounding_file=${_species_input}/input_sounding erf.c_p=1200 erf.Cs=2 super_droplets_moisture.include_phase_change=true super_droplets_moisture.num_substeps_phase_change=2 super_droplets_moisture.initial_phase_change_relaxation=true super_droplets_moisture.initial_phase_change_relaxation_time=0.02")
     # Motivation: Restart reconstruction must preserve the active phase-change
     # trajectory with base pressure and a nondefault heat capacity.

@@ -401,10 +401,21 @@ void SuperDropletPC::InitializeParticles (const int a_lev, const double a_t, con
 }
 
 /*! Inject particles */
-void SuperDropletPC::InjectParticles (const double a_t, const MFPtr& a_ptr, const double a_dt)
+void SuperDropletPC::InjectParticles (const double a_t, const MFPtr& a_ptr, const double a_dt, int step)
 {
     bool injected = false;
     for (int i = 0; i < m_num_injections; i++) {
+        auto& source = *m_injections[i];
+        if (source.m_periodic) {
+            if (source.preparePulse(step, a_t, a_dt)) {
+                addParticles(0, a_ptr, source);
+                const int event = (step-source.m_first_tick)/source.m_period_ticks;
+                Print() << "Cell pulse: event=" << event << " time=" << source.m_tstart + event*source.m_period
+                        << " cells=" << source.m_pulse.cells << " represented=" << source.m_pulse.dose << "\n";
+                injected = true;
+            }
+            continue;
+        }
         const bool active = (m_injections[i]->m_inj_rate > 0)
                          && (a_t >= m_injections[i]->m_tstart)
                          && (a_t <= m_injections[i]->m_tstop);

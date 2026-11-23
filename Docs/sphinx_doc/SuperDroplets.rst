@@ -680,3 +680,24 @@ are accumulated or rounded according to the selected mode, so low rates need
 not produce an injection event every time step. Include the actual represented
 injected mass in conservation diagnostics rather than assuming a continuously
 realized source at every step.
+
+**Exact per-cell releases.** Set ``super_droplets_moisture.injection.period_s``
+to a positive interval in seconds, explicitly set ``particles_per_cell = 1``
+and ``multiplicity_type = constant``, and omit ``sd_rate`` and
+``min_multiplicity``. This opt-in mode releases one new super-droplet in
+*every* cell at step starts ``t_start + n * period_s < t_stop``. It does not
+set the resident population. For example, 600 to 3600 seconds with a 10-second
+period gives 300 releases; the state at 600 seconds precedes the first one.
+Without ``period_s`` the existing injection modes are unchanged.
+
+The source must span the entire stationary, uniform, flat, single-level domain.
+Use fixed time steps from a zero-origin simulation clock, with interval and
+both time bounds on step boundaries. Each event supplies a full period's dose
+even if the final interval ends early. The physical dose per event is ``rate``
+times domain volume times period, and must average at least one real particle
+per cell. The integer dose is the difference of consecutive rounded cumulative
+doses. Floor/ceiling weights share the remainder between cells independently of
+MPI layout, rotating the recipients over releases. The schedule and weights
+restart from the saved coarse step, with no stochastic timing or replay. Only
+after verifying the count and weights of newly created records does ERF log
+``Cell pulse: event=... time=... cells=... represented=...``.
