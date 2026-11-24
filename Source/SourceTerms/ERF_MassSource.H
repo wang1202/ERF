@@ -16,6 +16,7 @@
 #include <AMReX_Reduce.H>
 
 #include "ERF_IndexDefines.H"
+#include "ERF_LengthScaleCellSize.H"
 
 /**
  * A localized source of gas inside the domain (erf.mass_source.*), e.g. the release
@@ -26,7 +27,8 @@
  * and less than erf.mass_source.height above the local ground.  The same source is
  * added to
  *   - rho, so the mass enters the continuity equation (FullyCompressible only: the
- *     anelastic projection would remove it),
+ *     anelastic projection would remove it, and pseudo-incompressible levels do not
+ *     support it either),
  *   - rho*theta, at erf.mass_source.theta if given and otherwise at the cell's own theta,
  *     so the injection by itself does not change the potential temperature, and
  *   - the first passive scalar (rho*s, plotted as rhoadv_0) when erf.mass_source.tracer
@@ -250,7 +252,10 @@ public:
             const auto problo = geom[lev].ProbLoArray();
             const auto period = erf_mass_source::periodic_lengths(geom[lev]);
             const amrex::Real x0 = m_x0, y0 = m_y0, r2 = m_radius * m_radius, hmax = m_height;
-            const amrex::Real dV0 = dx[0] * dx[1] * dx[2];
+            // dx in place of a dy over one cell, and the reverse: on an x-z slice mdot is the
+            // rate per dx of span
+            const auto len = LengthScaleCellSize(geom[lev]);
+            const amrex::Real dV0 = len[0] * len[1] * len[2];
 
             amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
             amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);

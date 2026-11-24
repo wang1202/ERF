@@ -49,7 +49,10 @@ Governing Equations
 | **erf.buoyancy_type**           | Compressible choices: 1=full density departure;          | 1, 2, 3, 4         | 1 (3 if          |
 |                                 | 2/3=identical temperature approximations;                |                    | anelastic)       |
 |                                 | 4=potential-temperature approximation. Anelastic uses a  |                    |                  |
-|                                 | separate kernel. See :ref:`Buoyancy`.                    |                    |                  |
+|                                 | separate kernel. PseudoIncompressible evolves the        |                    |                  |
+|                                 | density as compressible does and always uses 1; another  |                    |                  |
+|                                 | value there is replaced by 1 with a warning. See         |                    |                  |
+|                                 | :ref:`Buoyancy`.                                         |                    |                  |
 +---------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.use_fft**                 | Use FFT rather than multigrid to solve the Poisson       | Boolean            | false            |
 |                                 | equations, where supported.                              |                    |                  |
@@ -57,8 +60,10 @@ Governing Equations
 | **erf.mg_v**                    | Multigrid Poisson solver verbosity.                      | Integer >= 0       | 0                |
 +---------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.fixed_density**           | Hold dry density fixed in time (per level). Always 1 on  | 0, 1               | 0 (1 if          |
-|                                 | anelastic levels. A user value of 0 there is ignored     |                    | anelastic)       |
-|                                 | with a warning.                                          |                    |                  |
+|                                 | anelastic levels and always 0 on pseudo-incompressible   |                    | anelastic)       |
+|                                 | levels, which evolve the density as compressible levels  |                    |                  |
+|                                 | do. A user value that disagrees is ignored with a        |                    |                  |
+|                                 | warning.                                                 |                    |                  |
 +---------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.c_p**                     | Runtime dry-air heat capacity [J/(kg K)] for selected    | Real > 0           | 1004.5           |
 |                                 | thermodynamics and forcing. It does not change fixed EOS |                    |                  |
@@ -270,7 +275,8 @@ List of Parameters
 +-----------------------------+----------------------------------------------------------+--------------------+------------------+
 | **<face>.density_grad**     | Neumann gradient of density imposed at a ``slipwall`` or | Real               | 0.0              |
 |                             | ``noslipwall`` face; may not be combined with            |                    |                  |
-|                             | ``<face>.density``, and is rejected for anelastic runs   |                    |                  |
+|                             | ``<face>.density``, and is rejected in anelastic and     |                    |                  |
+|                             | pseudo-incompressible runs                               |                    |                  |
 +-----------------------------+----------------------------------------------------------+--------------------+------------------+
 | **<face>.theta**            | potential temperature imposed at a ``slipwall`` or       | Real > 0           | not set          |
 |                             | ``noslipwall`` face; may not be combined with            |                    |                  |
@@ -965,7 +971,8 @@ The solver timestep can be fixed by the user or computed dynamically at each tim
 number --- i.e., adaptive time stepping. For the compressible equations, the timestep calculation uses the acoustic CFL constraint.
 We note that when using implicit substepping, the vertical grid spacing does not appear in the time step calculation.
 The number of acoustic sub-steps per timestep can also be specified by the user as a fixed value or by specifying the
-number of substeps per RK stage.  For the anelastic equations, the timestep calculation uses the advective CFL constraint,
+number of substeps per RK stage.  For the anelastic and pseudo-incompressible equations, which get their pressure from a projection rather than
+from the equation of state, the timestep calculation uses the advective CFL constraint,
 which means it is determined by the fluid speed rather than the sound speed and thus allows much larger timesteps.
 In both cases the horizontal terms use the physical cell widths :math:`\Delta x / m_x` and :math:`\Delta y / m_y`,
 where :math:`m_x` and :math:`m_y` are the local map factors, so the timestep is limited by the smallest physical cell.
@@ -1071,8 +1078,10 @@ List of Parameters
 |                                      | stage                                                    |                    |                   |
 +--------------------------------------+----------------------------------------------------------+--------------------+-------------------+
 | **erf.ncorr**                        | number of corrector passes in the thin-body              | Integer >= 1       | 1                 |
-|                                      | projection (anelastic runs with zero-flux faces); each   |                    |                   |
-|                                      | pass adds its pressure change to the stored gradient.    |                    |                   |
+|                                      | projection (anelastic runs with zero-flux faces; thin    |                    |                   |
+|                                      | bodies are not supported with PseudoIncompressible);     |                    |                   |
+|                                      | each pass adds its pressure change to the stored         |                    |                   |
+|                                      | gradient.                                                |                    |                   |
 |                                      | Also the number of corrections in the Poisson wall       |                    |                   |
 |                                      | distance                                                 |                    |                   |
 +--------------------------------------+----------------------------------------------------------+--------------------+-------------------+
@@ -1090,7 +1099,8 @@ List of Parameters
 |                                      | :ref:`PseudoIncompressibleEquations`                     |                    |                   |
 +--------------------------------------+----------------------------------------------------------+--------------------+-------------------+
 | **erf.terrain_poisson_solver**       | solver for the projection on a terrain-fitted mesh       | "gmres_fft",       | "gmres_fft"       |
-|                                      | (anelastic, and the initial projection). ``gmres_fft``:  | "mlmg",            |                   |
+|                                      | (anelastic or pseudo-incompressible, and the initial     | "mlmg",            |                   |
+|                                      | projection). ``gmres_fft``:                              |                    |                   |
 |                                      | GMRES with ERF's terrain operator and an FFT             | "gmres_mlmg"       |                   |
 |                                      | preconditioner (needs the FFT build). ``mlmg``:          |                    |                   |
 |                                      | ``amrex::MLTerrainPoisson`` with multigrid, no FFT       |                    |                   |
@@ -1098,7 +1108,9 @@ List of Parameters
 |                                      | preconditioner. The three solve the same equations and   |                    |                   |
 |                                      | agree to the solver tolerance. Each region of a level    |                    |                   |
 |                                      | must be a rectangle. No effect on flat or stretched      |                    |                   |
-|                                      | meshes, which still need the FFT build. See              |                    |                   |
+|                                      | meshes; there an anelastic level still needs the FFT     |                    |                   |
+|                                      | build, and a pseudo-incompressible level uses multigrid  |                    |                   |
+|                                      | and does not. See                                        |                    |                   |
 |                                      | :ref:`subsec:TerrainMLMG`.                               |                    |                   |
 +--------------------------------------+----------------------------------------------------------+--------------------+-------------------+
 
@@ -1108,7 +1120,7 @@ Notes
 -  | **erf.timestepping_type** must be RK3_ImplicitSubstep or RK3_NoSubstepping at a FullyCompressible level and
      RK2 or MidPoint at any other level; if it is not given, each level gets RK3_ImplicitSubstep or MidPoint accordingly.
 
--  | The implicit vertical diffusion is only second-order in time in an anelastic run when the two
+-  | The implicit vertical diffusion is only second-order in time at an anelastic or pseudo-incompressible level when the two
      stages are the **midpoint method** and the tridiagonal solve is done in the first stage alone.
      Solving again in the second stage would collapse to first-order, so **erf.vert_implicit_fac**
      is zeroed for that midpoint stage; with **erf.timestepping_type = RK2** the implicit solve is
@@ -1152,7 +1164,8 @@ Notes
      averaged metric term is explicit for that stage.  The rule is measured, not derived: with
      the default 1 1 0 the option gained little on a steep 3 km ridge, and with anelastic
      MidPoint (which solves in its first stage only) it ran worse than without it, while with
-     1 1 1 it recovered the time step of a run without LES.  Anelastic runs therefore cannot use
+     1 1 1 it recovered the time step of a run without LES.  Anelastic and pseudo-incompressible
+     runs, whose RK2 and MidPoint integrators never solve in every stage, therefore cannot use
      it.  The option is off by default.  Independently of it, the u and v implicit solves use the
      same h_zeta as the correction stress they replace, so default implicit runs on curved terrain
      that decays with height change slightly (see :ref:`terrain-momentum-stresses`).
@@ -1224,12 +1237,13 @@ Notes
      component's vertical diffusion bounded (no stage amplifies a mode), and 1 otherwise.
      This is decided analytically: with the three-stage scheme (stages from the old state with
      steps dt/3, dt/2 and dt) every stage is bounded when **erf.vert_implicit_fac** has
-     :math:`f_1 \ge 1/2` and :math:`f_2 = 1`, whatever :math:`f_3`, and with the anelastic
-     MidPoint scheme when :math:`f_1 = 1`.  Every other pattern, including factors outside
+     :math:`f_1 \ge 1/2` and :math:`f_2 = 1`, whatever :math:`f_3`, and with the MidPoint
+     scheme of an anelastic or pseudo-incompressible level when :math:`f_1 = 1`.  Every other pattern, including factors outside
      [0, 1], counts as explicit; some of those are in fact bounded, so the rule is sufficient,
      not necessary.  So the
      default ``1 1 0`` (Crank-Nicolson for the vertical diffusion) and ``1 1 1`` (backward
-     Euler) give :math:`e = 0`, and ``0 0 0``, anelastic RK2 (no implicit solve), ``1 0 0``,
+     Euler) give :math:`e = 0`, and ``0 0 0``, RK2 at an anelastic or pseudo-incompressible
+     level (no implicit solve), ``1 0 0``,
      ``0 0 1`` or ``0.995 0.1 0.0666`` (whose last stage amplifies by 1.0008) give :math:`e = 1`.
      Host-transported microphysics species, including appended non-water vapor,
      use the same stage-dependent :math:`e` as water species (with SBM only qv,
@@ -1278,7 +1292,7 @@ Notes
    * | If **erf.fixed_dt** is specified, the slow timestep will be set to **fixed_dt**.
 
    * | If **erf.fixed_dt** is not set, the slow timestep will be computed using the CFL
-       condition for incompressible/anelastic flow.  If **erf.cfl** is specified, that CFL value will be used.
+       condition for incompressible, anelastic or pseudo-incompressible flow.  If **erf.cfl** is specified, that CFL value will be used.
        If not, the default value will be used.
 
    * | There are several consistency checks before the fast timestep is computed.  Specifically, if any
@@ -2415,16 +2429,19 @@ List of Parameters
 | **erf.moistscal_vert_upw_frac**   | as above, for the vertical advection of moist scalars    | Real in [0,1]      | 1.0              |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.zero_xflux_faces**          | list of (i,j,k) x-faces across which the advective flux  | List of 3-integer  | none             |
-|                                   | is forced to zero; when not FullyCompressible these      | triples            |                  |
-|                                   | select the thin-body projection                          |                    |                  |
+|                                   | is forced to zero; at an Anelastic level these select    | triples            |                  |
+|                                   | the thin-body projection. Not supported with             |                    |                  |
+|                                   | PseudoIncompressible (ERF stops)                         |                    |                  |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.zero_yflux_faces**          | list of (i,j,k) y-faces across which the advective flux  | List of 3-integer  | none             |
-|                                   | is forced to zero; when not FullyCompressible these      | triples            |                  |
-|                                   | select the thin-body projection                          |                    |                  |
+|                                   | is forced to zero; at an Anelastic level these select    | triples            |                  |
+|                                   | the thin-body projection. Not supported with             |                    |                  |
+|                                   | PseudoIncompressible (ERF stops)                         |                    |                  |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.zero_zflux_faces**          | list of (i,j,k) z-faces across which the advective flux  | List of 3-integer  | none             |
-|                                   | is forced to zero; when not FullyCompressible these      | triples            |                  |
-|                                   | select the thin-body projection                          |                    |                  |
+|                                   | is forced to zero; at an Anelastic level these select    | triples            |                  |
+|                                   | the thin-body projection. Not supported with             |                    |                  |
+|                                   | PseudoIncompressible (ERF stops)                         |                    |                  |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 
 The allowed advection types for the dycore variables are:
@@ -3215,13 +3232,24 @@ Rayleigh Damping
 +--------------------------------+----------------------------------------------------------+--------------------+------------------+
 | Parameter                      | Definition                                               | Acceptable Values  | Default          |
 +================================+==========================================================+====================+==================+
-| **erf.rayleigh_damping_type**  | how the Rayleigh damping terms are integrated in time:   | SlowExplicit,      | SlowExplicit     |
-|                                | ``SlowExplicit`` applies them explicitly in the slow     | FastExplicit,      |                  |
-|                                | (Runge-Kutta) update, while ``FastExplicit`` and         | FastImplicit       |                  |
-|                                | ``FastImplicit`` apply them explicitly or implicitly     |                    |                  |
-|                                | within the acoustic substeps.  A level that takes no     |                    |                  |
-|                                | acoustic substeps applies them in the slow update.  Case |                    |                  |
-|                                | sensitive; an unrecognized value aborts                  |                    |                  |
+| **erf.rayleigh_damping_type**  | how the Rayleigh damping terms are integrated in time:   | SlowExplicit,      | SlowExplicit;    |
+|                                | ``SlowExplicit`` applies them explicitly in the slow     | SlowImplicit,      | for w on         |
+|                                | (Runge-Kutta) update, while ``FastExplicit`` and         | FastExplicit,      | anelastic and    |
+|                                | ``FastImplicit`` apply them explicitly or implicitly     | FastImplicit       | pseudo-          |
+|                                | within the acoustic substeps.  A level that takes no     |                    | incompressible   |
+|                                | acoustic substeps applies them in the slow update.       |                    | levels,          |
+|                                | ``SlowImplicit`` damps w implicitly in the slow update   |                    | SlowImplicit     |
+|                                | (u, v and theta stay explicit), which is stable for any  |                    |                  |
+|                                | dt; the explicit w damping is not once                   |                    |                  |
+|                                | ``rayleigh_dampcoef`` times dt reaches 2 (RK2) or 2.5    |                    |                  |
+|                                | (RK3).  It needs levels without acoustic substeps        |                    |                  |
+|                                | (anelastic, pseudo-incompressible, RK3_NoSubstepping);   |                    |                  |
+|                                | with substeps use ``FastImplicit``.  When this input is  |                    |                  |
+|                                | not given, anelastic and pseudo-incompressible levels    |                    |                  |
+|                                | damp w implicitly and everything else as                 |                    |                  |
+|                                | ``SlowExplicit``; give ``SlowExplicit`` to keep the      |                    |                  |
+|                                | explicit w damping there.  Case sensitive; an            |                    |                  |
+|                                | unrecognized value aborts                                |                    |                  |
 +--------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.rayleigh_damp_U**        | Include explicit Rayleigh damping in the x-momentum      | Boolean            | false            |
 |                                | equation                                                 |                    |                  |
@@ -3508,10 +3536,12 @@ Lateral Boundary Nudging
 | **erf.bdy_moist_nudge_type**  | which approach is used to nudge the moist variables in   | 0, 1, 2            | 1                          |
 |                               | the boundary region                                      |                    |                            |
 +-------------------------------+----------------------------------------------------------+--------------------+----------------------------+
-| **erf.use_wrf_bdy_density**   | use the dry-air density reconstructed from the           | Boolean            | true                       |
-|                               | ``wrfbdy`` data.  Ignored (set to false) unless real     |                    |                            |
-|                               | boundary conditions are used with ``init_type`` =        |                    |                            |
-|                               | ``WRFInput``                                             |                    |                            |
+| **erf.use_wrf_bdy_density**   | use the dry-air density reconstructed from the           | Boolean            | true if level 0 is         |
+|                               | ``wrfbdy`` data.  Ignored (set to false) unless real     |                    | FullyCompressible, false   |
+|                               | boundary conditions are used with ``init_type`` =        |                    | otherwise                  |
+|                               | ``WRFInput``.  Not supported when level 0 is Anelastic   |                    |                            |
+|                               | or PseudoIncompressible: setting it to true there stops  |                    |                            |
+|                               | the run                                                  |                    |                            |
 +-------------------------------+----------------------------------------------------------+--------------------+----------------------------+
 
 For WRF real boundaries, moisture nudging type 0 relaxes only ``qv`` toward
@@ -3891,7 +3921,8 @@ Notes
   did not list ``density``) the constant ``<face>.density`` of each inflow face (``xlo.density``
   and so on) is used, and ERF stops if it is not given.  That constant is used at every height, so
   it suits a face over which density varies little; otherwise write and read ``density``.  An
-  anelastic run cannot give ``<face>.density``, so there these planes need ``density`` too.
+  anelastic or pseudo-incompressible run cannot give ``<face>.density``, so there these planes need
+  ``density`` too.
   ``temperature`` planes always need ``density``, since theta is recovered from temperature
   through the pressure; without it ERF stops.  Planes of ``velocity`` alone need no density.
   None of this applies with ``erf.use_real_bcs``, where the planes are used as they are read.
@@ -4038,8 +4069,9 @@ List of Parameters
 |                                   | read only when ``init_type`` = ``WRFInput``.  If not     |                              |                    |
 |                                   | given, ``use_real_bcs`` is set to false                  |                              |                    |
 +-----------------------------------+----------------------------------------------------------+------------------------------+--------------------+
-| **erf.project_initial_velocity**  | if 1, project the initial velocity field to make it      | 0, 1                         | 0 (1 if anelastic) |
-|                                   | satisfy the anelastic constraint (per-level)             |                              |                    |
+| **erf.project_initial_velocity**  | if 1, project the initial velocity field to make it      | 0, 1                         | 0 (1 if anelastic  |
+|                                   | satisfy the level's divergence constraint (per-level);   |                              | or pseudo-         |
+|                                   | always 1 on anelastic and pseudo-incompressible levels   |                              | incompressible)    |
 +-----------------------------------+----------------------------------------------------------+------------------------------+--------------------+
 | **erf.real_width**                | Lateral boundary total width if use_real_bcs is true     | Integer                      | 0                  |
 +-----------------------------------+----------------------------------------------------------+------------------------------+--------------------+
@@ -4059,6 +4091,15 @@ List of Parameters
 | **erf.rebalance_wrf_input**       | rebalance (hydrostatically re-integrate) the state read  | Boolean                      | true               |
 |                                   | from ``wrfinput`` and ``wrfbdy``.  Forced to true if     |                              |                    |
 |                                   | ``avg_grid_faces_to_nodes`` is false                     |                              |                    |
++-----------------------------------+----------------------------------------------------------+------------------------------+--------------------+
+| **erf.check_wrfbdy_invariant**    | diagnostic: at the first ``wrfbdy`` time of a fresh      | Boolean                      | false              |
+|                                   | start, print for each side the largest difference        |                              |                    |
+|                                   | between the decoupled, interpolated boundary u, v,       |                              |                    |
+|                                   | theta, qv and density and the initial state built from   |                              |                    |
+|                                   | ``wrfinput`` (points whose height lies inside the WRF    |                              |                    |
+|                                   | column).  The two should agree when the files come from  |                              |                    |
+|                                   | the same real.exe run; the initial density matches only  |                              |                    |
+|                                   | without the rebalance                                    |                              |                    |
 +-----------------------------------+----------------------------------------------------------+------------------------------+--------------------+
 | **erf.interp_atmos_from_coarse**  | For fine levels (lev > 0) with ``WRFInput``              | Boolean                      | false              |
 |                                   | initialization, interpolate atmospheric state (U, V, W,  |                              |                    |
@@ -4145,8 +4186,8 @@ If **erf.use_real_bcs = true**,
 the extent of the relaxation zone may be controlled with ``erf.real_width`` (corresponding to WRF's **spec_bdy_width**).
 
 Note that the **erf.project_initial_velocity** option is available for all **init_type** options.  If using the anelastic
-formulation this will be true regardless of the input; if using the compressible formulation the default is false but
-that can be over-written.
+or pseudo-incompressible formulation this will be true regardless of the input, since both get their pressure from a
+projection; if using the compressible formulation the default is false but that can be over-written.
 
 .. _inputs-map-scale-factors:
 
@@ -4450,29 +4491,44 @@ building combinations.
 +===================================+==========================================================+====================+==================+
 | **erf.immersed_forcing_substep**  | apply the immersed forcing source terms during the       | Boolean            | true if          |
 |                                   | acoustic substeps only; ignored on a level that takes no |                    | compressible,    |
-|                                   | acoustic substeps, which applies them in the slow update |                    | false if         |
-|                                   |                                                          |                    | anelastic        |
+|                                   | acoustic substeps, which applies them in the slow update |                    | false if any     |
+|                                   |                                                          |                    | level is         |
+|                                   |                                                          |                    | anelastic or     |
+|                                   |                                                          |                    | pseudo-          |
+|                                   |                                                          |                    | incompressible   |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.if_Cd_momentum**            | immersed forcing drag coefficient for momentum           | Real > 0           | 500.0 if         |
 |                                   |                                                          |                    | compressible,    |
-|                                   |                                                          |                    | 50.0 if          |
-|                                   |                                                          |                    | anelastic        |
+|                                   |                                                          |                    | 50.0 if any      |
+|                                   |                                                          |                    | level is         |
+|                                   |                                                          |                    | anelastic or     |
+|                                   |                                                          |                    | pseudo-          |
+|                                   |                                                          |                    | incompressible   |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.if_Cd_scalar**              | immersed forcing drag coefficient for scalars            | Real > 0           | 50.0 if          |
 |                                   |                                                          |                    | compressible,    |
-|                                   |                                                          |                    | 5.0 if anelastic |
+|                                   |                                                          |                    | 5.0 if any level |
+|                                   |                                                          |                    | is anelastic or  |
+|                                   |                                                          |                    | pseudo-          |
+|                                   |                                                          |                    | incompressible   |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.if_implicit_drag**          | use a point-implicit (linearly implicit) form of the     | Boolean            | false            |
 |                                   | immersed forcing drag rather than an explicit            |                    |                  |
 |                                   | forward-Euler source                                     |                    |                  |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
-| **erf.if_implicit_projection**    | terrain or buildings immersed forcing (not both),        | Boolean            | false            |
-|                                   | no FullyCompressible level, constant-dz mesh, map        |                    |                  |
-|                                   | factors of one, FFT build: apply the drag of the solid   |                    |                  |
-|                                   | inside the projection, m = (m* - grad phi) / (1 + dt     |                    |                  |
-|                                   | rate) on each face (FFT-preconditioned GMRES), and do    |                    |                  |
-|                                   | not zero the solid faces afterwards, so the projected    |                    |                  |
-|                                   | momenta are divergence free in the solid too             |                    |                  |
+| **erf.if_implicit_projection**    | terrain or buildings immersed forcing (not both), a      | Boolean            | false            |
+|                                   | mesh without terrain-fitted coordinates, at least one    |                    |                  |
+|                                   | level Anelastic or PseudoIncompressible (not             |                    |                  |
+|                                   | FullyCompressible): apply the drag of the solid inside   |                    |                  |
+|                                   | the projection, m = (m* - grad phi) / (1 + dt rate) on   |                    |                  |
+|                                   | each face, and do not zero the solid faces afterwards,   |                    |                  |
+|                                   | so the projected momenta are divergence free in the      |                    |                  |
+|                                   | solid too. Solver: FFT-preconditioned GMRES (constant    |                    |                  |
+|                                   | dz, map factors of one, an Anelastic level,              |                    |                  |
+|                                   | FFT build, rectangular refined regions), otherwise       |                    |                  |
+|                                   | multigrid. A FullyCompressible                           |                    |                  |
+|                                   | level keeps the drag in the momentum source.             |                    |                  |
+|                                   | Refused with thin immersed bodies (zero-flux faces)      |                    |                  |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.if_z0**                     | roughness length [m] used by the immersed forcing wall   | Real > 0           | 0.1              |
 |                                   | model                                                    |                    |                  |
@@ -4540,7 +4596,8 @@ building combinations.
 |                                   | fraction, no diffusion through the wall face, the RANS   |                    |                  |
 |                                   | wall distance from the surface, kappa (d + if_z0));      |                    |                  |
 |                                   | needs erf.if_use_most = true, a constant-dz mesh with    |                    |                  |
-|                                   | erf.if_z0 < dz/4 on every level, the anelastic model (no |                    |                  |
+|                                   | erf.if_z0 < dz/4 on every level, an anelastic or         |                    |                  |
+|                                   | pseudo-incompressible model on every level (no           |                    |                  |
 |                                   | immersed_forcing_substep), terrain only (not buildings); |                    |                  |
 |                                   | erf.if_stability_correction is for the legacy law        |                    |                  |
 +-----------------------------------+----------------------------------------------------------+--------------------+------------------+
@@ -5200,8 +5257,8 @@ List of Parameters
 | Parameter              | Definition                                               | Acceptable Values  | Default          |
 +========================+==========================================================+====================+==================+
 | **erf.coupling_type**  | how data is exchanged between AMR levels.  Forced to     | OneWay, TwoWay     | TwoWay           |
-|                        | ``OneWay`` if some levels are anelastic and others       |                    |                  |
-|                        | compressible                                             |                    |                  |
+|                        | ``OneWay`` if some levels are FullyCompressible and      |                    |                  |
+|                        | others Anelastic or PseudoIncompressible                 |                    |                  |
 +------------------------+----------------------------------------------------------+--------------------+------------------+
 
 Notes
@@ -6017,8 +6074,34 @@ atmospheric cell), ``start_datetime`` and the
 |                                                    | used on a restart (a NOTE says so): T_s comes from the     |                    |                  |
 |                                                    | checkpoint. The restoring temperature stays the one        |                    |                  |
 |                                                    | value seb_t_deep_default: a start far from it relaxes      |                    |                  |
-|                                                    | toward it (the log prints the largest difference).         |                    |                  |
+|                                                    | toward it (the log prints the largest difference);         |                    |                  |
+|                                                    | seb_init_t_deep_from_file sets it per column.              |                    |                  |
 |                                                    | false: every column begins at erf.rad_t_sfc                |                    |                  |
++----------------------------------------------------+------------------------------------------------------------+--------------------+------------------+
+| **erf.radiation.seb_init_t_deep_from_file**        | At a fresh start the deep (restoring) temperature T_deep   | Boolean            | false            |
+|                                                    | of a land column is TMN of the wrfinput file [K], the soil |                    |                  |
+|                                                    | temperature at the lower boundary. A water column keeps    |                    |                  |
+|                                                    | seb_t_deep_default. T_deep is then kept per column: it is  |                    |                  |
+|                                                    | not reset each step, a level without a file of its own,    |                    |                  |
+|                                                    | one made later in the run and one that takes its radiation |                    |                  |
+|                                                    | from its parent take it from the parent, with two-way      |                    |                  |
+|                                                    | coupling the fine values are averaged down, and the        |                    |                  |
+|                                                    | checkpoint holds it (TwoStream_TDeep). A finer level with  |                    |                  |
+|                                                    | a wrfinput file of its own takes that file's TMN. Without  |                    |                  |
+|                                                    | seb_deep_prognostic_enable the balance does not evolve     |                    |                  |
+|                                                    | T_deep; with it TMN is the first value of the evolving     |                    |                  |
+|                                                    | T_deep. Needs the TwoStream model, seb_prognostic_enable,  |                    |                  |
+|                                                    | no land-surface, urban or surface model, erf.init_type =   |                    |                  |
+|                                                    | WRFInput and TMN on every column of the file of level 0    |                    |                  |
+|                                                    | and of each finer level that takes its file's TMN; the run |                    |                  |
+|                                                    | stops otherwise. It also stops when a land value is not    |                    |                  |
+|                                                    | finite or lies outside [seb_prognostic_t_min_k,            |                    |                  |
+|                                                    | seb_prognostic_t_max_k]. On a restart the file is not      |                    |                  |
+|                                                    | read: T_deep comes from the checkpoint, and from a         |                    |                  |
+|                                                    | checkpoint without it T_deep is seb_t_deep_default (a NOTE |                    |                  |
+|                                                    | says so). Keep the input set on the restart: without it    |                    |                  |
+|                                                    | T_deep is seb_t_deep_default again (a NOTE says so).       |                    |                  |
+|                                                    | false: T_deep is seb_t_deep_default in every column        |                    |                  |
 +----------------------------------------------------+------------------------------------------------------------+--------------------+------------------+
 | **erf.radiation.seb_surface_layer_uses_moisture**  | Two-way coupling of moisture as well: the zlo surface      | Boolean            | false            |
 |                                                    | layer takes its land surface mixing ratio from the         |                    |                  |
@@ -6105,7 +6188,11 @@ atmospheric cell), ``start_datetime`` and the
 |                                                    | seb_moisture_layer_depth_m                                 |                    |                  |
 +----------------------------------------------------+------------------------------------------------------------+--------------------+------------------+
 | **erf.radiation.seb_t_deep_default**               | SEB deep soil temperature [K]: fixed, or with              | Real               | 300.0            |
-|                                                    | seb_deep_prognostic_enable its initial value               |                    |                  |
+|                                                    | seb_deep_prognostic_enable its initial value. With         |                    |                  |
+|                                                    | seb_init_t_deep_from_file the value of the water columns,  |                    |                  |
+|                                                    | of a fine land column with no coarse land column next to   |                    |                  |
+|                                                    | it, and of every column after a restart from a checkpoint  |                    |                  |
+|                                                    | without TwoStream_TDeep                                    |                    |                  |
 +----------------------------------------------------+------------------------------------------------------------+--------------------+------------------+
 | **erf.radiation.seb_q_deep_default**               | Deep soil moisture q_s restores to, in q_s's units. With   | Real [0,1]         | 0.0              |
 |                                                    | seb_surface_layer_uses_moisture a NOTE at start-up flags a |                    |                  |
@@ -6580,6 +6667,11 @@ List of Parameters
 | **erf.eb_diff_constraint_z**         | apply the tangential-diffusion constraint on z-faces at  | Boolean            | false            |
 |                                      | the embedded boundary; read only when                    |                    |                  |
 |                                      | ``erf.eb_boundary_type`` = ``SlipWall``                  |                    |                  |
++--------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.eb_cover_zero_area_faces**     | cover the staggered EB cells at faces whose cell-centered| Boolean            | true if any level|
+|                                      | area fraction is zero; always true (false aborts) when a |                    | is Anelastic or  |
+|                                      | level is Anelastic or PseudoIncompressible               |                    | PseudoIncomp.,   |
+|                                      |                                                          |                    | else false       |
 +--------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **eb2.geometry**                     | which embedded-boundary shape to build; read only when   | terrain, plane,    | terrain          |
 |                                      | ``erf.terrain_type`` is ``EB`` or ``ImmersedForcing``    | box, sphere        |                  |

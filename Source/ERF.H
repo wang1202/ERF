@@ -469,7 +469,8 @@ public:
     //     and at a pseudo-incompressible level (variable-coefficient operator)
     bool projection_uses_terrain_solver (int lev) const;
 
-    // Project the velocities to be divergence-free -- this is only relevant if anelastic == 1
+    // Project the velocities to satisfy the level's divergence constraint -- this is only relevant
+    // at an anelastic or pseudo-incompressible level, or with erf.project_initial_velocity
     void project_initial_velocity (int lev, double time, double dt);
     void project_momenta (int lev, double l_time, double l_dt, amrex::Vector<amrex::MultiFab >& vars,
                           bool apply_if_drag);
@@ -496,7 +497,7 @@ public:
                                    const amrex::Vector<double>& times);
     void RegisterCoarseZMomentumCF (int levc, const amrex::MultiFab& wold, const amrex::MultiFab& wnew,
                                     const amrex::Vector<double>& times);
-    // Anelastic coarse/fine faces in time (ERF_CoarseFineFaces.cpp)
+    // Anelastic and pseudo-incompressible coarse/fine faces in time (ERF_CoarseFineFaces.cpp)
     bool cf_anelastic_flux_match (int lev) const;
     void cf_anelastic_record (int levc, int nrk);
     void cf_anelastic_stage_registration (int lev, int nrk);
@@ -565,6 +566,11 @@ public:
                               amrex::MultiFab& rhs, amrex::MultiFab& phi,
                               amrex::Array<amrex::MultiFab,AMREX_SPACEDIM>& fluxes,
                               amrex::Array<amrex::MultiFab const*,AMREX_SPACEDIM> const& sigma);
+    //! Multigrid solve of div(sigma grad phi) = rhs (erf.if_implicit_projection) where the FFT
+    //! preconditioner is not available; fluxes = -grad phi, without sigma
+    void solve_with_if_mlmg (int lev, amrex::Vector<amrex::MultiFab>& rhs, amrex::Vector<amrex::MultiFab>& phi,
+                             amrex::Vector<amrex::Array<amrex::MultiFab,AMREX_SPACEDIM>>& fluxes,
+                             amrex::Array<amrex::MultiFab const*,AMREX_SPACEDIM> const& sigma);
     void solve_with_gmres (int lev, const amrex::Box& subdomain,
                            amrex::MultiFab& rhs, amrex::MultiFab& p,
                            amrex::Array<amrex::MultiFab,AMREX_SPACEDIM>& fluxes,
@@ -615,6 +621,10 @@ public:
     //! With erf.radiation.seb_init_skin_from_file, start the two-stream SEB skin
     //! temperature of the land columns of level lev from the initial file's TSK or SKINTEMP
     void init_seb_skin_from_file (int lev);
+
+    //! With erf.radiation.seb_init_t_deep_from_file, start the two-stream SEB deep
+    //! (restoring) temperature of the land columns of level lev from the initial file's TMN
+    void init_seb_t_deep_from_file (int lev);
 
     //! With erf.radiation.seb_surface_layer_uses_skin, hand the two-stream surface energy
     //! balance's skin temperature of level lev to the zlo surface layer before it
@@ -1311,6 +1321,7 @@ public:
     void turbPert_update_automatic (int lev, double time);
 
     void fill_terrain_surface  (int lev, amrex::MultiFab& z_phys, double elapsed_time);
+    void build_zphys_nd        (int lev, const amrex::MultiFab* crse_znd, amrex::MultiFab& dst, double time);
     void init_zphys            (int lev, double elapsed_time);
     void remake_zphys          (int lev, amrex::Real time, std::unique_ptr<amrex::MultiFab>& temp_zphys_nd);
     void update_terrain_arrays (int lev);
@@ -1756,7 +1767,7 @@ private:
 #endif
     amrex::Vector<std::unique_ptr<MRISplitIntegrator<amrex::Vector<amrex::MultiFab> > > > mri_integrator_mem;
 
-    // Used for anelastic or when we impose an initial projection
+    // Used for anelastic or pseudo-incompressible levels, or when we impose an initial projection
     amrex::Vector<amrex::MultiFab> pp_inc;
 
     // Pseudo-incompressible (non-EB) levels: the upwind direction on each face (+1, -1, or 0 for
@@ -2109,7 +2120,7 @@ private:
     // Per face: whether its Dirichlet theta comes from a dirichlet_file, and in which form
     // (0: not from a file, 1: the file holds rho*theta, 2: the file holds theta)
     amrex::Array<int, AMREX_SPACEDIM*2> m_th_file_face = {{0}};
-    // Per conserved BC component and face: 1 where an anelastic inflow or inflow_outflow face
+    // Per conserved BC component and face: 1 where an anelastic or pseudo-incompressible inflow or inflow_outflow face
     // was given a primitive value (<face>.theta, scalar, qv, qc, KE).  m_bc_extdir_vals then
     // holds that primitive value, made conserved with the interior density
     amrex::Array<amrex::Array<int, AMREX_SPACEDIM*2>, NBCVAR_max> m_bc_prim_given{};
@@ -2510,6 +2521,9 @@ private:
 
     std::unique_ptr<amrex::MultiFab> wrf_C1H;
     std::unique_ptr<amrex::MultiFab> wrf_C2H;
+    // Hybrid coefficients on full (w) levels, used to decouple the wrfbdy geopotential
+    std::unique_ptr<amrex::MultiFab> wrf_C1F;
+    std::unique_ptr<amrex::MultiFab> wrf_C2F;
     std::unique_ptr<amrex::MultiFab> wrf_MUB;
     std::unique_ptr<amrex::MultiFab> wrf_RDNW;
     std::unique_ptr<amrex::MultiFab> wrf_PHB; // Base geopotential
