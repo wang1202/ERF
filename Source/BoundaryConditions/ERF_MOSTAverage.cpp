@@ -5,6 +5,7 @@
 
 #include "ERF_MOSTAverage.H"
 #include "ERF_TileNoZ.H"
+#include "ERF_LengthScaleCellSize.H"
 
 using namespace amrex;
 
@@ -141,6 +142,7 @@ MOSTAverage::MOSTAverage (Orientation face,
     m_rot_fields.resize(m_maxlev);
     m_averages.resize(m_maxlev);
     m_z_phys_nd.resize(m_maxlev);
+    m_mapfac.resize(m_maxlev);
     m_zref.resize(m_maxlev);
 
     m_k_in.resize(m_maxlev);
@@ -174,12 +176,22 @@ MOSTAverage::make_MOSTAverage_at_level (const int& lev,
                                         std::unique_ptr<MultiFab>& Theta_prim,
                                         std::unique_ptr<MultiFab>& Qv_prim,
                                         std::unique_ptr<MultiFab>& Qr_prim,
-                                        std::unique_ptr<MultiFab>& z_phys_nd)
+                                        std::unique_ptr<MultiFab>& z_phys_nd,
+                                        const Vector<std::unique_ptr<MultiFab>>* mapfac)
 {
     m_fields[lev].resize(m_nvar);
     m_rot_fields[lev].resize(m_nvar-1);
     m_averages[lev].resize(m_navg);
     m_z_phys_nd[lev] = z_phys_nd.get();
+
+    // Map factors (empty means m = 1)
+    m_mapfac[lev].clear();
+    if (mapfac) {
+        m_mapfac[lev].resize(mapfac->size());
+        for (int i = 0; i < static_cast<int>(mapfac->size()); ++i) {
+            m_mapfac[lev][i] = (*mapfac)[i].get();
+        }
+    }
 
     bool use_terrain_fitted_coords = ( (m_terrain_type == TerrainType::StaticFittedMesh) ||
                                        (m_terrain_type == TerrainType::MovingFittedMesh) );
@@ -419,8 +431,28 @@ MOSTAverage::make_MOSTAverage_at_level (const int& lev,
     if (include_subgrid_vel) {
         AMREX_ALWAYS_ASSERT_WITH_MESSAGE(dir == 2, "Subgrid velocity correction only for Z faces!");
         Print() << "Subgrid velocity scale correction at level : " << lev << ' ';
-        const auto dxArr = m_geom[lev].CellSizeArray();
+        // dx in place of a dy over one cell, and the reverse
+        const auto dxArr = LengthScaleCellSize(m_geom[lev]);
         Real dx = std::sqrt(dxArr[0]*dxArr[1]);
+
+        // The physical cell is dx/m_x by dy/m_y: use the mean of 1/(m_x m_y) over the level
+        if (!m_mapfac[lev].empty()) {
+            const MultiFab& mf_mx = *m_mapfac[lev][MapFacType::m_x];
+            const MultiFab& mf_my = *m_mapfac[lev][MapFacType::m_y];
+            Real inv_area_sum = ReduceSum(mf_mx, mf_my, 0,
+                [=] AMREX_GPU_HOST_DEVICE (Box const& bx, Array4<Real const> const& mx,
+                                                          Array4<Real const> const& my) -> Real
+                {
+                    Real r = zero;
+                    amrex::Loop(bx, [=,&r] (int i, int j, int k) noexcept
+                    {
+                        r += one / (mx(i,j,k) * my(i,j,k));
+                    });
+                    return r;
+                });
+            ParallelDescriptor::ReduceRealSum(inv_area_sum);
+            dx *= std::sqrt(inv_area_sum / static_cast<Real>(mf_mx.boxArray().numPts()));
+        }
         if (dx > Real(5000.)) {
             m_Vsg[lev] = Real(0.32) * std::pow(dx/Real(5000.)-1, Real(0.33));
         }
@@ -502,6 +534,34 @@ MOSTAverage::get_ng_fill (const int& lev) const
         ng_fill[idim] = max(0, ng_min[idim] - (m_radius + 1));
     }
     return ng_fill;
+}
+
+/**
+ * Function to return the lateral bounds on the interpolation stencil in one box.
+ *
+ * @param[in] lev Current level
+ * @param[in] mfi Iterator over the cell-centered fields
+ */
+MOSTAverage::InterpStencilBounds
+MOSTAverage::interp_stencil_bounds (const int& lev, const MFIter& mfi) const
+{
+    InterpStencilBounds bounds;
+
+    // Columns each average reads: its pbx in compute_region_averages plus the radius
+    const IntVect ng_read = get_ng_fill(lev) + IntVect(m_radius,m_radius,0);
+    const Box& vbx = m_fields[lev][3]->boxArray()[mfi.index()];
+
+    for (int imf(0); imf < 5; ++imf) {
+        if (!m_fields[lev][imf]) { continue; }
+        // The averages read the rotated fields where they exist (not for W)
+        const MultiFab* mf = (m_rotate && imf != 2 && m_rot_fields[lev][imf])
+                           ? m_rot_fields[lev][imf].get() : m_fields[lev][imf];
+        const IndexType ixt = m_fields[lev][imf]->ixType();
+        bounds.reach[bounds.nfields] = amrex::grow(amrex::convert(vbx, ixt), ng_read);
+        bounds.held [bounds.nfields] = mf->fabbox(mfi.index());
+        ++bounds.nfields;
+    }
+    return bounds;
 }
 
 /**
@@ -628,6 +688,14 @@ MOSTAverage::set_rotated_fields (const int& lev)
 
         const Array4<const Real>& z_phys_arr = z_phys_nd->const_array(mfi);
 
+        // Map factors m_x at the x faces and m_y at the y faces (m = 1 if none)
+        const bool has_mf = !m_mapfac[lev].empty();
+        Array4<const Real> mf_ux, mf_vy;
+        if (has_mf) {
+            mf_ux = m_mapfac[lev][MapFacType::u_x]->const_array(mfi);
+            mf_vy = m_mapfac[lev][MapFacType::v_y]->const_array(mfi);
+        }
+
         const Array4<const Real>& u_arr = fields[0]->const_array(mfi);
         const Array4<const Real>& v_arr = fields[1]->const_array(mfi);
         const Array4<const Real>& w_arr = fields[2]->const_array(mfi);
@@ -643,19 +711,29 @@ MOSTAverage::set_rotated_fields (const int& lev)
         // U rotated magnitude
         ParallelFor(ubx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
-            // Elements of first tangent vector
-            Real met_h_xi    = Compute_h_xi_AtIface(i,j,k,dxInv,z_phys_arr);
-            u_rot_arr(i,j,k) = (u_arr(i,j,k) + met_h_xi*w_arr(i,j,k))
-                             / std::sqrt(met_h_xi*met_h_xi + one);
+            // Elements of first tangent vector, with the physical slope m_x h_xi
+            Real mfx = one;
+            if (has_mf) {
+                mfx = mf_ux(amrex::Clamp(i, mf_ux.begin[0], mf_ux.end[0]-1),
+                            amrex::Clamp(j, mf_ux.begin[1], mf_ux.end[1]-1), 0);
+            }
+            Real slope_x     = mfx * Compute_h_xi_AtIface(i,j,k,dxInv,z_phys_arr);
+            u_rot_arr(i,j,k) = (u_arr(i,j,k) + slope_x*w_arr(i,j,k))
+                             / std::sqrt(slope_x*slope_x + one);
         });
 
         // V rotated magnitude
         ParallelFor(vbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
-            // Elements of second tangent vector
-            Real met_h_eta   = Compute_h_eta_AtJface(i,j,k,dxInv,z_phys_arr);
-            v_rot_arr(i,j,k) = (v_arr(i,j,k) + met_h_eta*w_arr(i,j,k))
-                             / std::sqrt(met_h_eta*met_h_eta + one);
+            // Elements of second tangent vector, with the physical slope m_y h_eta
+            Real mfy = one;
+            if (has_mf) {
+                mfy = mf_vy(amrex::Clamp(i, mf_vy.begin[0], mf_vy.end[0]-1),
+                            amrex::Clamp(j, mf_vy.begin[1], mf_vy.end[1]-1), 0);
+            }
+            Real slope_y     = mfy * Compute_h_eta_AtJface(i,j,k,dxInv,z_phys_arr);
+            v_rot_arr(i,j,k) = (v_arr(i,j,k) + slope_y*w_arr(i,j,k))
+                             / std::sqrt(slope_y*slope_y + one);
         });
     }
 
@@ -784,6 +862,7 @@ MOSTAverage::set_eb_normalization (const int& lev)
         ParallelFor(Gpu::KernelInfo().setReduction(true), bx, [=]
         AMREX_GPU_DEVICE(int i, int j, int k, Gpu::Handler const& handler) noexcept
         {
+            Real area = zero;
             if (flag_arr(i,j,k).isSingleValued()) {
                 // Compute area from face-centered area fractions
                 Real axm = afrac_x(i  ,j  ,k  );
@@ -797,10 +876,11 @@ MOSTAverage::set_eb_normalization (const int& lev)
                 Real ady = (aym - ayp) * dx * dz;
                 Real adz = (azm - azp) * dx * dy;
 
-                Real area = std::sqrt(adx*adx + ady*ady + adz*adz);
-
-                Gpu::deviceReduceSum(&area_device[0], area, handler);
+                area = std::sqrt(adx*adx + ady*ady + adz*adz);
             }
+            // Every active thread must enter the block reduction, including
+            // regular and covered cells, which contribute zero surface area.
+            Gpu::deviceReduceSum(&area_device[0], area, handler);
         });
     }
 
@@ -1114,7 +1194,7 @@ MOSTAverage::set_k_indices_T (const int& lev)
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!(user_zref && read_k),
                                      "Specify erf.most.zref or erf.most.k_arr_in for MOST, not both");
 
-    // Without most.zref the reference is the centre of the first cell above the
+    // Without most.zref the reference is the center of the first cell above the
     // wall, as on every other mesh.  On a terrain-fitted mesh its height above
     // the wall varies by column, so it is filled column by column below
     // (erf-model/ERF#4935).
@@ -1200,7 +1280,7 @@ MOSTAverage::set_k_indices_T (const int& lev)
                 const int cell_step = is_lo_face ? 1 : -1;
                 k_arr(i,j,k) = first_cell;
 
-                // Default: the centre of this column's first cell, half its
+                // Default: the center of this column's first cell, half its
                 // thickness above the wall
                 if (!d_user_zref) {
                     zref_arr(i,j,k) = myhalf * (z_at(i, j, first_cell + 1) - z_at(i, j, first_cell));
@@ -1268,7 +1348,7 @@ MOSTAverage::set_norm_indices_T (const int& lev)
     pp.queryAdd("most.zref",zref_tmp);
     const bool user_zref = (zref_tmp > Real(0));
     if (!user_zref) {
-        // The centre of each column's first cell (erf-model/ERF#4935)
+        // The center of each column's first cell (erf-model/ERF#4935)
         Print() << "erf.most.zref not set: the MOST reference is the center of the first cell above the surface"
                 << std::endl;
         AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_radius == 0,
@@ -1308,6 +1388,14 @@ MOSTAverage::set_norm_indices_T (const int& lev)
         auto k_arr = m_k_indx[lev]->array(mfi);
         auto zref_arr = m_zref[lev]->array(mfi);
 
+        // Map factors at the cell centers (m = 1 if none)
+        const bool has_mf = !m_mapfac[lev].empty();
+        Array4<const Real> mf_mx, mf_my;
+        if (has_mf) {
+            mf_mx = m_mapfac[lev][MapFacType::m_x]->const_array(mfi);
+            mf_my = m_mapfac[lev][MapFacType::m_y]->const_array(mfi);
+        }
+
         // The displaced column (i_new, j_new) is read here from z_phys at i_new..i_new+1 and
         //    j_new..j_new+1, and later from the averaged fields at (i_new, j_new); keep it
         //    inside both FABs, so a displacement past the ghost cells uses the nearest column
@@ -1325,7 +1413,7 @@ MOSTAverage::set_norm_indices_T (const int& lev)
             Real z_top_face  = fourth * ( z_phys_arr(i  ,j  ,k+1) + z_phys_arr(i+1,j  ,k+1)
                                           + z_phys_arr(i  ,j+1,k+1) + z_phys_arr(i+1,j+1,k+1) );
 
-            // Default: the centre of this column's first cell, no displacement
+            // Default: the center of this column's first cell, no displacement
             if (!d_user_zref) {
                 i_arr(i,j,0)    = i;
                 j_arr(i,j,0)    = j;
@@ -1334,19 +1422,27 @@ MOSTAverage::set_norm_indices_T (const int& lev)
                 return;
             }
 
-            // Elements of normal vector
-            Real met_h_xi  = Compute_h_xi_AtCellCenter (i,j,k,dxInv,z_phys_arr);
-            Real met_h_eta = Compute_h_eta_AtCellCenter(i,j,k,dxInv,z_phys_arr);
-            Real mag = std::sqrt(met_h_xi*met_h_xi + met_h_eta*met_h_eta + one);
+            // Elements of normal vector, with the physical slopes m_x h_xi and m_y h_eta
+            Real mfx = one, mfy = one;
+            if (has_mf) {
+                const int im = amrex::Clamp(i, mf_mx.begin[0], mf_mx.end[0]-1);
+                const int jm = amrex::Clamp(j, mf_mx.begin[1], mf_mx.end[1]-1);
+                mfx = mf_mx(im,jm,0);
+                mfy = mf_my(im,jm,0);
+            }
+            Real slope_x = mfx * Compute_h_xi_AtCellCenter (i,j,k,dxInv,z_phys_arr);
+            Real slope_y = mfy * Compute_h_eta_AtCellCenter(i,j,k,dxInv,z_phys_arr);
+            Real mag = std::sqrt(slope_x*slope_x + slope_y*slope_y + one);
 
-            // Unit-normal vector scaled by z_ref
-            Real delta_x = -met_h_xi/mag  * d_zref;
-            Real delta_y = -met_h_eta/mag * d_zref;
+            // Unit-normal vector scaled by z_ref (physical displacements)
+            Real delta_x = -slope_x/mag  * d_zref;
+            Real delta_y = -slope_y/mag * d_zref;
             Real delta_z = one/mag * d_zref;
 
-            // Compute i & j as displacements (no grid stretching)
-            int delta_i  = static_cast<int>(std::round(delta_x*dxInv[0]));
-            int delta_j  = static_cast<int>(std::round(delta_y*dxInv[1]));
+            // Compute i & j as displacements (no grid stretching); the physical
+            // cell size is dx/m_x by dy/m_y
+            int delta_i  = static_cast<int>(std::round(delta_x*mfx*dxInv[0]));
+            int delta_j  = static_cast<int>(std::round(delta_y*mfy*dxInv[1]));
             int i_new    = amrex::Clamp(i + delta_i, inew_lo, inew_hi);
             int j_new    = amrex::Clamp(j + delta_j, jnew_lo, jnew_hi);
             i_arr(i,j,0) = i_new;
@@ -1354,7 +1450,7 @@ MOSTAverage::set_norm_indices_T (const int& lev)
 
             Real z_target    = z_bot_face + delta_z;
             k_arr(i,j,0)     = klo;
-            // Fallback if no cell holds the target: the first cell's centre height
+            // Fallback if no cell holds the target: the first cell's center height
             zref_arr(i,j,0)  = myhalf * (z_top_face - z_bot_face);
             for (int lk(klo); lk<=kmax; ++lk) {
                 Real z_lo = fourth * ( z_phys_arr(i_new,j_new  ,lk  ) + z_phys_arr(i_new+1,j_new  ,lk  )
@@ -1400,7 +1496,7 @@ MOSTAverage::set_z_positions_T (const int& lev)
     pp.queryAdd("most.zref",zref_tmp);
     const bool user_zref = (zref_tmp > Real(0));
     if (!user_zref) {
-        // The centre of each column's first cell (erf-model/ERF#4935)
+        // The center of each column's first cell (erf-model/ERF#4935)
         Print() << "erf.most.zref not set: the MOST reference is the center of the first cell above the surface"
                 << std::endl;
         AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_radius == 0,
@@ -1414,9 +1510,7 @@ MOSTAverage::set_z_positions_T (const int& lev)
     const bool d_user_zref = user_zref;
     const auto plo = m_geom[lev].ProbLoArray();
 
-    RealVect base;
     const auto dx = m_geom[lev].CellSizeArray();
-    IntVect ng = m_x_pos[lev]->nGrowVect(); ng[2]=0;
     const int position_ng = (m_radius > 1) ? m_radius : 1;
 
     // The positions are read over the averaging stencil at every cell where an
@@ -1426,15 +1520,12 @@ MOSTAverage::set_z_positions_T (const int& lev)
                                IntVect(position_ng,position_ng,0));
 
     for (MFIter mfi(*fields[imf_cc], TileNoZ()); mfi.isValid(); ++mfi) {
-        Box npbx  = mfi.tilebox(IntVect(1,1,0),ng_pos);
-        const Box vbx = mfi.validbox();
-        Box gtbx  = mfi.growntilebox(ng);
+        Box npbx = mfi.tilebox(IntVect(1,1,0),ng_pos);
+        Box vbx  = mfi.validbox();
 
         if (vbx.smallEnd(2) != klo) { continue; }
 
         npbx.makeSlab(2,klo);
-
-        RealBox grb{gtbx,dx.data(),base.dataPtr()};
 
         const auto z_phys_arr = m_z_phys_nd[lev]->const_array(mfi);
         auto x_pos_arr = m_x_pos[lev]->array(mfi);
@@ -1443,23 +1534,17 @@ MOSTAverage::set_z_positions_T (const int& lev)
         auto zref_arr  = m_zref[lev]->array(mfi);
         ParallelFor(npbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
-            // Final position at end of vector
+            // The column's center, whose interpolation stencil get_ng_fill keeps in the data
             x_pos_arr(i,j,k) = plo[0] + ((Real) i + myhalf) * dx[0];
             y_pos_arr(i,j,k) = plo[1] + ((Real) j + myhalf) * dx[1];
-            Real z_bot_face  = fourth * ( z_phys_arr(i  ,j  ,k) + z_phys_arr(i+1,j  ,k)
-                                        + z_phys_arr(i  ,j+1,k) + z_phys_arr(i+1,j+1,k) );
+            Real z_bot_face  = fourth * ( z_phys_arr(i  ,j  ,k  ) + z_phys_arr(i+1,j  ,k  )
+                                        + z_phys_arr(i  ,j+1,k  ) + z_phys_arr(i+1,j+1,k  ) );
             Real z_top_face  = fourth * ( z_phys_arr(i  ,j  ,k+1) + z_phys_arr(i+1,j  ,k+1)
                                         + z_phys_arr(i  ,j+1,k+1) + z_phys_arr(i+1,j+1,k+1) );
             // Query distance: the requested height, or half of this column's first cell
             const Real zq = d_user_zref ? d_zref : myhalf * (z_top_face - z_bot_face);
             zref_arr(i,j,k)  = zq;
             z_pos_arr(i,j,k) = z_bot_face + zq;
-
-            // Destination position must be contained on the current process!
-            Real pos[] = {x_pos_arr(i,j,k)-plo[0],y_pos_arr(i,j,k)-plo[1],myhalf*dx[2]};
-            amrex::ignore_unused(pos);
-            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(grb.contains(&pos[0]),
-                                             "Query point outside of proc domain!");
         });
     }
     fill_zref_planar(lev);
@@ -1490,7 +1575,7 @@ MOSTAverage::set_norm_positions_T (const int& lev)
     pp.queryAdd("most.zref",zref_tmp);
     const bool user_zref = (zref_tmp > Real(0));
     if (!user_zref) {
-        // The centre of each column's first cell (erf-model/ERF#4935)
+        // The center of each column's first cell (erf-model/ERF#4935)
         Print() << "erf.most.zref not set: the MOST reference is the center of the first cell above the surface"
                 << std::endl;
         AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_radius == 0,
@@ -1504,10 +1589,8 @@ MOSTAverage::set_norm_positions_T (const int& lev)
     const bool d_user_zref = user_zref;
     const auto plo = m_geom[lev].ProbLoArray();
 
-    RealVect base;
     const auto dx = m_geom[lev].CellSizeArray();
     const auto dxInv  = m_geom[lev].InvCellSizeArray();
-    IntVect ng = m_x_pos[lev]->nGrowVect(); ng[2]=0;
     const int position_ng = (m_radius > 1) ? m_radius : 1;
 
     // The positions are read over the averaging stencil at every cell where an
@@ -1517,19 +1600,30 @@ MOSTAverage::set_norm_positions_T (const int& lev)
                                IntVect(position_ng,position_ng,0));
 
     for (MFIter mfi(*fields[imf_cc], TileNoZ()); mfi.isValid(); ++mfi) {
-        Box npbx  = mfi.tilebox(IntVect(1,1,0),ng_pos);
-        Box gtbx  = mfi.growntilebox(ng);
-        RealBox grb{gtbx,dx.data(),base.dataPtr()};
+        Box npbx = mfi.tilebox(IntVect(1,1,0),ng_pos);
+        Box vbx  = mfi.validbox();
 
-        if (mfi.validbox().smallEnd(2) != klo) { continue; }
+        if (vbx.smallEnd(2) != klo) { continue; }
 
         npbx.makeSlab(2,klo);
+
+        // The cells each average can interpolate from
+        const auto bounds = interp_stencil_bounds(lev, mfi);
 
         const auto z_phys_arr = m_z_phys_nd[lev]->const_array(mfi);
         auto x_pos_arr   = m_x_pos[lev]->array(mfi);
         auto y_pos_arr   = m_y_pos[lev]->array(mfi);
         auto z_pos_arr   = m_z_pos[lev]->array(mfi);
         auto zref_arr    = m_zref[lev]->array(mfi);
+
+        // Map factors at the cell centers (m = 1 if none)
+        const bool has_mf = !m_mapfac[lev].empty();
+        Array4<const Real> mf_mx, mf_my;
+        if (has_mf) {
+            mf_mx = m_mapfac[lev][MapFacType::m_x]->const_array(mfi);
+            mf_my = m_mapfac[lev][MapFacType::m_y]->const_array(mfi);
+        }
+
         ParallelFor(npbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
             // Position of the current node (indx:0,0,1)
@@ -1538,7 +1632,7 @@ MOSTAverage::set_norm_positions_T (const int& lev)
             Real z_bot_face  = fourth * ( z_phys_arr(i  ,j  ,k) + z_phys_arr(i+1,j  ,k)
                                         + z_phys_arr(i  ,j+1,k) + z_phys_arr(i+1,j+1,k) );
 
-            // Default: the centre of this column's first cell, no displacement
+            // Default: the center of this column's first cell, no displacement
             if (!d_user_zref) {
                 Real z_top_face = fourth * ( z_phys_arr(i  ,j  ,k+1) + z_phys_arr(i+1,j  ,k+1)
                                            + z_phys_arr(i  ,j+1,k+1) + z_phys_arr(i+1,j+1,k+1) );
@@ -1549,20 +1643,31 @@ MOSTAverage::set_norm_positions_T (const int& lev)
                 return;
             }
 
-            // Elements of normal vector
-            Real met_h_xi  = Compute_h_xi_AtCellCenter (i,j,k,dxInv,z_phys_arr);
-            Real met_h_eta = Compute_h_eta_AtCellCenter(i,j,k,dxInv,z_phys_arr);
-            Real imag = one / std::sqrt(met_h_xi*met_h_xi + met_h_eta*met_h_eta + one);
+            // Elements of normal vector, with the physical slopes m_x h_xi and m_y h_eta
+            Real mfx = one, mfy = one;
+            if (has_mf) {
+                const int im = amrex::Clamp(i, mf_mx.begin[0], mf_mx.end[0]-1);
+                const int jm = amrex::Clamp(j, mf_mx.begin[1], mf_mx.end[1]-1);
+                mfx = mf_mx(im,jm,0);
+                mfy = mf_my(im,jm,0);
+            }
+            Real slope_x = mfx * Compute_h_xi_AtCellCenter (i,j,k,dxInv,z_phys_arr);
+            Real slope_y = mfy * Compute_h_eta_AtCellCenter(i,j,k,dxInv,z_phys_arr);
+            Real imag = one / std::sqrt(slope_x*slope_x + slope_y*slope_y + one);
 
-            // Unit-normal vector scaled by z_ref
-            Real delta_x = -met_h_xi  * imag * d_zref;
-            Real delta_y = -met_h_eta * imag * d_zref;
-            Real delta_z =              imag * d_zref;
+            // Unit-normal vector scaled by z_ref (physical displacements)
+            Real delta_x = -slope_x * imag * d_zref;
+            Real delta_y = -slope_y * imag * d_zref;
+            Real delta_z =            imag * d_zref;
 
-            // Final position at end of vector
-            x_pos_arr(i,j,0) = x0 + delta_x;
-            y_pos_arr(i,j,0) = y0 + delta_y;
+            // Final position at end of vector; x and y are computational
+            // coordinates, so the physical displacements are scaled by m_x and m_y
+            x_pos_arr(i,j,0) = x0 + mfx * delta_x;
+            y_pos_arr(i,j,0) = y0 + mfy * delta_y;
             z_pos_arr(i,j,0) = z_bot_face + delta_z;
+
+            // Keep the interpolation stencil in the data of this box
+            bounds.clamp_to_held(i, j, x_pos_arr(i,j,0), y_pos_arr(i,j,0), plo, dxInv);
 
             // NOTE: Normal vector end point can be below the surface for concave regions.
             //       Here we protect against that by augmenting the normal if needed.
@@ -1575,12 +1680,6 @@ MOSTAverage::set_norm_positions_T (const int& lev)
             }
 
             zref_arr(i,j,0) = delta_z;
-
-            // Destination position must be contained on the current process!
-            Real pos[] = {x_pos_arr(i,j,0)-plo[0],y_pos_arr(i,j,0)-plo[1],myhalf*dx[2]};
-            amrex::ignore_unused(pos);
-            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(grb.contains(&pos[0]),
-                                              "Query point outside of proc domain!");
         });
     }
     fill_zref_planar(lev);
@@ -2928,7 +3027,7 @@ MOSTAverage::compute_eb_averages (const int& lev)
         denom[1]   = one / m_total_bndry_area[lev][1];
         val_old[1] = plane_average[1]*d_fact_old;
 
-        int iavg = m_navg - 1;  // Tangential velocity magnitude
+        int iavg = m_navg - 3;  // Tangential velocity magnitude
         denom[iavg]   = one / m_total_bndry_area[lev][iavg];
         val_old[iavg] = plane_average[iavg]*d_fact_old;
 
@@ -2967,6 +3066,9 @@ MOSTAverage::compute_eb_averages (const int& lev)
             ParallelFor(Gpu::KernelInfo().setReduction(true), bx, [=]
             AMREX_GPU_DEVICE(int i, int j, int k, Gpu::Handler const& handler) noexcept
             {
+                Real val_u = zero;
+                Real val_v = zero;
+                Real val_mag = zero;
                 // Area-weighted averaging over cut cells at any k
                 if (flag_arr(i,j,k).isSingleValued()) {
                     // Compute area from face-centered area fractions
@@ -3011,14 +3113,14 @@ MOSTAverage::compute_eb_averages (const int& lev)
                     Real mag = std::sqrt(u_tangent*u_tangent + v_tangent*v_tangent + Vsg*Vsg);
 
                     // Area-weighted sum
-                    Real val_u = u_tangent * area;
-                    Real val_v = v_tangent * area;
-                    Real val_mag = mag * area;
-
-                    Gpu::deviceReduceSum(&plane_avg[0], val_u, handler);
-                    Gpu::deviceReduceSum(&plane_avg[1], val_v, handler);
-                    Gpu::deviceReduceSum(&plane_avg[iavg], val_mag, handler);
+                    val_u = u_tangent * area;
+                    val_v = v_tangent * area;
+                    val_mag = mag * area;
                 }
+                // The reduction is collective across the active GPU block.
+                Gpu::deviceReduceSum(&plane_avg[0], val_u, handler);
+                Gpu::deviceReduceSum(&plane_avg[1], val_v, handler);
+                Gpu::deviceReduceSum(&plane_avg[iavg], val_mag, handler);
             });
         }
     }
@@ -3059,6 +3161,7 @@ MOSTAverage::compute_eb_averages (const int& lev)
             ParallelFor(Gpu::KernelInfo().setReduction(true), bx, [=]
             AMREX_GPU_DEVICE(int i, int j, int k, Gpu::Handler const& handler) noexcept
             {
+                Real val = zero;
                 // Area-weighted averaging over cut cells at any k
                 if (flag_arr(i,j,k).isSingleValued()) {
                     // Compute area from face-centered area fractions
@@ -3075,9 +3178,9 @@ MOSTAverage::compute_eb_averages (const int& lev)
 
                     Real area = std::sqrt(adx*adx + ady*ady + adz*adz);
 
-                    Real val = mf_arr(i,j,k) * area;
-                    Gpu::deviceReduceSum(&plane_avg[imf], val, handler);
+                    val = mf_arr(i,j,k) * area;
                 }
+                Gpu::deviceReduceSum(&plane_avg[imf], val, handler);
             });
         }
     }
@@ -3121,6 +3224,7 @@ MOSTAverage::compute_eb_averages (const int& lev)
             ParallelFor(Gpu::KernelInfo().setReduction(true), bx, [=]
             AMREX_GPU_DEVICE(int i, int j, int k, Gpu::Handler const& handler) noexcept
             {
+                Real val = zero;
                 if (flag_arr(i,j,k).isSingleValued()) {
                     // Compute area from face-centered area fractions
                     Real axm = afrac_x(i  ,j  ,k  );
@@ -3143,9 +3247,9 @@ MOSTAverage::compute_eb_averages (const int& lev)
                     } else {
                         vfac = one + epsv*qv_mf_arr(i,j,k);
                     }
-                    const Real val = T_mf_arr(i,j,k) * vfac * area;
-                    Gpu::deviceReduceSum(&plane_avg[iavg], val, handler);
+                    val = T_mf_arr(i,j,k) * vfac * area;
                 }
+                Gpu::deviceReduceSum(&plane_avg[iavg], val, handler);
             });
         }
     }
@@ -3153,7 +3257,8 @@ MOSTAverage::compute_eb_averages (const int& lev)
     {
         int iavg    = m_navg - 4;
         denom[iavg] = one / m_total_bndry_area[lev][iavg];
-        // plane_avg[iavg] = plane_avg[2]
+        // Dry virtual temperature shares temperature's filtered history.
+        val_old[iavg] = val_old[3];
         Gpu::copy(Gpu::deviceToDevice, pavg.begin() + 3, pavg.begin() + 4,
                   pavg.begin() + iavg);
     }

@@ -38,8 +38,9 @@ class ShocDriver;
 
 /**
  * The weight of the fluxes of RK stage nrk at this level in the update the step ends with.  The
- * compressible integrator and the anelastic MidPoint integrator update from their final stage
- * alone (nrk = 2 and nrk = 1), which takes weight 1.  The anelastic RK2 integrator is Heun's,
+ * compressible integrator and the MidPoint integrator of anelastic and pseudo-incompressible
+ * levels update from their final stage alone (nrk = 2 and nrk = 1), which takes weight 1.  The
+ * RK2 integrator of those levels is Heun's,
  * S^{n+1} = S^n + dt (R0 + R1) / 2, so both of its stages take weight 1/2.
  *
  * @param[in] solverChoice  the solver options
@@ -62,8 +63,9 @@ StageFluxWeight (const SolverChoice& solverChoice, int level, int nrk)
  * The weight with which the fluxes of RK stage nrk at this level go into the flux registers:
  * the weight of that stage's fluxes in the update the step ends with, or zero if they are not
  * registered.  Only with two-way coupling and more than one level.  The compressible integrator
- * and the anelastic MidPoint integrator update from their final stage alone (nrk = 2 and nrk = 1),
- * which takes weight 1.  The anelastic RK2 integrator is Heun's, S^{n+1} = S^n + dt (R0 + R1) / 2,
+ * and the MidPoint integrator of anelastic and pseudo-incompressible levels update from their final
+ * stage alone (nrk = 2 and nrk = 1), which takes weight 1.  The RK2 integrator of those levels is
+ * Heun's, S^{n+1} = S^n + dt (R0 + R1) / 2,
  * so both of its stages take weight 1/2.  Every stage that adds fluxes to the registers must use
  * this, so that the registers hold the fluxes the update applied.
  *
@@ -113,7 +115,8 @@ void erf_make_tau_terms (int level, int nrk,
                          const amrex::MultiFab& az,
                          const eb_& ebfact,
                          const amrex::MultiFab* ib_wall_face13 = nullptr,
-                         const amrex::MultiFab* ib_wall_face23 = nullptr);
+                         const amrex::MultiFab* ib_wall_face23 = nullptr,
+                         const amrex::MultiFab* walldist = nullptr);
 
 void copy_surface_tau_for_implicit (amrex::Vector<std::unique_ptr<amrex::MultiFab>>& Tau_lev,
                                     amrex::Vector<std::unique_ptr<amrex::MultiFab>>& Tau_corr_lev);
@@ -184,7 +187,8 @@ void erf_slow_rhs_pre (int level, int finest_level, int nrk,
                       const amrex::MultiFab* ib_wall_face13 = nullptr,
                       const amrex::MultiFab* ib_wall_face23 = nullptr,
                       const amrex::MultiFab* ib_wall_face33 = nullptr,
-                      const amrex::MultiFab* ib_wall_hfx = nullptr);
+                      const amrex::MultiFab* ib_wall_hfx = nullptr,
+                      const amrex::MultiFab* walldist = nullptr);
 
 /**
  * Function for computing the slow RHS for the evolution equations for the scalars other than density or potential temperature

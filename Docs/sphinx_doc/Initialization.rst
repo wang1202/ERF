@@ -114,6 +114,9 @@ entire columns, so they cannot be used on a level whose grids do not span the do
    The value should be the checkpoint directory name (relative to the run
    directory or an absolute path). When set, ERF reads the velocity fields from
    that checkpoint and uses the usual initialization pathway for all other fields.
+   The checkpoint may have been written on other grids or with a different number
+   of MPI ranks; its grids at each level only need to cover the new run's grids
+   at that level.
 
 In any of these cases, the user can specify any perturbations from the
 base state by editing the routines that live in the ``Source/Prob`` directory
@@ -346,8 +349,10 @@ The fields are kept per level in ``WRFSurfaceFields``
    * - Level without a file of its own (made by tagging, at the start or by a regrid)
      - Every field of the next coarser level, and its soil layer depths, in the same way
 
-No part of ERF uses them yet; the force-restore balance will take its albedo, roughness,
-deep temperature, soil moisture and snow from them in later changes. Until then the cost
+The force-restore balance takes its deep temperature from ``TMN`` with
+``erf.radiation.seb_init_t_deep_from_file``; no part of ERF uses the other fields yet, and
+the balance will take its albedo, roughness, soil moisture and snow from them in later
+changes. Until then the cost
 is the read of up to thirteen more variables at the start, the memory of up to eleven
 two-dimensional fields per level, and their files in each checkpoint.
 

@@ -389,6 +389,51 @@ public:
     }
 
     /**
+     * Returns the number of 2D surface state fields SLM carries from one step to the next
+     * outside lsm_fab_vars (canopy and puddle water, canopy, canopy-air and ground temperatures,
+     * snow albedo and age).
+     */
+    int
+    Lsm_Surface_State_Size () override { return static_cast<int>(surface_state_fields().size()); }
+
+    /**
+     * Returns a 2D surface state field of this level.
+     */
+    amrex::MultiFab*
+    Lsm_Surface_State_Ptr (const int& varIdx) override
+    {
+        const auto fields = surface_state_fields();
+        AMREX_ALWAYS_ASSERT(varIdx >= 0 && varIdx < static_cast<int>(fields.size()));
+        return fields[varIdx];
+    }
+
+    /**
+     * Registers a 2D surface state field of the source level.
+     */
+    void
+    Lsm_Set_Source_Surface_State_Ptr (const int& varIdx,
+                                      amrex::MultiFab* source_data_ptr) override
+    {
+        const int n = static_cast<int>(surface_state_fields().size());
+        AMREX_ALWAYS_ASSERT(varIdx >= 0 && varIdx < n);
+        if (static_cast<int>(source_surface_state.size()) != n) {
+            source_surface_state.resize(n, nullptr);
+        }
+        source_surface_state[varIdx] = source_data_ptr;
+    }
+
+    /**
+     * The 2D fields, not in lsm_fab_vars, that hold state from one step to the next: the
+     * checkpoint keeps them, so a level that is made or remade must keep them too (issue 5177).
+     * Everything else SLM holds in 2D is set again from these and the soil at each step.
+     */
+    amrex::Vector<amrex::MultiFab*>
+    surface_state_fields ()
+    {
+        return {&mw, &mws, &t_canop, &t_cas, &q_cas, &t_ground_skin, &albold_noahmp, &tauss_noahmp};
+    }
+
+    /**
      * Returns whether Copy_State_to_Lsm has filled tref, qref and pref.
      */
     bool
@@ -813,7 +858,7 @@ private:
 
     // TODO: placeholder landmask array - should probably use the one defined by ERF
     amrex::iMultiFab landmask;
-    amrex::iMultiFab landtype; // IGBP landtype (1 to 16)
+    amrex::iMultiFab landtype; // MODIS landtype (0 for water, 1 to 20 on land)
     amrex::iMultiFab nroot; // number of rooted soil layers used by the Noah BTR=1 stress factor
     amrex::MultiFab LAI; // leaf area index
     amrex::MultiFab SAI; // stem area index
@@ -841,7 +886,6 @@ private:
     amrex::MultiFab precip_sfc; // precipitation reaching to soil top through canopy
     amrex::MultiFab mw_mx; // max of mw
     amrex::MultiFab mws_mx; // max of mws
-    amrex::MultiFab BAI; // Basal area index, sq.feet/acre
     amrex::MultiFab IMPERV;
 
     // Packed MF containing 1D arrays of variables used in soil temperature and soil water
@@ -868,10 +912,6 @@ private:
     amrex::MultiFab evp_canop;
     amrex::MultiFab evp_soil;
     amrex::MultiFab evp_air;
-
-    // Albedos
-    amrex::MultiFab albedovis_v, albedonir_v; // visible and NIR albedos for vegetation
-    amrex::MultiFab albedovis_s, albedonir_s; // visible and NIR albedos for soil
 
 
     // Resistances
@@ -1038,6 +1078,10 @@ private:
     // source level registered by Set_Source_Ptrs
     bool has_atmos_state = false;
     bool source_has_atmos_state = false;
+
+    // the source level's 2D surface state fields (surface_state_fields), registered with the
+    // other source pointers
+    amrex::Vector<amrex::MultiFab*> source_surface_state;
 
     // set when this level was made from a source level without the atmospheric
     // state: the next Update_Lsm_Vars then calls init_slm_vars again

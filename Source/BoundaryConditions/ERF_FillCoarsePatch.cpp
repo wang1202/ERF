@@ -62,7 +62,7 @@ ERF::FillCoarsePatch (int lev, double time)
 
     // Fill ghost cells of coarse momentum before interpolation to fine level.
     // VelocityToMomentum above fills only valid cells (IntVect{0} grow).  On restart
-    // from a non-AMR checkpoint, init_stuff initialises rU/rV/rW_new[lev-1] with large
+    // from a non-AMR checkpoint, init_stuff initializes rU/rV/rW_new[lev-1] with large
     // sentinel values for ALL cells including ghost cells; the checkpoint read then
     // overwrites only valid cells.  InterpFromCoarseLevel (see comments below) ASSUMES
     // ghost cells at lev-1 are already filled and uses them in its stencil near periodic
@@ -88,6 +88,15 @@ ERF::FillCoarsePatch (int lev, double time)
     int      ncomp_cons = vars_new[lev][Vars::cons].nComp();
 
     InterpFromCoarseLevelCons(lev, vars_new[lev][Vars::cons], ngvect_cons, vars_new[lev-1][Vars::cons]);
+
+    // Refill the valid cells weighted by detJ, so that they hold the coarse mass; detJ is not
+    //    available in all the ghost cells
+    if (volume_weighted_interp()) {
+        MultiFab mf_v(vars_new[lev][Vars::cons].boxArray(), vars_new[lev][Vars::cons].DistributionMap(),
+                      ncomp_cons, 0);
+        InterpFromCoarseLevelCons(lev, mf_v, IntVect(0), vars_new[lev-1][Vars::cons], true);
+        MultiFab::Copy(vars_new[lev][Vars::cons], mf_v, 0, 0, ncomp_cons, 0);
+    }
 
     // ***************************************************************************
     // Physical bc's for cell centered variables at domain boundary

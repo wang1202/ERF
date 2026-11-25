@@ -29,7 +29,7 @@ using namespace amrex;
  * @param[in   ] nrk   which RK stage
  * @param[in   ] dt    slow time step
  * @param[  out] S_rhs RHS computed here
- * @param[in   ] S_old  old-time solution -- used only for anelastic
+ * @param[in   ] S_old  old-time solution -- used only for anelastic or pseudo-incompressible
  * @param[in   ] S_data current solution
  * @param[in   ] S_prim primitive variables (i.e. conserved variables divided by density)
  * @param[inout] avg_xmom
@@ -130,7 +130,8 @@ void erf_slow_rhs_pre (int level, int finest_level,
                        const MultiFab* ib_wall_face13,
                        const MultiFab* ib_wall_face23,
                        const MultiFab* ib_wall_face33,
-                       const MultiFab* ib_wall_hfx)
+                       const MultiFab* ib_wall_hfx,
+                       const MultiFab* walldist)
 {
     BL_PROFILE_REGION("erf_slow_rhs_pre()");
 
@@ -147,6 +148,8 @@ void erf_slow_rhs_pre (int level, int finest_level,
     const erf_wall_thermodynamics::Boundary chamber_walls =
         use_physical_chamber_wall_flux ? cloud_chamber_config->transport_boundary() :
                                          erf_wall_thermodynamics::Boundary{};
+    const auto chamber_bands = use_physical_chamber_wall_flux ? cloud_chamber_config->temperature_band_views() :
+                                        erf_wall_thermodynamics::SidewallBandViews{};
     int klo = domain.smallEnd(2);
     int khi = domain.bigEnd(2);
 
@@ -233,7 +236,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
                            Tau_lev,Tau_corr_lev,
                            SmnSmn,eddyDiffs,geom,solverChoice,SurfLayer,
                            stretched_dz_d, detJ,mapfac, ax, ay, az, ebfact,
-                           ib_wall_face13, ib_wall_face23);
+                           ib_wall_face13, ib_wall_face23, walldist);
 
         IntVect ng(0,0,1);
         dflux_x = std::make_unique<MultiFab>(convert(ba,IntVect(1,0,0)), dm, nvars, ng);
@@ -320,8 +323,8 @@ void erf_slow_rhs_pre (int level, int finest_level,
 
         //
         // Now create Omega with momentum (not velocity) with z_t subtracted if moving terrain
-        // ONLY if not doing anelastic + terrain -- in that case Omega will be defined coming
-        // out of the projection
+        // ONLY if not doing anelastic or pseudo-incompressible + terrain -- in that case Omega
+        // will be defined coming out of the projection
         //
         if (!l_use_terrain_fitted_coords) {
             ParallelFor(gbxo, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
@@ -351,7 +354,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
             const Array4<const Real>& mf_ux     = mapfac[MapFacType::u_x]->const_array(mfi);
             const Array4<const Real>& mf_vy     = mapfac[MapFacType::v_y]->const_array(mfi);
 
-            if (z_t_mf) { // Note we never do anelastic with moving terrain
+            if (z_t_mf) { // Note we never do anelastic or pseudo-incompressible with moving terrain
                 Box gbxo_mid = gbxo;
                 if (gbxo_mid.smallEnd(2) <= domain.smallEnd(2)) { gbxo_mid.setSmall(2,1); }
                 if (gbxo_mid.bigEnd(2)   >= domain.bigEnd(2)+1) { gbxo_mid.setBig(2,gbxo.bigEnd(2)-1); }
@@ -437,7 +440,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
         const Array4<Real>& rho_w_old = S_old[IntVars::zmom].array(mfi);
 
         if (l_anelastic) {
-            // When anelastic we must reset these to 0 each RK step
+            // When anelastic or pseudo-incompressible we must reset these to 0 each RK step
             avg_xmom[mfi].template setVal<RunOn::Device>(0,tbx);
             avg_ymom[mfi].template setVal<RunOn::Device>(0,tby);
             avg_zmom[mfi].template setVal<RunOn::Device>(0,tbz);
@@ -498,7 +501,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
         const GpuArray<const Array4<Real>, AMREX_SPACEDIM>
             flx_arr{{AMREX_D_DECL(flux[0].array(), flux[1].array(), flux[2].array())}};
 
-        // On an anelastic level, in the stage whose fluxes are refluxed, the diffusion of (rho theta)
+        // On an anelastic or pseudo-incompressible level, in the stage whose fluxes are refluxed, the diffusion of (rho theta)
         // adds its face fluxes to flux[] too, so that the flux registers see the diffusive as well as
         // the advective transport (EB diffusion does not do this), as in erf_slow_rhs_post
         const ScalarDiffusionRefluxViews* l_reflux_diffusion =
@@ -734,7 +737,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
                     cloud_chamber_base_state->const_array(mfi), u, v, w, cell_rhs,
                     diffflux_x, diffflux_y, diffflux_z, dxInv,
                     chamber_walls, dc.alpha_T, dc.alpha_C,
-                    solverChoice.rdOcp, cloud_chamber_config->has_moisture);
+                    solverChoice.rdOcp, cloud_chamber_config->has_moisture, chamber_bands);
             }
         }
 
@@ -747,7 +750,8 @@ void erf_slow_rhs_pre (int level, int finest_level,
 
         Real half_dt = static_cast<Real>(myhalf/dt);
 
-        // If anelastic and in second RK stage, take average of old-time and new-time source
+        // If anelastic or pseudo-incompressible with RK2 and in second RK stage, take average of
+        // old-time and new-time source
         if ( l_anelastic && l_anelastic_rk2 && (nrk == 1) )
         {
             ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept

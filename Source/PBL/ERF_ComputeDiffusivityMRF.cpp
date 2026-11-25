@@ -9,6 +9,7 @@
 #include "ERF_TileNoZ.H"
 #include "ERF_MoistUtils.H"
 #include "ERF_PBLScaleAwareBlending.H"
+#include "ERF_LengthScaleCellSize.H"
 #include "ERF_PBLRibCrossing.H"
 
 using namespace amrex;
@@ -50,7 +51,8 @@ ComputeDiffusivityMRF (const MultiFab& xvel,
                        const std::unique_ptr<MultiFab>& z_phys_cc,
                        const MoistureComponentIndices& moisture_indices,
                        const MultiFab* terrain_blank,
-                       const MultiFab* Q_fire_atm)
+                       const MultiFab* Q_fire_atm,
+                       GpuArray<const MultiFab*, 2> mf_m)
 {
     const StratType pbl_strat = turbChoice.pbl_strat_type;
     /*
@@ -212,7 +214,7 @@ ComputeDiffusivityMRF (const MultiFab& xvel,
     ---------------------------------
     With the K-profile applied in every regime, this scheme inherits WRF MRF's
     over-mixing of stable boundary layers: on GABLS1 its peak K_m is roughly
-    2.1x YSU.  That is the behaviour Hong et al. (2006) set out to fix in YSU,
+    2.1x YSU.  That is the behavior Hong et al. (2006) set out to fix in YSU,
     so stable cases that need the weaker mixing should use the YSU scheme
     (erf.pbl_type = YSU).
 
@@ -594,7 +596,7 @@ Real fire_kbfs_max      = Real(0);
             const Real HOL_bounded = amrex::max(amrex::min(HOL, Real(100.0)), Real(-100.0));
             // |HOL|, so the base 1 + 16*HOL_abs of the unstable arm below equals its
             // 1 - 16*HOL there and is at least 1 for every HOL; a guard written inside the
-            // arm gets folded away by the optimiser and the pow hoisted (see sqrt_neg_Ri).
+            // arm gets folded away by the optimizer and the pow hoisted (see sqrt_neg_Ri).
             const Real HOL_abs = std::abs(HOL_bounded);
             const Real one_quarter = Real(0.25);
             const Real phiM = (obuk_val > 0)
@@ -802,7 +804,7 @@ Real fire_kbfs_max      = Real(0);
         if (turbChoice.enable_pblh_smoothing) {
             // Smooth the tile's own columns, reading the halo the passes above
             // filled. The result is the same however the domain is split.
-            // The stencil mixes neighbouring columns, so it runs on the
+            // The stencil mixes neighboring columns, so it runs on the
             // absolute height (the stored convention): the column's surface
             // height zib goes on over the work box first and comes off
             // after, and the result is kept at or above the column's floor.
@@ -858,7 +860,7 @@ Real fire_kbfs_max      = Real(0);
             const Real HOL_bounded = amrex::max(amrex::min(HOL, Real(100.0)), Real(-100.0));
             // |HOL|, so the base 1 + 16*HOL_abs of the unstable arm below equals its
             // 1 - 16*HOL there and is at least 1 for every HOL; a guard written inside the
-            // arm gets folded away by the optimiser and the pow hoisted (see sqrt_neg_Ri).
+            // arm gets folded away by the optimizer and the pow hoisted (see sqrt_neg_Ri).
             const Real HOL_abs = std::abs(HOL_bounded);
             const Real one_quarter = Real(0.25);
             // Enable QNSE stable functions if requested, otherwise use default linear form
@@ -1058,8 +1060,13 @@ Real fire_kbfs_max      = Real(0);
         const amrex::Real scalar_Sc_t = turbChoice.pbl_mrf_Sc_t;
         const amrex::Real Pr_t_in     = turbChoice.Pr_t;
         //const bool        l_use_smag_ceil= turbChoice.pbl_blend_use_smag;
-        // dx: use horizontal spacing at this level (assume dx = dy for regular grids).
-        const amrex::Real l_dx = geom.CellSize(0);
+        // dx: use horizontal spacing at this level (assume dx = dy for regular grids); dy on a
+        // domain with one cell in x, where dx is arbitrary
+        // (computational spacing; the physical spacing divides it by sqrt(m_x m_y))
+        const amrex::Real l_dx = LengthScaleCellSize(geom)[0];
+        const bool l_use_mf = (mf_m[0] != nullptr && mf_m[1] != nullptr);
+        const Array4<const Real> mf_mx = (l_use_mf) ? mf_m[0]->const_array(mfi) : Array4<const Real>{};
+        const Array4<const Real> mf_my = (l_use_mf) ? mf_m[1]->const_array(mfi) : Array4<const Real>{};
 
         ParallelFor(gbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
         {
@@ -1115,7 +1122,7 @@ Real fire_kbfs_max      = Real(0);
                 const Real HOL_bounded = amrex::max(amrex::min(HOL, Real(100.0)), Real(-100.0));
                 // |HOL|, so the base 1 + 16*HOL_abs of the unstable arm below equals its
                 // 1 - 16*HOL there and is at least 1 for every HOL; a guard written inside the
-                // arm gets folded away by the optimiser and the pow hoisted (see sqrt_neg_Ri).
+                // arm gets folded away by the optimizer and the pow hoisted (see sqrt_neg_Ri).
                 const Real HOL_abs = std::abs(HOL_bounded);
 
                 const Real one_quarter = Real(0.25);
@@ -1217,7 +1224,7 @@ Real fire_kbfs_max      = Real(0);
 
                 const Real grad_Ri_safe = amrex::max(grad_Ri, -Real(100.0));
                 // sqrt(|Ri|), which equals the sqrt(-Ri) of the unstable arm below and is valid
-                // for every Ri. Written as max(-Ri, 0) inside the arm, the optimiser used the
+                // for every Ri. Written as max(-Ri, 0) inside the arm, the optimizer used the
                 // arm's condition to drop the max and then hoisted the bare sqrt above the
                 // selection, where Ri can be positive; written as min(Ri, 0) it folded the
                 // sqrt into the arms of the min. Either way an invalid operation whose
@@ -1249,7 +1256,7 @@ Real fire_kbfs_max      = Real(0);
                 K_turb(i, j, k, EddyDiff::Scalar_v) = K_turb(i, j, k, EddyDiff::Theta_v);
             }
 
-            // Scale-aware blending for grey-zone resolution (Boutle et al. 2014).
+            // Scale-aware blending for gray-zone resolution (Boutle et al. 2014).
             // ERF_PBLScaleAwareBlending.H. Gated by pbl_blend_length > 0.
             // Applied to Theta_v and Q_v. Mom_v is not modified.
             //
@@ -1260,21 +1267,22 @@ Real fire_kbfs_max      = Real(0);
             // hence increase with height (issue #3580).
             if (l_blend_length > 0.0) {
                 const Real rho_inv = Real(1.0) / rho;
+                const Real l_dx_phys = (l_use_mf) ? l_dx / std::sqrt(mf_mx(i,j,0) * mf_my(i,j,0)) : l_dx;
 
                 // For MRF, use power-law ceiling (SmnSmn not available)
                 K_turb(i, j, k, EddyDiff::Theta_v) = rho * pbl_kh_blend_and_cap(
                     K_turb(i, j, k, EddyDiff::Theta_v) * rho_inv,
-                    l_dx, l_blend_length, l_blend_cs, l_blend_cmax,
+                    l_dx_phys, l_blend_length, l_blend_cs, l_blend_cmax,
                     amrex::Real(-1.0), false);
 
                 K_turb(i, j, k, EddyDiff::Q_v) = rho * pbl_kh_blend_and_cap(
                     K_turb(i, j, k, EddyDiff::Q_v) * rho_inv,
-                    l_dx, l_blend_length, l_blend_cs, l_blend_cmax,
+                    l_dx_phys, l_blend_length, l_blend_cs, l_blend_cmax,
                     amrex::Real(-1.0), false);
 
                 K_turb(i, j, k, EddyDiff::Scalar_v) = rho * pbl_kh_blend_and_cap(
                     K_turb(i, j, k, EddyDiff::Scalar_v) * rho_inv,
-                    l_dx, l_blend_length, l_blend_cs, l_blend_cmax,
+                    l_dx_phys, l_blend_length, l_blend_cs, l_blend_cmax,
                     amrex::Real(-1.0), false);
             }
 

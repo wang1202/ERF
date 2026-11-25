@@ -160,7 +160,9 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
     bool updated_prim = false;
     for (OrientationIter oit; oit; ++oit) {
         Orientation ori = oit();
-        if (phys_bc_type[ori] == ERF_BC::surface_layer && m_SurfaceLayer[ori]) {
+        const bool eb_surface_layer = static_cast<int>(ori) == Orientation::zlo() && use_eb_surface_layer();
+        if ((phys_bc_type[ori] == ERF_BC::surface_layer) || eb_surface_layer) {
+            AMREX_ALWAYS_ASSERT(m_SurfaceLayer[ori]);
             if (!updated_prim) {
                 // This only needs to be done once
                 IntVect ng = Theta_prim[lev]->nGrowVect();
@@ -485,8 +487,8 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
 
             state_old[IntVars::zmom].FillBoundary(geom[lev].periodicity());
             state_new[IntVars::zmom].FillBoundary(geom[lev].periodicity());
-            FPr_w[lev].RegisterCoarseData({&state_old[IntVars::zmom], &state_new[IntVars::zmom]},
-                                          {time, time+dt_lev});
+            RegisterCoarseZMomentumCF(lev, state_old[IntVars::zmom], state_new[IntVars::zmom],
+                                      {time, time+dt_lev});
         }
 
             //
@@ -554,6 +556,20 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
                                 vars_old[lev][Vars::xvel], vars_old[lev][Vars::yvel],
                                 vars_new[lev][Vars::xvel], vars_new[lev][Vars::yvel],
                                 *z_phys_cc[lev], ba2d[lev], Geom(lev), precip_sources);
+    }
+#endif
+
+#ifdef ERF_USE_FLOOD
+    // Advance the flood on the level its grid refines (erf.flood.anchor_level),
+    // with the wind after the dycore and, when the engine asks for it, the
+    // surface precipitation of this step's microphysics. Nothing returns.
+    if (m_flood_coupler && lev == m_flood_coupler->level()) {
+        const SurfacePrecipAccumulationSources precip_sources =
+            micro ? micro->Get_Surface_Precip_Accumulation_Ptrs(lev)
+                  : SurfacePrecipAccumulationSources{};
+        m_flood_coupler->advance(time, dt_lev,
+                                 vars_new[lev][Vars::xvel], vars_new[lev][Vars::yvel],
+                                 *z_phys_cc[lev], precip_sources);
     }
 #endif
 

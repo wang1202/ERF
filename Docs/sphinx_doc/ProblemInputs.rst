@@ -127,7 +127,7 @@ so that the plane lies at zero. Cells with :math:`r > 1` are not changed, and th
 wrapped across periodic boundaries (WRF's is not either): a bubble that crosses a periodic
 boundary is cut there.
 
-- **Compressible:** the bubble is made at constant pressure, as WRF makes it: :math:`\rho\theta`
+- **Evolving density (compressible or pseudo-incompressible):** the bubble is made at constant pressure, as WRF makes it: :math:`\rho\theta`
   and the mixing ratio :math:`q_v` are kept and the density drops to
   :math:`\rho\theta / (\theta + \theta')`, so the bubble starts buoyant and with no pressure
   pulse. Other moisture species are not rescaled. WRF also re-integrates the geopotential of
@@ -138,7 +138,7 @@ boundary is cut there.
 
 The bubble is added to the random (``T_0_Pert_Mag``) and sinusoidal (``pert_deltaT``)
 perturbations when those are set as well. WRF places the center on the mass point
-:math:`i_c = (\mathrm{ide}-\mathrm{ids})/2` (rounded down), whose centre is
+:math:`i_c = (\mathrm{ide}-\mathrm{ids})/2` (rounded down), whose center is
 :math:`x_c = (i_c - 1/2)\,\Delta x` from the domain's west edge: for an even number of cells,
 half a cell short of the domain center (and likewise in y). Use that value to match WRF exactly.
 

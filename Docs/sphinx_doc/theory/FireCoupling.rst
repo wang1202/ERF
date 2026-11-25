@@ -234,7 +234,19 @@ a GPU build its data is on the device:
 
 **Shared helpers.** ``fill_fire_wind_from_interpolation``
 (``ERF_FireWindExtract.H``) samples the 3D wind at a height above ground on
-the fire grid; ``extract_fire_wind_k0`` gives the wind of the lowest cell of
+the fire grid. Below the lowest cell center, and when the engine samples
+higher and brings the wind down, it uses the neutral log profile
+:math:`U(z) = U(z_1)\,\ln(z/z_0)/\ln(z_1/z_0)`; :math:`z_0` is one roughness
+length the engine passes, or, when the engine passes a field of roughness per
+atmospheric column, the roughness of each column it samples. Such a field is a
+copy of the surface layer's :math:`z_0` (``SurfaceLayer::get_z0``, which a
+fire engine can call on its const surface layer) on the level's
+:math:`k = 0` slabs, with its interior and periodic ghost cells filled,
+refreshed every step where the sea roughness varies in time. Across a
+non-periodic edge of the fire grid's region a column outside it takes the edge
+column's roughness. When a log profile is used, the sampler aborts unless
+every value is positive and :math:`e\,z_0` does not exceed the lowest height
+the profile is evaluated at. ``extract_fire_wind_k0`` gives the wind of the lowest cell of
 each atmospheric column and its height above that column's ground, for an
 engine driven by the lowest-cell wind; ``compute_fire_surface_height``
 (``ERF_FireSurfaceHeight.H``) gives the ground of each fire cell's column.
@@ -284,7 +296,7 @@ fire grid's level and distributed vertically with an exponential profile,
 where :math:`z` is height above the first cell center of the column (the
 profile's datum, half a cell above the terrain, so the lowest cell takes the
 share :math:`1 - e^{-\Delta z_1/\alpha_g}` of the flux, with
-:math:`\Delta z_1` the distance from the first cell centre to the second, and
+:math:`\Delta z_1` the distance from the first cell center to the second, and
 nothing is lost below it) and
 :math:`\alpha_g` = :cpp:`erf.fire.heat_flux_alfg` (default 45 m) is the
 e-folding depth: 37% of the flux remains at 45 m and less than 1% at 225 m.
@@ -349,8 +361,8 @@ immersed-forcing scalar relaxation, radiative heating or Rayleigh damping;
 ``"add"`` accumulates the fire tendency into the freshly rebuilt source, once
 per stage, so nothing is lost and nothing is double counted. Use ``"add"``
 whenever another source writes into those slots: immersed forcing applied on
-the slow step (``erf.immersed_forcing_substep = false``, the anelastic
-default), radiative heating, Rayleigh damping. With immersed forcing on the
+the slow step (``erf.immersed_forcing_substep = false``, the default when any
+level is anelastic or pseudo-incompressible), radiative heating, Rayleigh damping. With immersed forcing on the
 acoustic substeps (the compressible default) the scalar relaxation never
 meets the slow-step source and the two modes are identical, as they are with
 no other source. Because the default would silently drop such a source, a run

@@ -84,7 +84,8 @@ ERF::make_eb_factories (int lev, const BoxArray& ba, const DistributionMapping& 
         const amrex::EB2::IndexSpace& ebis = amrex::EB2::IndexSpace::top();
         const EB2::Level& eb_level = ebis.getLevel(geom[lev]);
         if (solverChoice.terrain_type == TerrainType::EB) {
-            eb[lev]->make_all_factories(lev, geom[lev], ba, dm, eb_level);
+            eb[lev]->make_all_factories(lev, geom[lev], ba, dm, eb_level,
+                                        solverChoice.ebChoice.eb_cover_zero_area_faces);
         } else if (solverChoice.terrain_type == TerrainType::ImmersedForcing ||
                    solverChoice.buildings_type == BuildingsType::ImmersedForcing) {
             if (use_native_fc_factories()) {
@@ -408,7 +409,17 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
     // holds erf.is_land of the level. Not on a restart: the parent holds the scalar
     // defaults here and the mask is still erf.is_land, and the checkpoint read sets the
     // state and the mask of every level afterwards.
-    if (restart_chkfile.empty()) { fill_seb_from_coarse(lev); }
+    if (restart_chkfile.empty()) {
+        fill_seb_from_coarse(lev);
+        // With erf.radiation.seb_init_skin_from_file the land columns of a level that read
+        // an initial file then start from that file's skin temperature. After the fill:
+        // the level's own file is the finer source. A level with no file keeps the fill,
+        // which reads the parent's skin that was set here a moment ago.
+        init_seb_skin_from_file(lev);
+        // With erf.radiation.seb_init_t_deep_from_file the same for the deep temperature,
+        // from the file's TMN.
+        init_seb_t_deep_from_file(lev);
+    }
 
     // Initialize the non-cons auxiliary tracer only after the host atmospheric
     // density has been initialized from the selected problem configuration.
@@ -623,8 +634,8 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
     //
     // AmrCore::regrid does not call SetBoxArray/SetDistributionMap for this new level
     // until MakeNewLevelFromCoarse returns, so grids[lev]/dmap[lev] are still empty here.
-    // Any subsequent calls that utilize grids[lev]/dmap[lev] will then fail (e.g. anelastic
-    // velocity projection below).
+    // Any subsequent calls that utilize grids[lev]/dmap[lev] will then fail (e.g. the
+    // anelastic or pseudo-incompressible velocity projection below).
     // ****************************************************************************************
     SetBoxArray(lev, ba);
     SetDistributionMap(lev, dm);
@@ -640,6 +651,12 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
     //      terrain arrays, ba2d, metric terms and base state.
     // *******************************************************************************************
     init_stuff(lev, ba, dm, vars_new[lev], vars_old[lev], base_state[lev], z_phys_nd[lev]);
+
+    // init_stuff leaves map factors of 1.  A level with no init file of its own takes them from
+    // the coarser level; do that now, as MakeNewLevelFromScratch and RemakeLevel do, so they are
+    // in place for the detJ average-down below (average_down_detJ reads them).  Interp2DArrays,
+    // further down, does it again, to the same values.
+    if (!has_own_init_file(lev)) { interp_mapfac_from_coarse(lev); }
 
     // FillCoarsePatch fills the faces of the new level that touch fluid.  A face between two
     // covered cells it leaves as it is, so start every face at rest, as the initial state of a
@@ -697,11 +714,12 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
         //       derived from z_phys_nd, which is not averaged down either, so averaging only
         //       the cell-centered heights made the two disagree inside the refined region.
         //
-        //       detJ IS still averaged down: AverageDownTo weights (rho S) by detJ_cc before
-        //       averaging and divides by it afterwards, so the coarse detJ must be the average
-        //       of the fine detJ for that average-down to telescope and stay conservative.
+        //       detJ IS still averaged down: AverageDownTo weights (rho S) by the cell volume
+        //       detJ_cc/(m_x m_y) before averaging and divides by it afterwards, so the coarse
+        //       volume must be the mean of the fine ones (average_down_detJ) for that
+        //       average-down to telescope, stay conservative and keep a uniform value uniform.
         for (int crse_lev = lev-1; crse_lev >= 0; crse_lev--) {
-            average_down(  *detJ_cc[crse_lev+1],   *detJ_cc[crse_lev], 0, 1, refRatio(crse_lev));
+            average_down_detJ(crse_lev);
 
             //
             // Keep the halo in step with the valid cells we just replaced.  The coarse detJ
@@ -860,14 +878,14 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
         // read from its file, when detJ_cc[lev] still held the init_stuff placeholder
         // of one -- so it stamped 1.0 into the coarse detJ under this level's
         // footprint. Repeat it now that the real fine detJ exists: AverageDownTo
-        // weights (rho S) by detJ_cc before averaging and divides by the coarse detJ
-        // afterwards, so a coarse detJ that is not the average of the fine one
-        // (let alone a placeholder ~9x too large) scales every covered coarse cell
-        // wrongly on the first two-level step.
+        // weights (rho S) by the cell volume detJ_cc/(m_x m_y) before averaging and
+        // divides by the coarse volume afterwards, so a coarse volume that is not the
+        // mean of the fine ones (let alone a placeholder ~9x too large) scales every
+        // covered coarse cell wrongly on the first two-level step.
         if ( (SolverChoice::mesh_type != MeshType::ConstantDz) &&
              (solverChoice.coupling_type == CouplingType::TwoWay) ) {
             for (int crse_lev = lev-1; crse_lev >= 0; crse_lev--) {
-                average_down(*detJ_cc[crse_lev+1], *detJ_cc[crse_lev], 0, 1, refRatio(crse_lev));
+                average_down_detJ(crse_lev);
 
                 // Keep the halo in step with the valid cells we just replaced (see the note on
                 // the first average-down in MakeNewLevelFromCoarse).
@@ -968,10 +986,11 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
     }
 
     // ********************************************************************************************
-    // For anelastic levels created from coarse (either on restart or during a run), project the
-    // interpolated velocity to enforce the divergence-free constraint. This Initializes gradp[lev]
-    // via the pressure projection, handling both the pure-anelastic case and the hybrid case
-    // (compressible lev-1, anelastic lev) where there is no coarse gradp to interpolate.
+    // For anelastic or pseudo-incompressible levels created from coarse (either on restart or during
+    // a run), project the interpolated velocity to enforce the level's divergence constraint. This
+    // initializes gradp[lev] via the pressure projection, which is where these levels get their
+    // pressure gradient, handling both the case where lev-1 also projects and the hybrid case
+    // (compressible lev-1) where there is no coarse gradp to interpolate.
     // FillPatchers must be constructed above before this call. pp_inc is scratch; zero afterward.
     // ********************************************************************************************
     if (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible) {
@@ -1044,7 +1063,9 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
     // ********************************************************************************************
     for (OrientationIter oit; oit; ++oit) {
         Orientation ori = oit();
-        if (phys_bc_type[ori] == ERF_BC::surface_layer) {
+        const bool eb_surface_layer = static_cast<int>(ori) == Orientation::zlo() && use_eb_surface_layer();
+        if ((phys_bc_type[ori] == ERF_BC::surface_layer) || eb_surface_layer) {
+            AMREX_ALWAYS_ASSERT(m_SurfaceLayer[ori]);
             Vector<MultiFab*> mfv_old = {&vars_old[lev][Vars::cons], &vars_old[lev][Vars::xvel],
                                          &vars_old[lev][Vars::yvel], &vars_old[lev][Vars::zvel]};
             m_SurfaceLayer[ori]->make_SurfaceLayer_at_level(lev,lev+1,
@@ -1052,7 +1073,7 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
                                                             Qr_prim[lev], z_phys_nd[lev],
                                                             Hwave[lev].get(), Lwave[lev].get(), eddyDiffs_lev[lev].get(),
                                                             lsm_data[lev], lsm_data_name, lsm_flux[lev], lsm_flux_name,
-                                                            sst_lev[lev], tsk_lev[lev], lmask_lev[lev]);
+                                                            sst_lev[lev], tsk_lev[lev], lmask_lev[lev], &mapfac[lev]);
         }
     }
 
@@ -1353,11 +1374,12 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
         //       derived from z_phys_nd, which is not averaged down either, so averaging only
         //       the cell-centered heights made the two disagree inside the refined region.
         //
-        //       detJ IS still averaged down: AverageDownTo weights (rho S) by detJ_cc before
-        //       averaging and divides by it afterwards, so the coarse detJ must be the average
-        //       of the fine detJ for that average-down to telescope and stay conservative.
+        //       detJ IS still averaged down: AverageDownTo weights (rho S) by the cell volume
+        //       detJ_cc/(m_x m_y) before averaging and divides by it afterwards, so the coarse
+        //       volume must be the mean of the fine ones (average_down_detJ) for that
+        //       average-down to telescope, stay conservative and keep a uniform value uniform.
         for (int crse_lev = lev-1; crse_lev >= 0; crse_lev--) {
-            average_down(  *detJ_cc[crse_lev+1],   *detJ_cc[crse_lev], 0, 1, refRatio(crse_lev));
+            average_down_detJ(crse_lev);
 
             // Keep the halo in step with the valid cells we just replaced (see the note on
             // the first average-down in MakeNewLevelFromCoarse).
@@ -1453,7 +1475,7 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
         FillPatchFineLevel(lev, time, {&temp_lev_new[Vars::cons],&temp_lev_new[Vars::xvel],
                            &temp_lev_new[Vars::yvel],&temp_lev_new[Vars::zvel]},
                           {&temp_lev_new[Vars::cons],&rU_new[lev],&rV_new[lev],&rW_new[lev]},
-                           false);
+                           false, false, true, true);
     } else {
         //
         // The base state may be copied from its halo as well as its valid region: the
@@ -1470,7 +1492,7 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
         // reads only the valid region of cons/xvel/yvel/zvel and then deliberately poisons
         // their halos with bogus_large_value (Source/IO/ERF_Checkpoint.cpp -- the only
         // setBndry calls on state in the code).  An old box's interior halo overlaps its
-        // neighbour's valid region, and ParallelCopy intersects the GROWN source box with
+        // neighbor's valid region, and ParallelCopy intersects the GROWN source box with
         // the grown destination boxes with no exclusion and no ordering guarantee between
         // overlapping sources.  Offering those halos would therefore land 1e150 in valid
         // cells of the new grids -- which is how a level-0 regrid on restart used to reach
@@ -1597,7 +1619,7 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
     }
 
     // ********************************************************************************************
-    // Re-establish the pressure gradient on an anelastic level.
+    // Re-establish the pressure gradient on an anelastic or pseudo-incompressible level.
     //
     // init_stuff has just re-defined gradp[lev] on the new grids and zeroed it.
     // MakeNewLevelFromCoarse recovers it with a projection; without the same call here every
@@ -1794,7 +1816,8 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
     for (OrientationIter oit; oit; ++oit) {
         Orientation ori = oit();
         if (m_SurfaceLayer[ori] != nullptr) {
-            if (phys_bc_type[ori] == ERF_BC::surface_layer) {
+            const bool eb_surface_layer = static_cast<int>(ori) == Orientation::zlo() && use_eb_surface_layer();
+            if ((phys_bc_type[ori] == ERF_BC::surface_layer) || eb_surface_layer) {
                 int nlevs = finest_level+1;
                 Vector<MultiFab*> mfv_old = {&vars_old[lev][Vars::cons], &vars_old[lev][Vars::xvel],
                                              &vars_old[lev][Vars::yvel], &vars_old[lev][Vars::zvel]};
@@ -1803,7 +1826,7 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
                                                                 Qr_prim[lev], z_phys_nd[lev],
                                                                 Hwave[lev].get(),Lwave[lev].get(),eddyDiffs_lev[lev].get(),
                                                                 lsm_data[lev], lsm_data_name, lsm_flux[lev], lsm_flux_name,
-                                                                sst_lev[lev], tsk_lev[lev], lmask_lev[lev]);
+                                                                sst_lev[lev], tsk_lev[lev], lmask_lev[lev], &mapfac[lev]);
             }
         }
     }

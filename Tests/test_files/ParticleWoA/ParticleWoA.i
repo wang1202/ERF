@@ -37,6 +37,7 @@ tracer_particles.place_randomly_in_cells = false
 
 # TIME STEP CONTROL
 erf.fixed_dt           = 1E-3
+erf.fixed_dt_cfl_limit = false  # keep the fixed dt the test was set up with (erf-model/ERF#5238)
 erf.fixed_mri_dt_ratio = 12
 
 # DIAGNOSTICS & VERBOSITY
@@ -63,6 +64,10 @@ erf.les_type = "None"
 # TERRRAIN GRID TYPE
 erf.terrain_type = StaticFittedMesh
 erf.terrain_smoothing = 0
+
+# Keep the constant beta_s that the gold files were made with (no automatic switch
+# to the variable beta_s over the steep hill)
+erf.use_variable_beta_s = false
 
 erf.dycore_horiz_adv_type  = Centered_2nd
 erf.dycore_vert_adv_type   = Centered_2nd

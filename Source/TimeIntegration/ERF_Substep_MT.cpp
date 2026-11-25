@@ -230,6 +230,8 @@ void erf_substep_MT (int step, int /*nrk*/,
         const Array4<const Real>& mf_mx = mapfac[MapFacType::m_x]->const_array(mfi);
         const Array4<const Real>& mf_my = mapfac[MapFacType::m_y]->const_array(mfi);
         const Array4<const Real>& mf_ux = mapfac[MapFacType::u_x]->const_array(mfi);
+        const Array4<const Real>& mf_uy = mapfac[MapFacType::u_y]->const_array(mfi);
+        const Array4<const Real>& mf_vx = mapfac[MapFacType::v_x]->const_array(mfi);
         const Array4<const Real>& mf_vy = mapfac[MapFacType::v_y]->const_array(mfi);
 
         // *********************************************************************
@@ -461,20 +463,22 @@ void erf_substep_MT (int step, int /*nrk*/,
         {
             Real h_zeta_stg_xlo = Compute_h_zeta_AtIface(i,  j  , k, dxInv, z_nd_stg);
             Real h_zeta_stg_xhi = Compute_h_zeta_AtIface(i+1,j  , k, dxInv, z_nd_stg);
-            Real xflux_lo = cur_xmom(i  ,j,k) - stg_xmom(i  ,j,k)*h_zeta_stg_xlo;
-            Real xflux_hi = cur_xmom(i+1,j,k) - stg_xmom(i+1,j,k)*h_zeta_stg_xhi;
+            Real xflux_lo = (cur_xmom(i  ,j,k) - stg_xmom(i  ,j,k)*h_zeta_stg_xlo) / mf_uy(i  ,j,0);
+            Real xflux_hi = (cur_xmom(i+1,j,k) - stg_xmom(i+1,j,k)*h_zeta_stg_xhi) / mf_uy(i+1,j,0);
 
             Real h_zeta_stg_yhi = Compute_h_zeta_AtJface(i,  j+1, k, dxInv, z_nd_stg);
             Real h_zeta_stg_ylo = Compute_h_zeta_AtJface(i,  j  , k, dxInv, z_nd_stg);
-            Real yflux_lo = cur_ymom(i,j  ,k) - stg_ymom(i,j  ,k)*h_zeta_stg_ylo;
-            Real yflux_hi = cur_ymom(i,j+1,k) - stg_ymom(i,j+1,k)*h_zeta_stg_yhi;
+            Real yflux_lo = (cur_ymom(i,j  ,k) - stg_ymom(i,j  ,k)*h_zeta_stg_ylo) / mf_vx(i,j  ,0);
+            Real yflux_hi = (cur_ymom(i,j+1,k) - stg_ymom(i,j+1,k)*h_zeta_stg_yhi) / mf_vx(i,j+1,0);
+
+            Real mfsq = mf_mx(i,j,0) * mf_my(i,j,0);
 
             // NOTE: we are saving the (1/J) weighting for later when we add this to rho and theta
-            temp_rhs_arr(i,j,k,0) = ( xflux_hi - xflux_lo ) * dxi + ( yflux_hi - yflux_lo ) * dyi;
+            temp_rhs_arr(i,j,k,0) = ( xflux_hi - xflux_lo ) * dxi * mfsq + ( yflux_hi - yflux_lo ) * dyi * mfsq;
             temp_rhs_arr(i,j,k,1) = (( xflux_hi * (prim(i,j,k,0) + prim(i+1,j,k,0)) -
-                                       xflux_lo * (prim(i,j,k,0) + prim(i-1,j,k,0)) ) * dxi +
+                                       xflux_lo * (prim(i,j,k,0) + prim(i-1,j,k,0)) ) * dxi * mfsq +
                                      ( yflux_hi * (prim(i,j,k,0) + prim(i,j+1,k,0)) -
-                                       yflux_lo * (prim(i,j,k,0) + prim(i,j-1,k,0)) ) * dyi) * myhalf;
+                                       yflux_lo * (prim(i,j,k,0) + prim(i,j-1,k,0)) ) * dyi * mfsq) * myhalf;
 
             if (l_reflux) {
                 (flx_arr[0])(i,j,k,0) = xflux_lo;
@@ -500,13 +504,13 @@ void erf_substep_MT (int step, int /*nrk*/,
         {
             Real h_zeta_new = Compute_h_zeta_AtIface(i, j, k, dxInv, z_nd_new);
             cur_xmom(i, j, k) /= h_zeta_new;
-            avg_xmom_arr(i,j,k) += facinv*(cur_xmom(i,j,k) - stg_xmom(i,j,k));
+            avg_xmom_arr(i,j,k) += facinv*(cur_xmom(i,j,k) - stg_xmom(i,j,k)) / mf_uy(i,j,0);
         },
         [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
             Real h_zeta_new = Compute_h_zeta_AtJface(i, j, k, dxInv, z_nd_new);
             cur_ymom(i, j, k) /= h_zeta_new;
-            avg_ymom_arr(i,j,k) += facinv*(cur_ymom(i,j,k) - stg_ymom(i,j,k));
+            avg_ymom_arr(i,j,k) += facinv*(cur_ymom(i,j,k) - stg_ymom(i,j,k)) / mf_vx(i,j,0);
         });
 
         Box bx_shrunk_in_k = bx;
@@ -584,7 +588,7 @@ void erf_substep_MT (int step, int /*nrk*/,
             Real Omega_km1 = omega_arr(i,j,k-1);
 
             // Explicit part of the vertical flux on each face is beta_1 * Omega. beta_1 on face k
-            // is factored out, and dbeta_1 is how much larger beta_1 is on the neighbouring faces,
+            // is factored out, and dbeta_1 is how much larger beta_1 is on the neighboring faces,
             // which is exactly zero (so the roundoff is that of a scalar beta_1) for uniform beta_s
             Real beta_1      = myhalf * (one - beta_s_a(i,j,k));
             Real dbeta_1_kp1 = myhalf * (one - beta_s_a(i,j,k+1)) - beta_1;
@@ -610,7 +614,7 @@ void erf_substep_MT (int step, int /*nrk*/,
             // matrix has beta_2 soln and lines 4-7 have beta_1 omega, so add the beta_2 part of the
             // grid-velocity terms here. As for beta_1 above,
             // beta_2 of face k is factored out and dbeta_2 (exactly zero for uniform beta_s) carries the
-            // difference of the neighbouring faces
+            // difference of the neighboring faces
             Real beta_2      = myhalf * (one + beta_s_a(i,j,k));
             Real dbeta_2_kp1 = myhalf * (one + beta_s_a(i,j,k+1)) - beta_2;
             Real dbeta_2_km1 = myhalf * (one + beta_s_a(i,j,k-1)) - beta_2;

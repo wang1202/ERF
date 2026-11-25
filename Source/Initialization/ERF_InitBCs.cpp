@@ -215,7 +215,7 @@ void ERF::init_phys_bcs (bool& read_prim_theta)
             }
 
             // A value given on this face: conserved with <face>.density when compressible;
-            // primitive when anelastic, made conserved with the interior
+            // primitive when anelastic or pseudo-incompressible (no <face>.density), made conserved with the interior
             // density as the ghost cells are filled (ext_dir_prim, or ext_dir_upwind with
             // Rho not prescribed)
             auto set_inflow_value = [&] (int bccomp, Real value) {
@@ -305,7 +305,7 @@ void ERF::init_phys_bcs (bool& read_prim_theta)
                 }
             }
 
-            // An anelastic face that gives any of these values brings in zero of every other
+            // An anelastic or pseudo-incompressible face that gives any of these values brings in zero of every other
             // component it does not give, as a compressible face with <face>.density does;
             // a face that gives none takes them all from the interior.  Theta is never set to
             // zero: when it is not given it is extrapolated from the interior
@@ -443,7 +443,8 @@ void ERF::init_bcs ()
     // With EB terrain the surface layer is applied on the EB surface, not on a
     // domain face: erf_slow_rhs_pre calls only the zlo SurfaceLayer's
     // impose_SurfaceLayer_bcs_EB, which writes Tau_EB, and Tau_EB is allocated
-    // only when erf.eb_boundary_type = SurfaceLayer. The two inputs must agree.
+    // only when erf.eb_boundary_type = SurfaceLayer. That setting owns the EB
+    // SurfaceLayer independently of the physical zlo boundary type.
     if (solverChoice.terrain_type == TerrainType::EB) {
         const bool zlo_surface_layer =
             (phys_bc_type[Orientation(Direction::z,Orientation::low)] == ERF_BC::surface_layer);
@@ -456,10 +457,6 @@ void ERF::init_bcs ()
         if (zlo_surface_layer && !eb_surface_layer) {
             Abort("erf.terrain_type = EB with zlo.type = surface_layer requires "
                   "erf.eb_boundary_type = SurfaceLayer (the default is NoSlipWall)");
-        }
-        if (eb_surface_layer && !zlo_surface_layer) {
-            Abort("erf.eb_boundary_type = SurfaceLayer requires zlo.type = surface_layer, "
-                  "which builds the surface layer model and reads erf.most.*");
         }
     }
 
@@ -506,6 +503,16 @@ void ERF::init_bcs ()
                   "of k (Axell & Liungman Eq. 16) is computed by the surface layer model");
         }
         Print() << "Using dirichlet wall value for the k equation (held in the first cell)" << std::endl;
+    }
+
+    // The log-consistent shear of the k-eqn RANS (erf.rans_shear_stencil = log_law) reads the
+    // roughness length of the surface layer at zlo
+    for (int lev = 0; lev <= max_level; ++lev) {
+        if (solverChoice.turbChoice[lev].rans_shear_stencil == RANSShearStencil::log_law &&
+            phys_bc_type[Orientation(Direction::z,Orientation::low)] != ERF_BC::surface_layer) {
+            Error("erf.rans_shear_stencil = log_law requires zlo.type = surface_layer: the stencil "
+                  "uses the roughness length of the surface layer (level " + std::to_string(lev) + ")");
+        }
     }
 
     // k-eqn RANS under a surface layer without the Dirichlet wall value: the
@@ -783,7 +790,7 @@ void ERF::init_bcs ()
                             domain_bcs_type[BCVars::cons_bc+i].setLo(dir, ERFBCType::ext_dir_ingested);
                         }
                         else if (m_bc_prim_given[BCVars::cons_bc+i][ori]) {
-                            // anelastic: the given primitive value times the interior density
+                            // anelastic or pseudo-incompressible: the given primitive value times the interior density
                             domain_bcs_type[BCVars::cons_bc+i].setLo(dir, ERFBCType::ext_dir_prim);
                         }
                         else if (m_bc_extdir_vals[BCVars::Rho_bc_comp][ori] == 0) {
@@ -814,7 +821,7 @@ void ERF::init_bcs ()
                             domain_bcs_type[BCVars::cons_bc+i].setHi(dir, ERFBCType::ext_dir_ingested);
                         }
                         else if (m_bc_prim_given[BCVars::cons_bc+i][ori]) {
-                            // anelastic: the given primitive value times the interior density
+                            // anelastic or pseudo-incompressible: the given primitive value times the interior density
                             domain_bcs_type[BCVars::cons_bc+i].setHi(dir, ERFBCType::ext_dir_prim);
                         }
                         else if (m_bc_extdir_vals[BCVars::Rho_bc_comp][ori] == 0) {

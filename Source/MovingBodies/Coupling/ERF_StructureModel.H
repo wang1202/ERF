@@ -79,7 +79,8 @@ struct StructureInit
     bool                   keqn_rans;         ///< Level lev runs the k-equation RANS closure, so cons holds rho k
     amrex::Real            Cmu0;              ///< The closure's C_mu^0 on level lev
     std::string            restart_chkfile;   ///< The checkpoint ERF restarts from; empty on a fresh start
-    /// The nominal step of level lev [s]: erf.fixed_dt divided by the sub-cycling ratios down to lev.
+    /// The nominal step of level lev [s]: erf.fixed_dt divided by the sub-cycling ratios down to lev,
+    /// after the CFL limit of erf.fixed_dt_cfl_limit; ERF calls fixed_dt_changed() if it lowers it later.
     /// Not positive when the run has no fixed step (ERF then chooses each step from erf.cfl).
     /// StructureStep::dt is the step taken: it differs on the first steps with erf.init_shrink
     /// below 1 or after a restart (growth limited by erf.change_max), and on a last step that
@@ -105,7 +106,7 @@ struct StructureInit
  * The fire engine's fields (the getters of ERF_FireEngine.H) on the fire grid: a
  * horizontal grid, one cell in z, that refines one atmospheric level
  * (erf.fire.anchor_level). That level need not be the one the model couples to.
- * Fire cell (i, j) has its centre at geom.ProbLo() + ((i + 1/2) dx, (j + 1/2) dy),
+ * Fire cell (i, j) has its center at geom.ProbLo() + ((i + 1/2) dx, (j + 1/2) dy),
  * in the coordinates of the model's own points.
  *
  * The fields are the engine's state at time: the time ERF assigns to the fire's
@@ -214,6 +215,16 @@ public:
     virtual void initialize (const StructureInit& init) = 0;
 
     /**
+     * @brief ERF lowered the fixed step after initialize()
+     *
+     * With erf.fixed_dt_cfl_limit, ERF lowers the fixed step on all levels when a regrid makes
+     * grids on which it exceeds erf.cfl.  fixed_dt is the new StructureInit::fixed_dt of level
+     * lev (the level the model couples to); a step under way finishes at the old step. The
+     * default does nothing.
+     */
+    virtual void fixed_dt_changed (int lev, double fixed_dt) { amrex::ignore_unused(lev, fixed_dt); }
+
+    /**
      * @brief Advance the structures over one step of level()
      *
      * Samples the flow, advances the structures from step.time to step.time +
@@ -225,7 +236,7 @@ public:
     /**
      * @brief Add the structures' force on the air to the momentum sources
      *
-     * Face-centred sources on level lev [N/m^3, i.e. kg/(m^2 s^2)], added (not set),
+     * Face-centered sources on level lev [N/m^3, i.e. kg/(m^2 s^2)], added (not set),
      * held fixed over the step. Called at every Runge-Kutta stage, after ERF's
      * own sources. ERF applies no mask to them: the model keeps its kernels clear
      * of embedded boundaries, immersed terrain and buildings.
@@ -295,7 +306,7 @@ public:
     /**
      * @brief Fill the field plot_var_names() lists as name on level lev
      *
-     * One cell-centred component written into dst at component comp, on dst's
+     * One cell-centered component written into dst at component comp, on dst's
      * boxes, with no ghost cells; zero where the model has nothing (for example
      * on levels other than level()).
      */

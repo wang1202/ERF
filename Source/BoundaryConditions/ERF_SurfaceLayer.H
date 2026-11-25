@@ -37,12 +37,13 @@ planar_sources_supported_for_terrain (TerrainType terrain_type,
                                        bool use_tsk,
                                        bool use_coupled_sst,
                                        bool has_lsm_tsurf,
-                                       bool has_lsm_fluxes,
-                                       bool has_custom_roughness)
+                                       bool has_lsm_fluxes)
 {
-    return terrain_type != TerrainType::EB ||
-           !(use_sst || use_tsk || use_coupled_sst || has_lsm_tsurf ||
-             has_lsm_fluxes || has_custom_roughness);
+    if (terrain_type != TerrainType::EB) { return true; }
+
+    // EB supports this configuration only when all planar providers are absent.
+    return !use_sst && !use_tsk && !use_coupled_sst &&
+           !has_lsm_tsurf && !has_lsm_fluxes;
 }
 
 } // namespace erf_surface_layer
@@ -55,7 +56,7 @@ planar_sources_supported_for_terrain (TerrainType terrain_type,
  * 20(3), 479–amrex::Real(489.) https://doi.org/amrex::Real(10.1002)/we.2017
  *
  * Consistent with Dyer (1974) formulation from page 57, Chapter 2, Modeling
- * the vertical ABL structure in Modelling of Atmospheric Flow Fields,
+ * the vertical ABL structure in Modeling of Atmospheric Flow Fields,
  * Demetri P Lalas and Corrado F Ratto, January 1996,
  * https://doi.org/amrex::Real(10.1142)/amrex::Real(2975.)
  */
@@ -543,6 +544,7 @@ public:
    * @param[in]     sst_lev       sea-surface-temperature data by time
    * @param[in]     tsk_lev       skin-temperature data by time
    * @param[in]     lmask_lev     land-mask data by time
+   * @param[in]     mapfac        map-factor fields at the level (MapFacType); none means m = 1
    */
   void make_SurfaceLayer_at_level (const int& lev,
                                    int nlevs,
@@ -560,12 +562,13 @@ public:
                                    amrex::Vector<std::string>      lsm_flux_name,
                                    amrex::Vector<std::unique_ptr<amrex::MultiFab>>& sst_lev,
                                    amrex::Vector<std::unique_ptr<amrex::MultiFab>>& tsk_lev,
-                                   amrex::Vector<std::unique_ptr<amrex::iMultiFab>>& lmask_lev)
+                                   amrex::Vector<std::unique_ptr<amrex::iMultiFab>>& lmask_lev,
+                                   const amrex::Vector<std::unique_ptr<amrex::MultiFab>>* mapfac = nullptr)
   {
       // Update MOST Average
       m_ma.make_MOSTAverage_at_level(lev, mfv,
                                      Theta_prim, Qv_prim, Qr_prim,
-                                     z_phys_nd);
+                                     z_phys_nd, mapfac);
 
       // Get CC vars
       amrex::MultiFab& mf = *(mfv[0]);
@@ -842,12 +845,13 @@ public:
       // LSM flux arrays are planar and compute_sfc_params_from_lsm_fluxes only
       // writes the k=0 slab, while EB MOST consumes surface parameters at
       // arbitrary cut-cell k; no valid planar-to-cut-cell mapping exists yet.
+      // Custom roughness is a horizontal material property, handled separately.
       if (!erf_surface_layer::planar_sources_supported_for_terrain(
               m_terrain_type, use_sst, use_tsk, m_use_coupled_sst,
-              m_has_lsm_tsurf, m_has_lsm_fluxes, read_z0)) {
+              m_has_lsm_tsurf, m_has_lsm_fluxes)) {
           amrex::Abort(
               "EB SurfaceLayer does not support planar SST/TSK, coupled SST, LSM surface "
-              "temperature or fluxes, or custom/file-driven roughness; no mapping exists "
+              "temperature or fluxes; no mapping exists "
               "from those planar inputs to arbitrary EB cut cells.");
       }
 
@@ -925,7 +929,7 @@ public:
           read_custom_roughness(lev, fname);
       }
 
-      // The surface layer normalises with ln(zref / z0), so the reference height
+      // The surface layer normalizes with ln(zref / z0), so the reference height
       // must lie above the roughness length in every column.  With the default
       // (the first cell center) a fine mesh over a rough surface can fail this.
       {
@@ -1367,7 +1371,7 @@ public:
    * moisture flux is beta times the potential one. With resistances:
    * erf_surface_moisture::two_source_surface_mixing_ratio of the aerodynamic resistance
    * (from the last u* and Obukhov length; neutral before the first flux), the canopy
-   * resistance with its vapour-deficit factor, the soil resistance and the soil pore air's
+   * resistance with its vapor-deficit factor, the soil resistance and the soil pore air's
    * relative humidity. Needs set_skin_temperature and the averages of this step.
    *
    * @param[in] lev       level index
@@ -1790,7 +1794,7 @@ public:
    *                            canopy's (two_source_surface_mixing_ratio), not from the
    *                            soil-water factor alone:
    *                            the two-stream balance passes true whenever it has a soil type
-   * @param[in] hs              the canopy's vapour-deficit parameter [1/(kg/kg)]; 0 without
+   * @param[in] hs              the canopy's vapor-deficit parameter [1/(kg/kg)]; 0 without
    *                            vegetation
    */
   void set_skin_moisture (const int& lev, const amrex::MultiFab* moisture,
@@ -1913,9 +1917,17 @@ public:
   amrex::MultiFab* get_z0 (const int& lev) { return &z_0[lev]; }
 
   /**
+   * Return the roughness-height field, read-only (for a caller that holds a
+   * const SurfaceLayer, such as a fire engine).
+   *
+   * @param[in] lev level index
+   */
+  const amrex::MultiFab* get_z0 (const int& lev) const { return &z_0[lev]; }
+
+  /**
    * Return whether variable sea roughness is active.
    */
-  bool have_variable_sea_roughness () { return m_var_z0; }
+  bool have_variable_sea_roughness () const { return m_var_z0; }
 
   /**
    * Return the land-mask field.
@@ -2028,7 +2040,7 @@ public:
 
   /**
    * Set the surface current on this level from an ocean coupler's current at the cell
-   * centres of the surface.
+   * centers of the surface.
    *
    * The current is rotated from east and north to the grid axes and averaged to the faces.
    * A face takes it where the cells on both sides of it are water (land mask 0) and covered
@@ -2040,11 +2052,11 @@ public:
    * be replaced by a later call.
    *
    * @param[in] lev       level index
-   * @param[in] east      eastward current [m/s], cell-centred on the 2D surface layout
+   * @param[in] east      eastward current [m/s], cell-centered on the 2D surface layout
    * @param[in] north     northward current [m/s], on the layout of east
    * @param[in] covered   nonzero where the ocean covers the cell, on the layout of east;
    *                      null when it covers none, as for the coupled SST
-   * @param[in] cos_alpha cosine of the angle of the grid x axis from east, cell-centred on
+   * @param[in] cos_alpha cosine of the angle of the grid x axis from east, cell-centered on
    *                      the 2D surface layout; null when the grid is aligned with east
    * @param[in] sin_alpha sine of that angle, on the layout of cos_alpha
    */

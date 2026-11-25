@@ -36,11 +36,13 @@ where :math:`\mathbf{S}` is the solution vector, in the following three steps:
 
 .. _AnelasticTimeAdvance:
 
-Anelastic Advance
----------------------
+Anelastic and Pseudo-Incompressible Advance
+-------------------------------------------
 
-When solving the anelastic rather than fully compressible equations, ERF supports
-a 2nd order Runge-Kutta method and the 2nd order midpoint method (both with no substepping).
+When solving the anelastic or pseudo-incompressible rather than fully compressible equations,
+ERF supports a 2nd order Runge-Kutta method and the 2nd order midpoint method (both with no
+substepping).  Both equation sets get their pressure from a projection at the end of each
+stage rather than from an equation of state, so neither needs the acoustic substeps.
 The midpoint method is the default; set ``erf.timestepping_type = RK2`` for the Runge-Kutta method.
 
 The 2nd order Runge-Kutta method solves
@@ -85,16 +87,21 @@ integrator:
   average over the acoustic substeps of the perturbation momenta, with the vertical
   off-centering :math:`\beta_1, \beta_2` described below.  This is the mass flux that
   advances :math:`\rho` over the stage.
-- **Anelastic, RK2:** :math:`(\rho \mathbf{u})^n` in the first stage and
+- **Anelastic or pseudo-incompressible, RK2:** :math:`(\rho \mathbf{u})^n` in the first stage and
   :math:`(\rho \mathbf{u})^{*}` in the second, the same momenta that advect
   :math:`\rho \theta`.  Each pairs a scalar with momenta from the same state, as the averaged
   update :math:`\frac{\Delta t}{2} ( f(\mathbf{S}^{n}) + f(\mathbf{S}^{*}) )` requires.
-- **Anelastic, MidPoint:** :math:`(\rho \mathbf{u})^n` in the first (half) stage and
+- **Anelastic or pseudo-incompressible, MidPoint:** :math:`(\rho \mathbf{u})^n` in the first (half) stage and
   :math:`(\rho \mathbf{u})^{*} = (\rho \mathbf{u})^{n+1/2}` in the second, again the same
   momenta that advect :math:`\rho \theta`.
 
-In the anelastic cases the momenta are projected at the end of each stage, so the momenta at
-the start of the next stage or step are divergence-free and a uniform scalar stays uniform.
+In these cases the momenta are projected at the end of each stage.  At an anelastic level the
+density is fixed, so the projected momenta at the start of the next stage or step are
+divergence-free and a uniform scalar stays uniform.  A pseudo-incompressible level evolves the
+density, as a compressible level does, so the projection makes
+:math:`\beta \, \rho \mathbf{u}` divergence-free instead (see
+:ref:`PseudoIncompressibleEquations`); a uniform mixing ratio stays uniform because it is
+advected with the same mass fluxes as :math:`\rho`.
 The pairing is the same with and without an embedded boundary.  With an embedded boundary the
 state redistribution in the cut cells is added to this update as a change to the stage's
 right-hand side, with the stage's weight (one half in the second RK2 stage), so the averaged RK2
@@ -181,7 +188,7 @@ Then the acoustic substepping evolves the equations in the form
             \right)
 
 where :math:`\beta_1 = 0.5 (1 - \beta_s)` and :math:`\beta_2 = 0.5 (1 + \beta_s)`, and
-:math:`\Theta_m = \Theta (1 + \frac{R_v}{R_d} q_v)` is the moist analogue of :math:`\Theta`
+:math:`\Theta_m = \Theta (1 + \frac{R_v}{R_d} q_v)` is the moist analog of :math:`\Theta`
 which accounts for the contribution of water vapor to the pressure.
 
 The second term in the :math:`W^{\prime \prime}` equation above arises from differentiating
@@ -205,7 +212,7 @@ surface and the vertical acoustic Courant number there.  With
 
 .. math::
 
-   \sigma^2 = \max\left(h_\xi^2 + h_\eta^2, \, 2 \times 10^{-6}\right), \qquad
+   \sigma^2 = \max\left(h_\xi^2 + h_\eta^2, \, 0.021\right), \qquad
    b = \frac{\sigma^2}{2 + \sigma^2}, \qquad
    Z = \frac{2 c_s \delta \tau}{\Delta z}, \qquad
    Z_{crit} = \frac{2 \sqrt{1 + \sigma^2}}{\sigma^2 \, (1 + b) / 2},
@@ -242,10 +249,23 @@ The vertical flux on a face is then weighted by
 :math:`\beta_1` and :math:`\beta_2` of that face, and the :math:`W^{\prime \prime}` equation on a
 face by :math:`\beta_2` of that face, so that the entries of the tridiagonal system for the face
 :math:`k` carry :math:`\beta_2` of face :math:`k` times :math:`\beta_2` of face :math:`k-1`,
-:math:`k` or :math:`k+1`.  Without terrain, :math:`\sigma^2` takes its floor value, so that
-:math:`Z_{crit} \approx 2 \times 10^6` and :math:`\beta_s \approx 10^{-6}`, i.e. essentially no
-off-centering, everywhere.  Over flat terrain, turning on ``erf.use_variable_beta_s`` therefore
-gives less acoustic damping than the default constant :math:`\beta_s = 0.1`.
+:math:`k` or :math:`k+1`.  Without terrain, :math:`\sigma^2` takes its floor value, chosen so
+that the amplification factor of the flat-terrain eigenvalue is about 0.99 per substep; then
+:math:`Z_{crit} \approx 190` and :math:`\beta_s` lies between :math:`b \approx 0.010` and
+:math:`0.021`.  Over flat terrain, ``erf.use_variable_beta_s`` therefore gives less acoustic
+damping than the default constant :math:`\beta_s = 0.1`; only the local stability limit on each
+face is met.
+
+If ``erf.use_variable_beta_s`` is not given in the inputs, it is turned on automatically when
+the constant :math:`\beta_s` would be unstable.  On a terrain-fitted mesh with implicit
+substepping, ERF compares ``erf.beta_s`` with the largest :math:`h_\xi^2 + h_\eta^2` over the
+:math:`w`-faces of each level whenever the level has a new set of grids (at initialization, on
+the first step after a restart, and right after a regrid, before the new grids take a step), and
+every coarse step on a moving terrain.  If ``erf.beta_s`` is below :math:`\min(\sigma^2, 1)`,
+the high-:math:`Z` stability limit, on any level, ``erf.use_variable_beta_s`` is set to true for
+all levels for the rest of the run and a message is printed.  The switch is saved in the
+checkpoint, so a restarted run keeps it.  Setting ``erf.use_variable_beta_s = false`` explicitly
+keeps the constant ``erf.beta_s``.
 
 To solve the coupled system, we first evolve the equations for :math:`U^{\prime \prime, \tau + \delta \tau}`  and
 :math:`V^{\prime \prime, \tau + \delta \tau}` explicitly using :math:`\Theta^{\prime \prime, \tau}` which is already known.
