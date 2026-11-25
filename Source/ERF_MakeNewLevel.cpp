@@ -1073,7 +1073,7 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
                                                             Qr_prim[lev], z_phys_nd[lev],
                                                             Hwave[lev].get(), Lwave[lev].get(), eddyDiffs_lev[lev].get(),
                                                             lsm_data[lev], lsm_data_name, lsm_flux[lev], lsm_flux_name,
-                                                            sst_lev[lev], tsk_lev[lev], lmask_lev[lev]);
+                                                            sst_lev[lev], tsk_lev[lev], lmask_lev[lev], &mapfac[lev]);
         }
     }
 
@@ -1475,7 +1475,7 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
         FillPatchFineLevel(lev, time, {&temp_lev_new[Vars::cons],&temp_lev_new[Vars::xvel],
                            &temp_lev_new[Vars::yvel],&temp_lev_new[Vars::zvel]},
                           {&temp_lev_new[Vars::cons],&rU_new[lev],&rV_new[lev],&rW_new[lev]},
-                           false);
+                           false, false, true, true);
     } else {
         //
         // The base state may be copied from its halo as well as its valid region: the
@@ -1826,7 +1826,7 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
                                                                 Qr_prim[lev], z_phys_nd[lev],
                                                                 Hwave[lev].get(),Lwave[lev].get(),eddyDiffs_lev[lev].get(),
                                                                 lsm_data[lev], lsm_data_name, lsm_flux[lev], lsm_flux_name,
-                                                                sst_lev[lev], tsk_lev[lev], lmask_lev[lev]);
+                                                                sst_lev[lev], tsk_lev[lev], lmask_lev[lev], &mapfac[lev]);
             }
         }
     }
