@@ -544,6 +544,7 @@ public:
    * @param[in]     sst_lev       sea-surface-temperature data by time
    * @param[in]     tsk_lev       skin-temperature data by time
    * @param[in]     lmask_lev     land-mask data by time
+   * @param[in]     mapfac        map-factor fields at the level (MapFacType); none means m = 1
    */
   void make_SurfaceLayer_at_level (const int& lev,
                                    int nlevs,
@@ -561,12 +562,13 @@ public:
                                    amrex::Vector<std::string>      lsm_flux_name,
                                    amrex::Vector<std::unique_ptr<amrex::MultiFab>>& sst_lev,
                                    amrex::Vector<std::unique_ptr<amrex::MultiFab>>& tsk_lev,
-                                   amrex::Vector<std::unique_ptr<amrex::iMultiFab>>& lmask_lev)
+                                   amrex::Vector<std::unique_ptr<amrex::iMultiFab>>& lmask_lev,
+                                   const amrex::Vector<std::unique_ptr<amrex::MultiFab>>* mapfac = nullptr)
   {
       // Update MOST Average
       m_ma.make_MOSTAverage_at_level(lev, mfv,
                                      Theta_prim, Qv_prim, Qr_prim,
-                                     z_phys_nd);
+                                     z_phys_nd, mapfac);
 
       // Get CC vars
       amrex::MultiFab& mf = *(mfv[0]);
@@ -1915,9 +1917,17 @@ public:
   amrex::MultiFab* get_z0 (const int& lev) { return &z_0[lev]; }
 
   /**
+   * Return the roughness-height field, read-only (for a caller that holds a
+   * const SurfaceLayer, such as a fire engine).
+   *
+   * @param[in] lev level index
+   */
+  const amrex::MultiFab* get_z0 (const int& lev) const { return &z_0[lev]; }
+
+  /**
    * Return whether variable sea roughness is active.
    */
-  bool have_variable_sea_roughness () { return m_var_z0; }
+  bool have_variable_sea_roughness () const { return m_var_z0; }
 
   /**
    * Return the land-mask field.

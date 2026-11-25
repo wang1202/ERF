@@ -9,6 +9,7 @@
 #include "ERF_TileNoZ.H"
 #include "ERF_MoistUtils.H"
 #include "ERF_PBLScaleAwareBlending.H"
+#include "ERF_LengthScaleCellSize.H"
 #include "ERF_PBLRibCrossing.H"
 
 using namespace amrex;
@@ -50,7 +51,8 @@ ComputeDiffusivityMRF (const MultiFab& xvel,
                        const std::unique_ptr<MultiFab>& z_phys_cc,
                        const MoistureComponentIndices& moisture_indices,
                        const MultiFab* terrain_blank,
-                       const MultiFab* Q_fire_atm)
+                       const MultiFab* Q_fire_atm,
+                       GpuArray<const MultiFab*, 2> mf_m)
 {
     const StratType pbl_strat = turbChoice.pbl_strat_type;
     /*
@@ -1058,8 +1060,13 @@ Real fire_kbfs_max      = Real(0);
         const amrex::Real scalar_Sc_t = turbChoice.pbl_mrf_Sc_t;
         const amrex::Real Pr_t_in     = turbChoice.Pr_t;
         //const bool        l_use_smag_ceil= turbChoice.pbl_blend_use_smag;
-        // dx: use horizontal spacing at this level (assume dx = dy for regular grids).
-        const amrex::Real l_dx = geom.CellSize(0);
+        // dx: use horizontal spacing at this level (assume dx = dy for regular grids); dy on a
+        // domain with one cell in x, where dx is arbitrary
+        // (computational spacing; the physical spacing divides it by sqrt(m_x m_y))
+        const amrex::Real l_dx = LengthScaleCellSize(geom)[0];
+        const bool l_use_mf = (mf_m[0] != nullptr && mf_m[1] != nullptr);
+        const Array4<const Real> mf_mx = (l_use_mf) ? mf_m[0]->const_array(mfi) : Array4<const Real>{};
+        const Array4<const Real> mf_my = (l_use_mf) ? mf_m[1]->const_array(mfi) : Array4<const Real>{};
 
         ParallelFor(gbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
         {
@@ -1260,21 +1267,22 @@ Real fire_kbfs_max      = Real(0);
             // hence increase with height (issue #3580).
             if (l_blend_length > 0.0) {
                 const Real rho_inv = Real(1.0) / rho;
+                const Real l_dx_phys = (l_use_mf) ? l_dx / std::sqrt(mf_mx(i,j,0) * mf_my(i,j,0)) : l_dx;
 
                 // For MRF, use power-law ceiling (SmnSmn not available)
                 K_turb(i, j, k, EddyDiff::Theta_v) = rho * pbl_kh_blend_and_cap(
                     K_turb(i, j, k, EddyDiff::Theta_v) * rho_inv,
-                    l_dx, l_blend_length, l_blend_cs, l_blend_cmax,
+                    l_dx_phys, l_blend_length, l_blend_cs, l_blend_cmax,
                     amrex::Real(-1.0), false);
 
                 K_turb(i, j, k, EddyDiff::Q_v) = rho * pbl_kh_blend_and_cap(
                     K_turb(i, j, k, EddyDiff::Q_v) * rho_inv,
-                    l_dx, l_blend_length, l_blend_cs, l_blend_cmax,
+                    l_dx_phys, l_blend_length, l_blend_cs, l_blend_cmax,
                     amrex::Real(-1.0), false);
 
                 K_turb(i, j, k, EddyDiff::Scalar_v) = rho * pbl_kh_blend_and_cap(
                     K_turb(i, j, k, EddyDiff::Scalar_v) * rho_inv,
-                    l_dx, l_blend_length, l_blend_cs, l_blend_cmax,
+                    l_dx_phys, l_blend_length, l_blend_cs, l_blend_cmax,
                     amrex::Real(-1.0), false);
             }
 
