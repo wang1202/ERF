@@ -156,6 +156,10 @@ target_sources(${erf_exe_name}
     # Motivation: where two open lateral boundaries meet, each boundary cell must be
     # written by exactly one open-BC kernel, and by the same one however the grid is split.
     ${CMAKE_CURRENT_SOURCE_DIR}/Advection/ERF_GTestOpenBCCorners.cpp
+    # Motivation: the open-boundary advection kernels must carry the map factors: a uniform
+    # map factor is a finer mesh, and with varying ones the tendency is m_x m_y times the
+    # divergence of the mass fluxes (erf-model/ERF#5359).
+    ${CMAKE_CURRENT_SOURCE_DIR}/Advection/ERF_GTestOpenBCMapFactors.cpp
     # Motivation: reusable scalar advection must honor explicit source, flux, and
     # tendency components instead of inferring primitive storage from native cons layout.
     ${CMAKE_CURRENT_SOURCE_DIR}/Advection/ERF_GTestScalarAdvection.cpp
@@ -548,6 +552,15 @@ if(ERF_ENABLE_NOAHMP)
     ${CMAKE_CURRENT_SOURCE_DIR}/LandSurfaceModel/Noah-MP/ERF_GTestNoahMPLevelDriver.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/LandSurfaceModel/Noah-MP/ERF_GTestNoahMPSnowFields.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/LandSurfaceModel/Noah-MP/ERF_GTestNoahMPCheckpointLayout.cpp
+  )
+endif()
+if(ERF_ENABLE_FIRE OR ERF_ENABLE_FLOOD)
+  # Motivation: the surface-coupling layer the fire and the flood couplings share must coarsen
+  # a level-0 surface field to the bits of amrex::average_down() (the fire coupling's level-0
+  # answers before the layer), and refuse unpaired grids, a nodal ghost fill, a grid ratio
+  # below 1 and a duplicate or empty engine name with the coupling's own names.
+  target_sources(${erf_exe_name} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/SurfaceCoupling/ERF_GTestSurfaceCoupling.cpp
   )
 endif()
 if(ERF_ENABLE_FIRE)
